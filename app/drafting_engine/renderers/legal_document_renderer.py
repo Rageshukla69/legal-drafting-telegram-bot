@@ -228,7 +228,20 @@ def _title_text(draft: dict[str, Any]) -> str:
 
 
 def _signature_lines(draft: dict[str, Any]) -> list[str]:
-    return [str(x).strip() for x in draft.get("signature_block", []) or [] if str(x).strip()]
+    lines = [str(x).strip() for x in draft.get("signature_block", []) or [] if str(x).strip()]
+    if lines:
+        return lines
+    # Fixed advocate profile for this project. It is presentation metadata,
+    # not a case fact, and therefore is inserted deterministically only when
+    # the draft does not already contain a signature block.
+    plaintiff = ""
+    for party in draft.get("parties", []) or []:
+        if "वादी" in str(party):
+            plaintiff = str(party).strip()
+            break
+    if plaintiff:
+        return [f"वादी\n{plaintiff}", "द्वारा अधिवक्ता-", "वी०डी० शुक्ला एडवोकेट", "बिधूना, औरैया"]
+    return ["वादी", "द्वारा अधिवक्ता-", "वी०डी० शुक्ला एडवोकेट", "बिधूना, औरैया"]
 
 
 def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "legal"):
