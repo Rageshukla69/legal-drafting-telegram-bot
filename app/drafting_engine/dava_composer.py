@@ -1,94 +1,41 @@
-"""Advocate-style Dava/Plaint planning for Phase 7."""
+"""Prompt package builder for the AI-structured Dava pipeline."""
 from __future__ import annotations
-from dataclasses import dataclass, asdict
 from typing import Any
 
-@dataclass(frozen=True)
-class PleadingPart:
-    key: str
-    title: str
-    required: bool
-    source_fields: tuple[str, ...]
-    numbering: bool = True
 
 class DavaComposer:
-    """Plans a plaint as a pleading, not as a case-summary report.
-
-    The model receives a fixed legal-document architecture while the renderer
-    remains deterministic. Missing technical facts are never fabricated.
-    """
-    PARTS = [
-        PleadingPart("opening", "", True, ("plaintiff_intro", "plaintiffs"), False),
-        PleadingPart("pleadings", "", True, ("facts",), True),
-        PleadingPart("cause_of_action", "", True, ("cause_of_action", "facts"), True),
-        PleadingPart("jurisdiction", "", False, ("jurisdiction_facts",), True),
-        PleadingPart("limitation", "", False, ("limitation_facts",), True),
-        PleadingPart("valuation_court_fee", "", False, ("valuation", "court_fee"), True),
-    ]
+    """Keeps drafting rules separate from the AI structural planner."""
 
     def plan(self, facts: dict[str, Any]) -> dict[str, Any]:
-        missing = []
-        parts = []
-        for part in self.PARTS:
-            present = any(self._present(facts.get(k)) for k in part.source_fields)
-            if part.required and not present:
-                missing.append(part.key)
-            parts.append({**asdict(part), "present": present})
+        # Kept for backwards compatibility/tests. The live pipeline uses the AI planner.
         return {
             "document_type": "dava_plaint",
-            "style": "continuous_numbered_pleading",
-            "status": "ready" if not missing else "needs_information",
-            "missing_required_parts": missing,
-            "parts": parts,
-            "architecture": [
-                "court_heading",
-                "case_heading_if_supplied",
-                "plaintiff_block",
-                "banam",
-                "defendant_block",
-                "plaint_title",
-                "opening_averment",
-                "numbered_averments",
-                "cause_of_action_averments",
-                "jurisdiction_averments_if_supported",
-                "limitation_averments_if_supported",
-                "valuation_and_court_fee_if_supported",
-                "prayer",
-                "place_date",
-                "plaintiff_signature",
-                "advocate_block",
-                "verification_if_supported",
-            ],
-            "numbering_rule": "Use 1 (एक), 2 (दो), 3 (तीन) for numbered averments.",
+            "style": "ai_structured_continuous_numbered_pleading",
+            "numbering_rule": "The renderer adds 1 (एक), 2 (दो), 3 (तीन) etc. The model must never number paragraphs.",
+            "required_facts_present": bool(facts),
         }
 
-    @staticmethod
-    def _present(value: Any) -> bool:
-        return value not in (None, "", [], {})
-
-    def build_prompt_package(self, facts: dict, retrieval_context: str, plan: dict) -> dict:
+    def build_prompt_package(self, facts: dict, retrieval_context: str, structure: dict) -> dict:
         return {
             "system_rules": [
-                "Draft a genuine Indian civil Dava/Plaint, not a case summary or intake report.",
-                "Use the supplied facts as the only factual source for the case.",
-                "Do not invent names, parentage, addresses, dates, survey/gata numbers, area, ownership, possession, events, threats, documents, statutes, limitation, valuation, court fee, jurisdiction or reliefs.",
-                "Retrieved corpus is only a style/structure reference. Never use it to fill missing case facts.",
+                "Draft a genuine Indian civil Dava/Plaint, not a case summary, questionnaire, or intake report.",
+                "The supplied structure_plan is authoritative for the order and purpose of the numbered averments.",
+                "Write exactly one final pleading paragraph for each approved structure_plan.paragraphs item, in the same order. Do not add, merge, reorder, or duplicate paragraphs.",
+                "The renderer will add paragraph numbers. NEVER write paragraph numbers such as '1 (एक)', '1.', '(एक)' or similar numbering into the paragraph text.",
+                "Normally begin each numbered averment naturally with 'यह कि'.",
+                "Use only explicit case facts. Never invent names, parentage, addresses, dates, property particulars, rights, ownership, possession, events, documents, statutes, limitation, valuation, court fee, jurisdiction or reliefs.",
+                "Retrieved advocate corpus is only style/organization reference. It is never a factual source for this case.",
                 "Do not reproduce legacy/corrupted Hindi encoding from retrieved examples.",
-                "Use formal, natural Hindi pleading language, normally beginning factual averments with 'यह कि'.",
-                "Do not create headings such as 'वादी का परिचय', 'प्रतिवादी का परिचय', 'विवादित संपत्ति' or 'वाद के तथ्य' merely to expose internal data fields.",
-                "Present the parties first, then centered 'बनाम', then the plaint title.",
-                "After the title, use an opening such as 'वादी निम्नलिखित निवेदन करता है:-' when appropriate.",
-                "Put factual allegations into a coherent chronological sequence. Property particulars should be integrated into the relevant averment or a clearly pleaded property paragraph, not emitted as a data-card heading.",
-                "Keep cause of action, jurisdiction, limitation and valuation/court-fee as pleading averments within the numbered sequence when those facts are supported.",
-                "Do not duplicate a relief as a fact. Do not create a fact from the user's desired relief.",
-                "Preserve event modality exactly: attempted is not completed; threatened is not occurred; apprehended is not actual.",
-                "Do not add legal conclusions unsupported by the supplied facts. Where a legal averment requires an unknown fact, omit it or leave it for the user to supply.",
-                "The prayer must contain only reliefs explicitly requested or clearly represented in the structured facts.",
-                "Include litigation costs or other conventional relief only when supplied by the case facts or retrieved style instruction; never assume them as case facts.",
-                "Use the fixed advocate block supplied by the application only; never invent an advocate identity.",
-                "Use clean Unicode Hindi and preserve numeric facts accurately.",
+                "Do not expose internal metadata headings such as 'वादी का परिचय', 'प्रतिवादी का परिचय', 'विवादित संपत्ति' or 'वाद के तथ्य'.",
+                "Preserve factual modality exactly: an attempt remains an attempt; a threat remains a threat; apprehension remains apprehension; and no dispossession may be stated unless the facts expressly say dispossession occurred.",
+                "Do not convert a requested relief into a past event or factual allegation.",
+                "Avoid repetitive paragraphs. Cause of action, jurisdiction and other technical averments must have their own distinct purpose only when the structure plan includes them.",
+                "The prayer must contain only reliefs supported by the case facts and structure plan.",
+                "Do not assume conventional costs or other relief unless supported by the supplied facts/plan.",
+                "Use the fixed advocate block supplied in the application if present; never invent an advocate identity.",
+                "Use clean standard Unicode Hindi.",
             ],
             "facts": facts,
-            "plan": plan,
+            "structure_plan": structure,
             "retrieved_reference_context": retrieval_context,
         }

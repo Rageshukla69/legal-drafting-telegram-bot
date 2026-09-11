@@ -1,0 +1,29 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "document_type": {"type": "string", "enum": ["dava_plaint"]},
+    "nature": {"type": "string"},
+    "title": {"type": "string"},
+    "opening": {"type": "string"},
+    "paragraphs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "order": {"type": "integer", "minimum": 1},
+          "section": {"type": "string", "enum": ["intro", "property", "right_or_possession", "defendant", "event", "response", "apprehension", "cause_of_action", "jurisdiction", "limitation", "valuation_court_fee", "other"]},
+          "purpose": {"type": "string"},
+          "source_fields": {"type": "array", "items": {"type": "string"}},
+          "required": {"type": "boolean"}
+        },
+        "required": ["order", "section", "purpose", "source_fields", "required"]
+      }
+    },
+    "prayer_items": {"type": "array", "items": {"type": "string"}},
+    "include_verification": {"type": "boolean"},
+    "warnings": {"type": "array", "items": {"type": "string"}}
+  },
+  "required": ["document_type", "nature", "title", "opening", "paragraphs", "prayer_items", "include_verification", "warnings"]
+}
