@@ -6,11 +6,13 @@ import json
 import os
 
 
-def draft_with_azure(prompt_package: dict, schema: dict):
+def _azure_client():
     try:
         from openai import OpenAI
     except ImportError as e:
-        raise RuntimeError("Install the `openai` package before using Azure.") from e
+        raise RuntimeError(
+            "Install the `openai` package before using Azure."
+        ) from e
 
     required = [
         "AZURE_OPENAI_ENDPOINT",
@@ -19,9 +21,11 @@ def draft_with_azure(prompt_package: dict, schema: dict):
     ]
 
     missing = [x for x in required if not os.getenv(x)]
+
     if missing:
         raise RuntimeError(
-            "Missing Azure environment variables: " + ", ".join(missing)
+            "Missing Azure environment variables: "
+            + ", ".join(missing)
         )
 
     endpoint = os.environ["AZURE_OPENAI_ENDPOINT"].rstrip("/")
@@ -29,10 +33,14 @@ def draft_with_azure(prompt_package: dict, schema: dict):
     if not endpoint.endswith("/openai/v1"):
         endpoint += "/openai/v1"
 
-    client = OpenAI(
+    return OpenAI(
         api_key=os.environ["AZURE_OPENAI_API_KEY"],
         base_url=endpoint + "/",
     )
+
+
+def draft_with_azure(prompt_package: dict, schema: dict):
+    client = _azure_client()
 
     system = (
         "You are a conservative Indian civil-pleading drafting assistant. "
