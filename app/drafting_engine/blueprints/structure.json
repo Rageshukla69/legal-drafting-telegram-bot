@@ -1,0 +1,53 @@
+{
+  "schema_version": "1.0",
+  "category": "dava_plaint",
+  "display_name": "Dava / Vaad Patra (Plaint)",
+  "document_count": 94,
+  "source_observation": "Derived from Phase 2 corpus analysis; observed practice, not universal legal requirements.",
+  "logical_blocks": [
+    {
+      "id": "court_heading",
+      "observation": "Court heading is highly recurrent."
+    },
+    {
+      "id": "case_number",
+      "observation": "Case/mool-vad number and year commonly follow the court heading."
+    },
+    {
+      "id": "parties_and_banam",
+      "observation": "Party names and a recurring “बनाम” separator are strongly recurrent."
+    },
+    {
+      "id": "pleading_intro",
+      "observation": "Recurring opening construction for the plaintiff statement is observed."
+    },
+    {
+      "id": "numbered_facts",
+      "observation": "Long factual paragraphs are commonly numbered; numeric + parenthesized Hindi words occur in source text."
+    },
+    {
+      "id": "cause_of_action_or_jurisdiction",
+      "observation": "Some pleadings contain jurisdiction/cause-of-action style paragraphs; presence varies."
+    },
+    {
+      "id": "valuation_and_court_fee",
+      "observation": "Observed in some plaints; conditional rather than universal."
+    },
+    {
+      "id": "prayer",
+      "observation": "Prayer/relief is detected in 90/94 documents."
+    },
+    {
+      "id": "verification_affidavit",
+      "observation": "Verification is detected in 91/94; many Dava files also contain affidavit material."
+    },
+    {
+      "id": "advocate_signature",
+      "observation": "Advocate/date/signature blocks recur near the end."
+    }
+  ],
+  "generation_rules": [
+    "Treat Dava files as potentially multi-component packages; do not assume the first prayer or affidavit is the end."
+  ],
+  "conditionality": "Do not fabricate missing facts; select blocks by matter and subtype."
+}

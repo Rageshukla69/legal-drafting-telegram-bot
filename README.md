@@ -1,2 +1,74 @@
-# legal-drafting-telegram-bot
-AI-powered Telegram legal drafting assistant
+# Legal Drafting Telegram Bot
+
+A Telegram-based legal drafting assistant built for the first Dava/Plaint
+workflow. This repository is the Phase 5 foundation and connects the Telegram
+interface to the Dava conversation/RAG/Azure drafting engine.
+
+## Current milestone
+
+Implemented:
+- Telegram `/start`, `/newcase`, `/cancel`
+- persistent SQLite case sessions
+- text message intake
+- conservative labeled-fact parser
+- missing-information questions
+- Dava RAG/composer integration
+- Azure Structured Outputs adapter
+- safe environment-variable configuration
+- Heroku `Procfile`
+
+Not yet implemented:
+- voice transcription
+- photo/PDF OCR
+- automatic natural-language fact extraction
+- final DOCX generation
+- all seven document categories
+- production authentication/authorization
+
+## Important
+
+Do NOT put Telegram or Azure API keys in GitHub. Use environment variables.
+The `.gitignore` already excludes `.env` and the SQLite database.
+
+## Local test
+
+Python 3.12 is recommended.
+
+```bash
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Set:
+- `TELEGRAM_BOT_TOKEN`
+- Azure variables when live drafting is enabled
+
+Then:
+
+```bash
+python -m app.bot
+```
+
+## Test input
+
+The first milestone parser recognizes explicit labels such as:
+
+```text
+न्यायालय: न्यायालय श्रीमान सिविल जज जूनियर डिवीजन, बिधूना
+वादी: राम कुमार
+प्रतिवादी: श्याम कुमार
+तथ्य: प्रतिवादी ने विवादित संपत्ति पर कब्जा किया।
+राहत: स्थायी निषेधाज्ञा
+```
+
+This is deliberately conservative. The natural-language Azure fact-extraction adapter will replace this starter parser in the next milestone.
+
+## Deployment
+
+The repository is structured for a Heroku worker:
+
+`worker: python -m app.bot`
+
+Set the required environment variables in Heroku Config Vars. Never commit secrets.
