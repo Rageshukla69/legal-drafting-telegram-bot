@@ -62,6 +62,24 @@ def normalize_between_label(value: str) -> str:
     return "बनाम"
 
 
+def split_party_blocks(parties: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """Separate explicitly labelled plaintiff/defendant entries.
+
+    We only split when the model supplied a recognizable party label; otherwise
+    we leave the original order untouched rather than guessing party roles.
+    """
+    plaintiff, defendant, other = [], [], []
+    for party in parties:
+        low = party.strip().lower()
+        if any(label in low for label in ("वादी", "वादीगण", "plaintiff", "plaintiffs")):
+            plaintiff.append(party)
+        elif any(label in low for label in ("प्रतिवादी", "प्रतिवादीगण", "defendant", "defendants")):
+            defendant.append(party)
+        else:
+            other.append(party)
+    return plaintiff, defendant, other
+
+
 def _font_path() -> str:
     bundled = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "NotoSansDevanagari-Regular.ttf"
     if bundled.exists():
@@ -179,18 +197,38 @@ def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "le
             bold=True, first_indent=False, after=12,
         )
 
-    # Parties are kept left-aligned; the separator is centered.
+    # Parties: plaintiff block, centered "बनाम", then defendant block.
+    # This avoids placing "बनाम" after both sides.
     if parties:
-        for party in parties:
+        plaintiff, defendant, other = split_party_blocks(parties)
+        if plaintiff and defendant:
+            for party in plaintiff:
+                _add_docx_para(
+                    doc, party, align=WD_ALIGN_PARAGRAPH.LEFT, size=14,
+                    first_indent=False, after=4,
+                )
             _add_docx_para(
-                doc, party, align=WD_ALIGN_PARAGRAPH.LEFT, size=14,
-                first_indent=False, after=4,
+                doc, normalize_between_label(draft.get("between_label", "")),
+                align=WD_ALIGN_PARAGRAPH.CENTER, size=14,
+                bold=True, first_indent=False, after=4,
             )
-        _add_docx_para(
-            doc, normalize_between_label(draft.get("between_label", "")),
-            align=WD_ALIGN_PARAGRAPH.CENTER, size=14,
-            bold=True, first_indent=False, after=4,
-        )
+            for party in defendant:
+                _add_docx_para(
+                    doc, party, align=WD_ALIGN_PARAGRAPH.LEFT, size=14,
+                    first_indent=False, after=4,
+                )
+            for party in other:
+                _add_docx_para(
+                    doc, party, align=WD_ALIGN_PARAGRAPH.LEFT, size=14,
+                    first_indent=False, after=4,
+                )
+        else:
+            # No reliable labels: preserve source order and do not invent roles.
+            for party in parties:
+                _add_docx_para(
+                    doc, party, align=WD_ALIGN_PARAGRAPH.LEFT, size=14,
+                    first_indent=False, after=4,
+                )
 
     sections = draft.get("sections", [])
     seen_keys: set[str] = set()
@@ -311,16 +349,25 @@ def _pdf_story(draft: dict[str, Any], font: str, bold_font: str):
         story.append(Paragraph(_escape_xml(court), center16))
     if case:
         story.append(Paragraph(_escape_xml(case), center16))
-    for party in parties:
-        story.append(Paragraph(_escape_xml(party), left))
     if parties:
-        story.append(
-            Paragraph(
-                _escape_xml(normalize_between_label(draft.get("between_label", ""))),
-                center,
+        plaintiff, defendant, other = split_party_blocks(parties)
+        if plaintiff and defendant:
+            for party in plaintiff:
+                story.append(Paragraph(_escape_xml(party), left))
+            story.append(
+                Paragraph(
+                    _escape_xml(normalize_between_label(draft.get("between_label", ""))),
+                    center,
+                )
             )
-        )
-        story.append(Spacer(1, 4))
+            story.append(Spacer(1, 4))
+            for party in defendant:
+                story.append(Paragraph(_escape_xml(party), left))
+            for party in other:
+                story.append(Paragraph(_escape_xml(party), left))
+        else:
+            for party in parties:
+                story.append(Paragraph(_escape_xml(party), left))
 
     for section in draft.get("sections", []) or []:
         key = str(section.get("key", "")).strip().lower()
