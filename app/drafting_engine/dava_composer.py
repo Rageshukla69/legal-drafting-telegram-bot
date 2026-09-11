@@ -1,100 +1,41 @@
-import json
-import logging
-from typing import Dict, Any
+"""Prompt package builder for the AI-structured Dava pipeline."""
+from __future__ import annotations
+from typing import Any
+
 
 class DavaComposer:
-    """
-    Translates the structural plan into formal, advocate-level Hindi legal text.
-    Enforces strict factual fidelity, ensuring AI does not invent acts, ownership, or legal provisions.
-    """
-    def __init__(self, azure_client, retriever, schema_path="app/drafting_engine/draft_schema.json"):
-        self.azure_client = azure_client
-        self.retriever = retriever
-        self.logger = logging.getLogger(__name__)
-        
-        with open(schema_path, "r", encoding="utf-8") as f:
-            self.response_schema = json.load(f)
+    """Keeps drafting rules separate from the AI structural planner."""
 
-    def draft_sections(self, case_data: Dict[str, Any], structural_plan: Dict[str, Any]) -> Dict[str, Any]:
-        self.logger.info(f"Composing final draft for case: {case_data.get('case_id', 'unknown')}")
-
-        # Retrieve style examples from the historical corpus based on the suit type
-        nature_of_suit = structural_plan.get('nature_of_suit', 'Dava')
-        style_examples = self.retriever.retrieve_relevant_content(nature_of_suit)
-
-        system_prompt = self._build_system_prompt(style_examples)
-        
-        user_payload = {
-            "parties_and_court": {
-                "court": case_data.get("court_name", "[अज्ञात न्यायालय]"),
-                "plaintiffs": case_data.get("plaintiffs", ""),
-                "defendants": case_data.get("defendants", "")
-            },
-            "structural_plan": structural_plan
-        }
-        
-        user_prompt = f"Draft the final legal Hindi text for this case:\n{json.dumps(user_payload, ensure_ascii=False, indent=2)}"
-
-        try:
-            response = self.azure_client.generate_structured_response(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                schema=self.response_schema
-            )
-            draft = json.loads(response)
-            return self._clean_draft(draft)
-        except Exception as e:
-            self.logger.error(f"Drafting composer failed: {str(e)}")
-            return self._fallback_draft(user_payload)
-
-    def _build_system_prompt(self, style_examples: str) -> str:
-        return f"""You are an expert Indian Civil Court Advocate drafting a formal Dava in clean Unicode Hindi.
-Your task is to take a 'Structural Plan' and draft the final professional text.
-
-CRITICAL FACTUAL FIDELITY RULES:
-1. NEVER change material facts. Do not invent dates, names, or locations.
-2. THREAT VS ACT: If the facts state the defendant 'threatened to dispossess' or 'attempted', YOU MUST NOT write 'कब्जा कर लिया' (dispossessed). Write 'कब्जा करने का प्रयास/धमकी दी'.
-3. OWNERSHIP VS POSSESSION: If the facts state the plaintiff is 'cultivating' (खेती कर रहा है), DO NOT invent that they are the absolute owner ('पूर्ण स्वामी') unless explicitly stated.
-4. RELIEF IS NOT A FACT: Never put prayer requests (e.g., 'वादी चाहता है कि...') in the factual_averments array. Reliefs belong ONLY in the prayer array.
-
-DRAFTING & FORMATTING RULES:
-1. NO PARAGRAPH NUMBERS: Do not include "1.", "2." etc. in the arrays. The rendering engine will automatically number them.
-2. NO 'यह कि': Do not start sentences with 'यह कि'. The rendering engine will prepend this automatically.
-3. NO HEADINGS: Do not generate AI-style headings like "वादी का परिचय" or "वाद के तथ्य". Output only the substantive paragraph text.
-4. PARTY BLOCK: Format plaintiffs and defendants cleanly without extra conversational text.
-
-STYLE REFERENCE (Use ONLY for vocabulary and tone, DO NOT copy facts/names from here):
-{style_examples}
-"""
-
-    def _clean_draft(self, draft: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Final safety sweep to ensure no numbering or 'यह कि' leaked into the final arrays.
-        """
-        clean_averments = []
-        for averment in draft.get('factual_averments', []):
-            # Strip accidental prefixes left by AI despite instructions
-            cleaned = averment.lstrip("0123456789.()[] ").strip()
-            if cleaned.startswith("यह कि "):
-                cleaned = cleaned[6:].strip()
-            if cleaned:
-                clean_averments.append(cleaned)
-                
-        draft['factual_averments'] = clean_averments
-        return draft
-
-    def _fallback_draft(self, user_payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Provides a safe passthrough if AI composition fails."""
-        self.logger.warning("Using fallback composer draft.")
-        plan = user_payload.get("structural_plan", {})
+    def plan(self, facts: dict[str, Any]) -> dict[str, Any]:
+        # Kept for backwards compatibility/tests. The live pipeline uses the AI planner.
         return {
-            "court_name": user_payload["parties_and_court"].get("court", ""),
-            "plaintiffs": user_payload["parties_and_court"].get("plaintiffs", ""),
-            "defendants": user_payload["parties_and_court"].get("defendants", ""),
-            "nature_of_suit": plan.get("nature_of_suit", "वाद पत्र"),
-            "factual_averments": plan.get("factual_averments", []),
-            "cause_of_action": plan.get("cause_of_action", ""),
-            "jurisdiction": plan.get("jurisdiction", ""),
-            "valuation_and_court_fee": plan.get("valuation_and_court_fee", ""),
-            "prayer": plan.get("prayer", [])
+            "document_type": "dava_plaint",
+            "style": "ai_structured_continuous_numbered_pleading",
+            "numbering_rule": "The renderer adds 1 (एक), 2 (दो), 3 (तीन) etc. The model must never number paragraphs.",
+            "required_facts_present": bool(facts),
+        }
+
+    def build_prompt_package(self, facts: dict, retrieval_context: str, structure: dict) -> dict:
+        return {
+            "system_rules": [
+                "Draft a genuine Indian civil Dava/Plaint, not a case summary, questionnaire, or intake report.",
+                "The supplied structure_plan is authoritative for the order and purpose of the numbered averments.",
+                "Write exactly one final pleading paragraph for each approved structure_plan.paragraphs item, in the same order. Do not add, merge, reorder, or duplicate paragraphs.",
+                "The renderer will add paragraph numbers. NEVER write paragraph numbers such as '1 (एक)', '1.', '(एक)' or similar numbering into the paragraph text.",
+                "Normally begin each numbered averment naturally with 'यह कि'.",
+                "Use only explicit case facts. Never invent names, parentage, addresses, dates, property particulars, rights, ownership, possession, events, documents, statutes, limitation, valuation, court fee, jurisdiction or reliefs.",
+                "Retrieved advocate corpus is only style/organization reference. It is never a factual source for this case.",
+                "Do not reproduce legacy/corrupted Hindi encoding from retrieved examples.",
+                "Do not expose internal metadata headings such as 'वादी का परिचय', 'प्रतिवादी का परिचय', 'विवादित संपत्ति' or 'वाद के तथ्य'.",
+                "Preserve factual modality exactly: an attempt remains an attempt; a threat remains a threat; apprehension remains apprehension; and no dispossession may be stated unless the facts expressly say dispossession occurred.",
+                "Do not convert a requested relief into a past event or factual allegation.",
+                "Avoid repetitive paragraphs. Cause of action, jurisdiction and other technical averments must have their own distinct purpose only when the structure plan includes them.",
+                "The prayer must contain only reliefs supported by the case facts and structure plan.",
+                "Do not assume conventional costs or other relief unless supported by the supplied facts/plan.",
+                "Use the fixed advocate block supplied in the application if present; never invent an advocate identity.",
+                "Use clean standard Unicode Hindi.",
+            ],
+            "facts": facts,
+            "structure_plan": structure,
+            "retrieved_reference_context": retrieval_context,
         }

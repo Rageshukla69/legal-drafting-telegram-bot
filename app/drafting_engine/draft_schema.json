@@ -1,63 +1,19 @@
 {
-  "name": "final_dava_draft",
-  "strict": true,
-  "schema": {
-    "type": "object",
-    "properties": {
-      "court_name": {
-        "type": "string",
-        "description": "Formal court heading. Leave as [रिक्त] if unknown."
-      },
-      "plaintiffs": {
-        "type": "string",
-        "description": "Plaintiff details properly formatted for the party block. No extra words."
-      },
-      "defendants": {
-        "type": "string",
-        "description": "Defendant details properly formatted for the party block. No extra words."
-      },
-      "nature_of_suit": {
-        "type": "string",
-        "description": "Main title/nature of the suit (e.g., स्थायी निषेधाज्ञा का वाद)."
-      },
-      "factual_averments": {
-        "type": "array",
-        "description": "Formal Hindi drafting of the facts. MUST NOT contain numbers (1, 2) or 'यह कि'. MUST NOT contain requested reliefs.",
-        "items": {
-          "type": "string"
-        }
-      },
-      "cause_of_action": {
-        "type": "string",
-        "description": "Drafted cause of action paragraph without numbering or 'यह कि'."
-      },
-      "jurisdiction": {
-        "type": "string",
-        "description": "Drafted jurisdiction paragraph without numbering or 'यह कि'."
-      },
-      "valuation_and_court_fee": {
-        "type": "string",
-        "description": "Drafted valuation/court fee paragraph. Leave blank if not required."
-      },
-      "prayer": {
-        "type": "array",
-        "description": "Drafted relief clauses. E.g., '(क) यह कि प्रतिवादी को...'.",
-        "items": {
-          "type": "string"
-        }
-      }
-    },
-    "required": [
-      "court_name",
-      "plaintiffs",
-      "defendants",
-      "nature_of_suit",
-      "factual_averments",
-      "cause_of_action",
-      "jurisdiction",
-      "valuation_and_court_fee",
-      "prayer"
-    ],
-    "additionalProperties": false
-  }
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "court_heading": {"type": "string"},
+    "case_heading": {"type": "string"},
+    "parties": {"type": "array", "items": {"type": "string"}},
+    "title": {"type": "string"},
+    "opening_averment": {"type": "string"},
+    "pleadings": {"type": "array", "items": {"type": "string"}},
+    "prayer": {"type": "array", "items": {"type": "string"}},
+    "verification": {"type": "string"},
+    "signature_block": {"type": "array", "items": {"type": "string"}}
+  },
+  "required": [
+    "court_heading", "case_heading", "parties", "title", "opening_averment",
+    "pleadings", "prayer", "verification", "signature_block"
+  ]
 }
