@@ -26,23 +26,36 @@ Facts should be returned as short chronological factual statements, not legal ad
 """
 
 
-def extract_case_facts(message: str, current_facts: dict[str, Any] | None = None) -> dict[str, Any]:
+def extract_case_facts(
+    message: str,
+    current_facts: dict[str, Any] | None = None
+) -> dict[str, Any]:
     client = _azure_client()
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+
     payload = {
         "current_case_facts": current_facts or {},
         "new_user_message": message,
     }
+
     response = client.chat.completions.create(
         model=os.environ["AZURE_OPENAI_DEPLOYMENT"],
         messages=[
             {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            {
+                "role": "user",
+                "content": json.dumps(payload, ensure_ascii=False),
+            },
         ],
         response_format={
             "type": "json_schema",
-            "json_schema": {"name": "case_intake", "strict": True, "schema": schema},
+            "json_schema": {
+                "name": "case_intake",
+                "strict": True,
+                "schema": schema,
+            },
         },
         temperature=0,
     )
+
     return json.loads(response.choices[0].message.content)
