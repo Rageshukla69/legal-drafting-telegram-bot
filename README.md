@@ -96,3 +96,14 @@ python -m app.bot
 
 All internal imports use the `app.*` package path or relative imports, so the
 Heroku worker does not depend on the current working directory being `app/`.
+
+
+## Document outputs
+
+The Dava pipeline now renders the same structured draft into both:
+
+- `.docx` editable legal document
+- `.pdf` print/share document
+
+Both are generated deterministically from the same JSON draft. The LLM does not
+generate the DOCX/PDF directly.
