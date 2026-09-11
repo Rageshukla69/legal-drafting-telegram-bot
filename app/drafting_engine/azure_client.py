@@ -1,36 +1,37 @@
-"""Azure OpenAI adapter.
+"""Azure OpenAI adapter."""
 
-Requires the official `openai` Python package and environment variables:
-AZURE_OPENAI_ENDPOINT
-AZURE_OPENAI_API_KEY
-AZURE_OPENAI_API_VERSION
-AZURE_OPENAI_DEPLOYMENT
-
-This module is intentionally small: application logic remains provider-neutral.
-"""
 from __future__ import annotations
-import json, os
+
+import json
+import os
+
 
 def draft_with_azure(prompt_package: dict, schema: dict):
     try:
-        from openai import AzureOpenAI
+        from openai import OpenAI
     except ImportError as e:
         raise RuntimeError("Install the `openai` package before using Azure.") from e
 
     required = [
         "AZURE_OPENAI_ENDPOINT",
         "AZURE_OPENAI_API_KEY",
-        "AZURE_OPENAI_API_VERSION",
         "AZURE_OPENAI_DEPLOYMENT",
     ]
+
     missing = [x for x in required if not os.getenv(x)]
     if missing:
-        raise RuntimeError("Missing Azure environment variables: " + ", ".join(missing))
+        raise RuntimeError(
+            "Missing Azure environment variables: " + ", ".join(missing)
+        )
 
-    client = AzureOpenAI(
-        azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+    endpoint = os.environ["AZURE_OPENAI_ENDPOINT"].rstrip("/")
+
+    if not endpoint.endswith("/openai/v1"):
+        endpoint += "/openai/v1"
+
+    client = OpenAI(
         api_key=os.environ["AZURE_OPENAI_API_KEY"],
-        api_version=os.environ["AZURE_OPENAI_API_VERSION"],
+        base_url=endpoint + "/",
     )
 
     system = (
@@ -46,7 +47,13 @@ def draft_with_azure(prompt_package: dict, schema: dict):
         model=os.environ["AZURE_OPENAI_DEPLOYMENT"],
         messages=[
             {"role": "system", "content": system},
-            {"role": "user", "content": json.dumps(prompt_package, ensure_ascii=False)},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    prompt_package,
+                    ensure_ascii=False,
+                ),
+            },
         ],
         response_format={
             "type": "json_schema",
@@ -58,4 +65,5 @@ def draft_with_azure(prompt_package: dict, schema: dict):
         },
         temperature=0,
     )
+
     return json.loads(response.choices[0].message.content)
