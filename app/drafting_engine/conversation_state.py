@@ -1,12 +1,12 @@
-"""Case conversation state and missing-information loop.
+"""Serializable case conversation state and conservative missing-information checks."""
 
-The state is intentionally serializable so it can later be stored in Redis,
-Postgres, SQLite, or another bot backend.
-"""
 from __future__ import annotations
-from dataclasses import dataclass, field, asdict
+
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 import json
+
 
 @dataclass
 class CaseState:
@@ -17,32 +17,35 @@ class CaseState:
     status: str = "collecting"
     history: list[dict[str, str]] = field(default_factory=list)
 
-    def record(self, role: str, text: str):
+    def record(self, role: str, text: str) -> None:
         self.history.append({"role": role, "text": text})
 
-    def merge_facts(self, new_facts: dict[str, Any]):
+    def merge_facts(self, new_facts: dict[str, Any]) -> None:
         for key, value in new_facts.items():
             if value is None or value == "" or value == [] or value == {}:
                 continue
             self.facts[key] = value
 
-    def to_dict(self):
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data):
+    def from_dict(cls, data: dict[str, Any]) -> "CaseState":
         return cls(**data)
 
-    def save(self, path):
-        Path(path).write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    def save(self, path: str | Path) -> None:
+        Path(path).write_text(
+            json.dumps(self.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     @classmethod
-    def load(cls, path):
-        return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
+    def load(cls, path: str | Path) -> "CaseState":
+        return cls.from_dict(
+            json.loads(Path(path).read_text(encoding="utf-8"))
+        )
 
-from pathlib import Path
 
-# Minimum facts needed before asking an LLM to compose a Dava.
 REQUIRED_FIELDS = [
     ("court_name", "न्यायालय का नाम"),
     ("plaintiffs", "वादी का पूरा नाम/नाम"),
@@ -59,12 +62,15 @@ IMPORTANT_FIELDS = [
     ("court_fee", "न्यायालय शुल्क, यदि उपलब्ध हो"),
 ]
 
-def missing_fields(facts):
-    missing = [k for k,_ in REQUIRED_FIELDS if not facts.get(k)]
-    return missing
 
-def next_questions(facts, max_questions=4):
-    questions = []
+def missing_fields(facts: dict[str, Any]) -> list[str]:
+    return [key for key, _ in REQUIRED_FIELDS if not facts.get(key)]
+
+
+def next_questions(
+    facts: dict[str, Any], max_questions: int = 4
+) -> list[tuple[str, str]]:
+    questions: list[tuple[str, str]] = []
     for key, label in REQUIRED_FIELDS + IMPORTANT_FIELDS:
         if not facts.get(key):
             questions.append((key, label))
