@@ -33,6 +33,7 @@ from telegram.ext import (
 from app.case_store import CaseStore
 from app.drafting_engine.conversation_state import CaseState
 from app.drafting_engine.dava_orchestrator import DavaOrchestrator
+from app.drafting_engine.renderers.legal_document_renderer import render_both
 
 
 logging.basicConfig(
@@ -315,28 +316,36 @@ async def button(
             state,
         )
 
-        output = json.dumps(
+        output_dir = (
+            __import__("pathlib").Path("/tmp/legal_drafts")
+            / str(query.from_user.id)
+        )
+        docx_path, pdf_path = await asyncio.to_thread(
+            render_both,
             draft,
-            ensure_ascii=False,
-            indent=2,
+            output_dir,
+            f"Dava_Draft_{state.case_id}",
+            "letter",
         )
 
-        # Telegram message limit is roughly 4096 characters.
-        chunks = [
-            output[i : i + 3800]
-            for i in range(0, len(output), 3800)
-        ]
+        await query.message.reply_text(
+            "✅ Dava draft तैयार है।\n\n"
+            "नीचे editable DOCX और print/share-ready PDF दोनों भेज रहा हूँ।"
+        )
 
-        if not chunks:
-            chunks = ["{}"]
-
-        for index, chunk in enumerate(chunks):
-            prefix = (
-                "Structured Dava draft:\n\n"
-                if index == 0
-                else ""
+        with docx_path.open("rb") as docx_file:
+            await query.message.reply_document(
+                document=docx_file,
+                filename=docx_path.name,
+                caption="📄 DOCX — editable draft",
             )
-            await query.message.reply_text(prefix + chunk)
+
+        with pdf_path.open("rb") as pdf_file:
+            await query.message.reply_document(
+                document=pdf_file,
+                filename=pdf_path.name,
+                caption="📕 PDF — print/share copy",
+            )
 
         state.status = "drafted"
         store.save(query.from_user.id, state)
