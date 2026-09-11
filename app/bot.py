@@ -152,19 +152,45 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("वर्तमान case रद्द कर दिया गया है। /newcase से नया case शुरू करें।")
 
 
+def _case_summary(state: CaseState) -> str:
+    f = state.facts
+    def val(key, default="—"):
+        v = f.get(key)
+        if isinstance(v, list):
+            return "\n".join(f"• {x}" for x in v) if v else default
+        return str(v).strip() if v else default
+    return (
+        "📋 *Case Review / मामले का सारांश*\n\n"
+        f"*न्यायालय:* {val('court_name')}\n"
+        f"*वादी:* {val('plaintiffs')}\n"
+        f"*प्रतिवादी:* {val('defendants')}\n"
+        f"*वादी परिचय:* {val('plaintiff_intro')}\n"
+        f"*प्रतिवादी परिचय:* {val('defendant_intro')}\n"
+        f"*संपत्ति:* {val('property_description')}\n"
+        f"*वाद-कारण:* {val('cause_of_action')}\n"
+        f"*क्षेत्राधिकार:* {val('jurisdiction_facts')}\n"
+        f"*समय-सीमा:* {val('limitation_facts')}\n"
+        f"*मूल्यांकन:* {val('valuation')}\n"
+        f"*न्यायालय शुल्क:* {val('court_fee')}\n"
+        f"*तथ्य:*\n{val('facts')}\n"
+        f"*राहत:*\n{val('reliefs')}\n\n"
+        "यदि कोई तथ्य गलत है, उसे स्पष्ट रूप से सुधारकर नया message भेजें।"
+    )
+
+
+def _ready_message(state: CaseState | None = None) -> str:
+    return (
+        "आवश्यक न्यूनतम जानकारी मिल गई है।\n\n"
+        "Draft बनाने से पहले case summary जाँच लें।\n"
+        "कोई तथ्य गलत हो तो नया message भेजकर स्पष्ट correction दें; फिर /summary से दोबारा जाँच सकते हैं।"
+    )
+
+
 def _draft_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Dava Draft तैयार करें", callback_data="draft")],
         [InlineKeyboardButton("❌ Cancel", callback_data="cancel")],
     ])
-
-
-def _ready_message() -> str:
-    return (
-        "आवश्यक न्यूनतम जानकारी मिल गई है।\n\n"
-        "मैंने facts को structured case में बदल दिया है। Draft बनाने से पहले नीचे की जानकारी जाँच लें।\n"
-        "यदि कुछ गलत है तो उसी बात को नया message भेजकर सुधार दें।"
-    )
 
 
 async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -186,7 +212,7 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         log.exception("Intake failed")
         await update.message.reply_text(
             "इस message को process नहीं कर सका। कृपया फिर से भेजें।\n"
-            f"Technical detail: {type(exc).__name__}"
+            "कृपया message दोबारा भेजें या /newcase से नया case शुरू करें।"
         )
         return
 
@@ -203,6 +229,44 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"राहत: {len(facts.get('reliefs', []))} item(s)"
     )
     await update.message.reply_text(summary, reply_markup=_draft_keyboard())
+
+
+async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_user:
+        return
+    state = store.get(case_id_for(update.effective_user.id))
+    if state is None:
+        await update.message.reply_text("कोई active case नहीं है। /newcase से शुरू करें।")
+        return
+    await update.message.reply_text(_case_summary(state), parse_mode="Markdown", reply_markup=_draft_keyboard())
+
+
+async def redraft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_user:
+        return
+    state = store.get(case_id_for(update.effective_user.id))
+    if state is None:
+        await update.message.reply_text("कोई active case नहीं है। /newcase से शुरू करें।")
+        return
+    if state.status not in {"ready", "drafted"}:
+        await update.message.reply_text("Case अभी पूरा नहीं है। पहले आवश्यक जानकारी दें।")
+        return
+    await update.message.reply_text("ठीक है। Case की वर्तमान जानकारी से नया Dava draft बनाया जा रहा है…")
+    try:
+        draft = await asyncio.to_thread(orchestrator.draft_live, state)
+        with tempfile.TemporaryDirectory() as tmp:
+            base = f"Dava_Draft_{update.effective_user.id}"
+            docx_path, pdf_path = render_both(draft, tmp, base_name=base, paper=os.getenv("LEGAL_PAPER", "legal"))
+            with open(docx_path, "rb") as f:
+                await update.message.reply_document(f, filename=docx_path.name, caption="📄 Editable DOCX Dava")
+            with open(pdf_path, "rb") as f:
+                await update.message.reply_document(f, filename=pdf_path.name, caption="📑 PDF Dava")
+        state.status = "drafted"
+        store.save(update.effective_user.id, state)
+        await update.message.reply_text("✅ नया Dava draft तैयार है।")
+    except Exception:
+        log.exception("Redraft failed")
+        await update.message.reply_text("Draft generate नहीं हो सका। कृपया थोड़ी देर बाद फिर कोशिश करें।")
 
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -228,7 +292,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         draft = await asyncio.to_thread(orchestrator.draft_live, state)
         with tempfile.TemporaryDirectory() as tmp:
             base = f"Dava_Draft_{query.from_user.id}"
-            docx_path, pdf_path = render_both(draft, tmp, base_name=base, paper=os.getenv("LEGAL_PAPER", "letter"))
+            docx_path, pdf_path = render_both(draft, tmp, base_name=base, paper=os.getenv("LEGAL_PAPER", "legal"))
             with open(docx_path, "rb") as f:
                 await query.message.reply_document(f, filename=docx_path.name, caption="📄 Editable DOCX Dava")
             with open(pdf_path, "rb") as f:
@@ -240,7 +304,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.exception("Draft failed")
         await query.message.reply_text(
             "Draft generate नहीं हो सका। Azure configuration या document renderer जाँचें.\n"
-            f"Technical detail: {type(exc).__name__}"
+            "कृपया message दोबारा भेजें या /newcase से नया case शुरू करें।"
         )
 
 
@@ -252,6 +316,8 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("newcase", newcase))
     application.add_handler(CommandHandler("cancel", cancel))
+    application.add_handler(CommandHandler("summary", summary))
+    application.add_handler(CommandHandler("redraft", redraft))
     application.add_handler(CallbackQueryHandler(button))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
     return application
