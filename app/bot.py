@@ -3,7 +3,7 @@ import logging, os, uuid
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, CallbackQueryHandler, filters
 
-from case_store import CaseStore
+from app.case_store import CaseStore
 from drafting_engine.conversation_state import CaseState
 from drafting_engine.dava_orchestrator import DavaOrchestrator
 
