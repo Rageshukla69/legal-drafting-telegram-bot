@@ -1,0 +1,59 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-09-11T16:08:59.071022+00:00",
+  "source": {
+    "drive_folder": "Sorted_Court_DOCX",
+    "drive_path": "/content/drive/MyDrive/Sorted_Court_DOCX"
+  },
+  "repository": {
+    "owner": "Rageshukla69",
+    "repo": "legal-drafting-telegram-bot",
+    "branch": "main",
+    "corpus_directory": "legal_corpus"
+  },
+  "categories": [
+    {
+      "folder": "01_Vaad_Patra_Dava",
+      "github_path": "legal_corpus/01_Vaad_Patra_Dava.zip",
+      "file_count": 94,
+      "zip_size_bytes": 3682813
+    },
+    {
+      "folder": "02_Jawab_Dava_WS",
+      "github_path": "legal_corpus/02_Jawab_Dava_WS.zip",
+      "file_count": 88,
+      "zip_size_bytes": 3388245
+    },
+    {
+      "folder": "03_Applications_PrarthanaPatra",
+      "github_path": "legal_corpus/03_Applications_PrarthanaPatra.zip",
+      "file_count": 60,
+      "zip_size_bytes": 2187119
+    },
+    {
+      "folder": "04_Evidence_PW_Affidavits",
+      "github_path": "legal_corpus/04_Evidence_PW_Affidavits.zip",
+      "file_count": 18,
+      "zip_size_bytes": 666594
+    },
+    {
+      "folder": "05_ShapathPatra_Affidavits",
+      "github_path": "legal_corpus/05_ShapanthPatra_Affidavits.zip",
+      "file_count": 15,
+      "zip_size_bytes": 548991
+    },
+    {
+      "folder": "06_Legal_Notices",
+      "github_path": "legal_corpus/06_Legal_Notices.zip",
+      "file_count": 11,
+      "zip_size_bytes": 401397
+    },
+    {
+      "folder": "08_Other_Civil_Drafts",
+      "github_path": "legal_corpus/08_Other_Civil_Drafts.zip",
+      "file_count": 20,
+      "zip_size_bytes": 756869
+    }
+  ],
+  "purpose": "Source corpus for corpus-driven legal document classification, retrieval, structure analysis and drafting. Source documents are drafting/style references only; case facts must come from the user/case intake."
+}
