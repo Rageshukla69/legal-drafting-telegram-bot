@@ -210,131 +210,89 @@ def _add_docx_para(
     return p
 
 
+def _ordered_pleading_items(draft: dict[str, Any]) -> list[str]:
+    """Flatten the pleading body into one continuous numbered sequence."""
+    items: list[str] = []
+    if str(draft.get("opening_averment", "")).strip():
+        # Opening is rendered separately; never number it.
+        pass
+    for key in ("pleadings", "cause_of_action", "jurisdiction", "limitation", "valuation_court_fee"):
+        for item in draft.get(key, []) or []:
+            text = str(item).strip()
+            if text:
+                items.append(text)
+    return items
+
+
+def _title_text(draft: dict[str, Any]) -> str:
+    title = str(draft.get("title", "")).strip()
+    if title and title != "वाद पत्र":
+        return title
+    return "वाद पत्र"
+
+
+def _signature_lines(draft: dict[str, Any]) -> list[str]:
+    return [str(x).strip() for x in draft.get("signature_block", []) or [] if str(x).strip()]
+
+
 def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "legal"):
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
     doc = Document()
     _setup_docx(doc, paper)
 
-    court = draft.get("court_heading", "").strip()
-    case = draft.get("case_heading", "").strip()
+    court = str(draft.get("court_heading", "")).strip()
+    case = str(draft.get("case_heading", "")).strip()
     parties = [str(x).strip() for x in draft.get("parties", []) if str(x).strip()]
 
     if court:
-        _add_docx_para(
-            doc, court, align=WD_ALIGN_PARAGRAPH.CENTER, size=16,
-            bold=True, first_indent=False, after=8,
-        )
+        _add_docx_para(doc, court, align=WD_ALIGN_PARAGRAPH.CENTER, size=16, bold=True, first_indent=False, after=8)
     if case:
-        _add_docx_para(
-            doc, case, align=WD_ALIGN_PARAGRAPH.CENTER, size=16,
-            bold=True, first_indent=False, after=12,
-        )
+        _add_docx_para(doc, case, align=WD_ALIGN_PARAGRAPH.CENTER, size=14, bold=True, first_indent=False, after=10)
 
-    # Parties are rendered in strict legal order:
-    # plaintiff block -> centered "बनाम" -> defendant block.
-    # "बनाम" is deterministic and is NEVER taken from model text.
-    if parties:
-        plaintiff, defendant, other = split_party_blocks(parties)
-        if plaintiff and defendant:
-            for party in plaintiff:
-                _add_docx_para(
-                    doc, party, align=WD_ALIGN_PARAGRAPH.LEFT, size=14,
-                    first_indent=False, after=4,
-                )
-            _add_docx_para(
-                doc, "बनाम",
-                align=WD_ALIGN_PARAGRAPH.CENTER, size=14,
-                bold=True, first_indent=False, after=6,
-            )
-            for party in defendant:
-                _add_docx_para(
-                    doc, party, align=WD_ALIGN_PARAGRAPH.LEFT, size=14,
-                    first_indent=False, after=4,
-                )
-            for party in other:
-                _add_docx_para(
-                    doc, party, align=WD_ALIGN_PARAGRAPH.LEFT, size=14,
-                    first_indent=False, after=4,
-                )
-        else:
-            # No reliable labels: preserve source order and do not invent roles.
-            for party in parties:
-                _add_docx_para(
-                    doc, party, align=WD_ALIGN_PARAGRAPH.LEFT, size=14,
-                    first_indent=False, after=4,
-                )
+    plaintiff, defendant, other = split_party_blocks(parties)
+    if plaintiff and defendant:
+        for party in plaintiff:
+            _add_docx_para(doc, party, align=WD_ALIGN_PARAGRAPH.LEFT, size=14, first_indent=False, after=3)
+        _add_docx_para(doc, "बनाम", align=WD_ALIGN_PARAGRAPH.CENTER, size=14, bold=True, first_indent=False, after=3)
+        for party in defendant:
+            _add_docx_para(doc, party, align=WD_ALIGN_PARAGRAPH.LEFT, size=14, first_indent=False, after=4)
+        for party in other:
+            _add_docx_para(doc, party, align=WD_ALIGN_PARAGRAPH.LEFT, size=14, first_indent=False, after=4)
+    else:
+        for party in parties:
+            _add_docx_para(doc, party, align=WD_ALIGN_PARAGRAPH.LEFT, size=14, first_indent=False, after=4)
 
-    sections = draft.get("sections", [])
-    seen_keys: set[str] = set()
+    _add_docx_para(doc, _title_text(draft), align=WD_ALIGN_PARAGRAPH.CENTER, size=16, bold=True, underline=True, first_indent=False, after=10)
 
-    # Prefer semantic sections from the model, but don't duplicate court/parties.
-    for section in sections:
-        key = str(section.get("key", "")).strip().lower()
-        if key in {"court", "parties"}:
-            continue
-        seen_keys.add(key)
+    opening = str(draft.get("opening_averment", "")).strip()
+    if opening:
+        _add_docx_para(doc, opening, align=WD_ALIGN_PARAGRAPH.JUSTIFY, size=14, first_indent=False, after=10)
 
-        paragraphs = section.get("paragraphs", []) or []
-        if not paragraphs:
-            continue
+    for idx, paragraph in enumerate(_ordered_pleading_items(draft), 1):
+        _add_docx_para(doc, numbered(paragraph, idx), align=WD_ALIGN_PARAGRAPH.JUSTIFY, size=14, first_indent=True, after=12)
 
-        # Use a centered title only for explicit legal headings other than
-        # generic internal metadata titles.
-        title = str(section.get("title", "")).strip()
-        if key not in {"case"} and title:
-            # The renderer uses legal-facing titles rather than exposing
-            # internal bilingual labels when the content is a main section.
-            _add_docx_para(
-                doc, title.split(" / ")[0],
-                align=WD_ALIGN_PARAGRAPH.CENTER, size=16,
-                bold=True, underline=True, first_indent=False, after=8,
-            )
+    prayer = [str(x).strip() for x in draft.get("prayer", []) or [] if str(x).strip()]
+    if prayer:
+        _add_docx_para(doc, "प्रार्थना", align=WD_ALIGN_PARAGRAPH.CENTER, size=16, bold=True, underline=True, first_indent=False, after=8)
+        _add_docx_para(doc, "अतः वादी माननीय न्यायालय से प्रार्थना करता है कि:-", align=WD_ALIGN_PARAGRAPH.JUSTIFY, size=14, first_indent=False, after=10)
+        for idx, item in enumerate(prayer):
+            # Prayer items use Hindi-lettered clauses where practical.
+            labels = ["(क)", "(ख)", "(ग)", "(घ)", "(ङ)", "(च)"]
+            label = labels[idx] if idx < len(labels) else f"({idx + 1})"
+            _add_docx_para(doc, f"{label} {item}", align=WD_ALIGN_PARAGRAPH.JUSTIFY, size=14, first_indent=False, after=10)
 
-        for idx, paragraph in enumerate(paragraphs, 1):
-            if key in {"facts", "material_facts", "cause_of_action"}:
-                text = numbered(paragraph, idx)
-            elif key in {"reliefs", "prayer"}:
-                text = numbered(paragraph, idx)
-            else:
-                text = str(paragraph).strip()
-
-            if not text:
-                continue
-
-            _add_docx_para(
-                doc,
-                text,
-                align=WD_ALIGN_PARAGRAPH.JUSTIFY,
-                size=14,
-                first_indent=True,
-                after=12,
-            )
+    signatures = _signature_lines(draft)
+    if signatures:
+        for line in signatures:
+            _add_docx_para(doc, line, align=WD_ALIGN_PARAGRAPH.RIGHT, size=14, first_indent=False, after=4)
 
     verification = str(draft.get("verification", "") or "").strip()
     if verification:
-        _add_docx_para(
-            doc, "सत्यापन", align=WD_ALIGN_PARAGRAPH.CENTER,
-            size=16, bold=True, underline=True, first_indent=False, after=8,
-        )
+        _add_docx_para(doc, "सत्यापन", align=WD_ALIGN_PARAGRAPH.CENTER, size=16, bold=True, underline=True, first_indent=False, after=8)
         for line in verification.splitlines():
             if line.strip():
-                _add_docx_para(
-                    doc, line.strip(), size=14, first_indent=True, after=12
-                )
-
-    signatures = [
-        str(x).strip()
-        for x in draft.get("signature_block", []) or []
-        if str(x).strip()
-    ]
-    if signatures:
-        for line in signatures:
-            _add_docx_para(
-                doc, line, align=WD_ALIGN_PARAGRAPH.RIGHT, size=14,
-                first_indent=False, after=4,
-            )
+                _add_docx_para(doc, line.strip(), align=WD_ALIGN_PARAGRAPH.JUSTIFY, size=14, first_indent=True, after=10)
 
     doc.save(output_path)
     return output_path
@@ -351,105 +309,62 @@ def _escape_xml(text: str) -> str:
 
 def _pdf_story(draft: dict[str, Any], font: str, bold_font: str):
     styles = getSampleStyleSheet()
-    body = ParagraphStyle(
-        "VakilBody", parent=styles["BodyText"], fontName=font,
-        fontSize=14, leading=21, alignment=TA_JUSTIFY,
-        shaping=1,
-        firstLineIndent=0.5 * inch, spaceAfter=12,
-    )
-    center16 = ParagraphStyle(
-        "VakilCenter16", parent=body, fontName=bold_font,
-        fontSize=16, leading=22, alignment=TA_CENTER,
-        shaping=1,
-        firstLineIndent=0, spaceAfter=8,
-    )
-    left = ParagraphStyle(
-        "VakilLeft", parent=body, alignment=TA_LEFT,
-        firstLineIndent=0, spaceAfter=4,
-    )
-    center = ParagraphStyle(
-        "VakilCenter", parent=body, fontName=bold_font,
-        alignment=TA_CENTER, firstLineIndent=0, spaceAfter=4, shaping=1,
-    )
-    right = ParagraphStyle(
-        "VakilRight", parent=body, alignment=TA_RIGHT,
-        firstLineIndent=0, spaceAfter=4,
-    )
+    body = ParagraphStyle("VakilBody", parent=styles["BodyText"], fontName=font, fontSize=14, leading=21, alignment=TA_JUSTIFY, shaping=1, firstLineIndent=0.5 * inch, spaceAfter=12)
+    center16 = ParagraphStyle("VakilCenter16", parent=body, fontName=bold_font, fontSize=16, leading=22, alignment=TA_CENTER, shaping=1, firstLineIndent=0, spaceAfter=8)
+    left = ParagraphStyle("VakilLeft", parent=body, alignment=TA_LEFT, firstLineIndent=0, spaceAfter=3)
+    center = ParagraphStyle("VakilCenter", parent=body, fontName=bold_font, alignment=TA_CENTER, firstLineIndent=0, spaceAfter=3, shaping=1)
+    right = ParagraphStyle("VakilRight", parent=body, alignment=TA_RIGHT, firstLineIndent=0, spaceAfter=4)
+    noindent = ParagraphStyle("VakilNoIndent", parent=body, firstLineIndent=0, spaceAfter=10)
     story = []
 
     court = str(draft.get("court_heading", "")).strip()
     case = str(draft.get("case_heading", "")).strip()
     parties = [str(x).strip() for x in draft.get("parties", []) if str(x).strip()]
-
     if court:
         story.append(Paragraph(_escape_xml(court), center16))
     if case:
-        story.append(Paragraph(_escape_xml(case), center16))
-    if parties:
-        plaintiff, defendant, other = split_party_blocks(parties)
-        if plaintiff and defendant:
-            for party in plaintiff:
-                story.append(Paragraph(_escape_xml(party), left))
-            story.append(Spacer(1, 2))
-            story.append(
-                Paragraph(
-                    _escape_xml("बनाम"),
-                    center,
-                )
-            )
-            story.append(Spacer(1, 6))
-            for party in defendant:
-                story.append(Paragraph(_escape_xml(party), left))
-            for party in other:
-                story.append(Paragraph(_escape_xml(party), left))
-        else:
-            for party in parties:
-                story.append(Paragraph(_escape_xml(party), left))
+        story.append(Paragraph(_escape_xml(case), ParagraphStyle("Case", parent=center16, fontSize=14, leading=20, spaceAfter=10)))
 
-    for section in draft.get("sections", []) or []:
-        key = str(section.get("key", "")).strip().lower()
-        if key in {"court", "parties"}:
-            continue
-        paragraphs = section.get("paragraphs", []) or []
-        if not paragraphs:
-            continue
+    plaintiff, defendant, other = split_party_blocks(parties)
+    if plaintiff and defendant:
+        for party in plaintiff:
+            story.append(Paragraph(_escape_xml(party), left))
+        story.append(Paragraph(_escape_xml("बनाम"), center))
+        for party in defendant:
+            story.append(Paragraph(_escape_xml(party), left))
+        for party in other:
+            story.append(Paragraph(_escape_xml(party), left))
+    else:
+        for party in parties:
+            story.append(Paragraph(_escape_xml(party), left))
 
-        title = str(section.get("title", "")).strip()
-        if title:
-            story.append(
-                Paragraph(
-                    _escape_xml(title.split(" / ")[0]),
-                    ParagraphStyle(
-                        "SectionTitle",
-                        parent=center16,
-                        underline=True,
-                    ),
-                )
-            )
+    story.append(Paragraph(_escape_xml(_title_text(draft)), ParagraphStyle("Title", parent=center16, underline=True, spaceBefore=4, spaceAfter=10)))
 
-        for idx, paragraph in enumerate(paragraphs, 1):
-            if key in {"facts", "material_facts", "cause_of_action", "reliefs", "prayer"}:
-                text = numbered(paragraph, idx)
-            else:
-                text = str(paragraph).strip()
-            if text:
-                story.append(Paragraph(_escape_xml(text), body))
+    opening = str(draft.get("opening_averment", "")).strip()
+    if opening:
+        story.append(Paragraph(_escape_xml(opening), noindent))
+
+    for idx, paragraph in enumerate(_ordered_pleading_items(draft), 1):
+        story.append(Paragraph(_escape_xml(numbered(paragraph, idx)), body))
+
+    prayer = [str(x).strip() for x in draft.get("prayer", []) or [] if str(x).strip()]
+    if prayer:
+        story.append(Paragraph("प्रार्थना", ParagraphStyle("PrayerTitle", parent=center16, underline=True, spaceBefore=2, spaceAfter=8)))
+        story.append(Paragraph(_escape_xml("अतः वादी माननीय न्यायालय से प्रार्थना करता है कि:-"), noindent))
+        labels = ["(क)", "(ख)", "(ग)", "(घ)", "(ङ)", "(च)"]
+        for idx, item in enumerate(prayer):
+            label = labels[idx] if idx < len(labels) else f"({idx + 1})"
+            story.append(Paragraph(_escape_xml(f"{label} {item}"), ParagraphStyle(f"Prayer{idx}", parent=body, firstLineIndent=0, spaceAfter=10)))
+
+    for line in _signature_lines(draft):
+        story.append(Paragraph(_escape_xml(line), right))
 
     verification = str(draft.get("verification", "") or "").strip()
     if verification:
-        story.append(Paragraph("सत्यापन", center16))
+        story.append(Paragraph("सत्यापन", ParagraphStyle("VerificationTitle", parent=center16, underline=True, spaceBefore=8, spaceAfter=8)))
         for line in verification.splitlines():
             if line.strip():
                 story.append(Paragraph(_escape_xml(line.strip()), body))
-
-    signatures = [
-        str(x).strip()
-        for x in draft.get("signature_block", []) or []
-        if str(x).strip()
-    ]
-    for line in signatures:
-        story.append(Paragraph(_escape_xml(line), right))
-
     return story
 
 
