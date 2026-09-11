@@ -51,9 +51,9 @@ def numbered(text: str, n: int) -> str:
     text = str(text).strip()
     if not text:
         return ""
-    # Preserve an existing source/model numbering convention.
-    if re.match(r"^\s*\d+\s*(?:\([^)]*\))?\s*[:.)-]?\s*", text):
-        return text
+    # The model is forbidden from numbering. As a defensive measure, remove
+    # one accidental leading numeric/Hindi-letter prefix before rendering.
+    text = re.sub(r"^\s*\d+\s*(?:\([^)]*\))?\s*[:.)-]?\s*", "", text)
     return f"{n} ({hindi_number(n)}) : {text}"
 
 
@@ -211,17 +211,13 @@ def _add_docx_para(
 
 
 def _ordered_pleading_items(draft: dict[str, Any]) -> list[str]:
-    """Flatten the pleading body into one continuous numbered sequence."""
-    items: list[str] = []
-    if str(draft.get("opening_averment", "")).strip():
-        # Opening is rendered separately; never number it.
-        pass
-    for key in ("pleadings", "cause_of_action", "jurisdiction", "limitation", "valuation_court_fee"):
-        for item in draft.get(key, []) or []:
-            text = str(item).strip()
-            if text:
-                items.append(text)
-    return items
+    """Return the single approved pleading sequence.
+
+    Phase 7.1 intentionally does not flatten separate cause/jurisdiction/etc.
+    arrays because doing so caused duplicated or restarted numbering. The AI
+    structural planner decides the order before drafting.
+    """
+    return [str(x).strip() for x in (draft.get("pleadings", []) or []) if str(x).strip()]
 
 
 def _title_text(draft: dict[str, Any]) -> str:
