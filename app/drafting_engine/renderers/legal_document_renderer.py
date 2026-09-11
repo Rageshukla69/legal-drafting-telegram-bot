@@ -63,33 +63,29 @@ def normalize_between_label(value: str) -> str:
 
 
 def _font_path() -> str:
-    candidates = [
+    bundled = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "NotoSansDevanagari-Regular.ttf"
+    if bundled.exists():
+        return str(bundled)
+    for p in (
         "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Medium.ttf",
         "/usr/share/fonts/truetype/lohit-devanagari/Lohit-Devanagari.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ]
-    for p in candidates:
+    ):
         if Path(p).exists():
             return p
-    raise RuntimeError(
-        "No Unicode Devanagari TTF font found. "
-        "Install Noto Sans Devanagari or Lohit Devanagari."
-    )
+    raise RuntimeError("Unicode Devanagari font not found.")
 
 
 def _font_bold_path() -> str:
-    candidates = [
+    bundled = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "NotoSansDevanagari-Bold.ttf"
+    if bundled.exists():
+        return str(bundled)
+    for p in (
         "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-SemiBold.ttf",
         "/usr/share/fonts/truetype/lohit-devanagari/Lohit-Devanagari.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    ]
-    for p in candidates:
+    ):
         if Path(p).exists():
             return p
     return _font_path()
-
 
 def _register_pdf_fonts() -> tuple[str, str]:
     regular = "VakilDeva"
@@ -284,11 +280,13 @@ def _pdf_story(draft: dict[str, Any], font: str, bold_font: str):
     body = ParagraphStyle(
         "VakilBody", parent=styles["BodyText"], fontName=font,
         fontSize=14, leading=21, alignment=TA_JUSTIFY,
+        shaping=1,
         firstLineIndent=0.5 * inch, spaceAfter=12,
     )
     center16 = ParagraphStyle(
         "VakilCenter16", parent=body, fontName=bold_font,
         fontSize=16, leading=22, alignment=TA_CENTER,
+        shaping=1,
         firstLineIndent=0, spaceAfter=8,
     )
     left = ParagraphStyle(
@@ -297,7 +295,7 @@ def _pdf_story(draft: dict[str, Any], font: str, bold_font: str):
     )
     center = ParagraphStyle(
         "VakilCenter", parent=body, fontName=bold_font,
-        alignment=TA_CENTER, firstLineIndent=0, spaceAfter=4,
+        alignment=TA_CENTER, firstLineIndent=0, spaceAfter=4, shaping=1,
     )
     right = ParagraphStyle(
         "VakilRight", parent=body, alignment=TA_RIGHT,
