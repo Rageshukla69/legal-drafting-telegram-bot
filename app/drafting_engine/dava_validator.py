@@ -1,55 +1,91 @@
-"""Deterministic safety and structure checks for AI-generated Dava drafts."""
-from __future__ import annotations
 import re
-from typing import Any
+import logging
+from dataclasses import dataclass
+from typing import Dict, Any, List
 
-FORBIDDEN_HEADINGS = {"वादी का परिचय", "प्रतिवादी का परिचय", "विवादित संपत्ति", "वाद के तथ्य"}
-COMPLETED_POSITIVE = re.compile(r"(?:कब्जा कर लिया|कब्जा किया है|कब्जे में ले लिया|बेदखल कर दिया)")
-ATTEMPTED = re.compile(r"(?:कब्जा करने का प्रयास|कब्जा करने का प्रयत्न|कब्जा करने की कोशिश)")
-THREAT = re.compile(r"(?:धमकी|धमकाया|धमकी दी)")
-NUMBERED_PREFIX = re.compile(r"^\s*(?:\d+\s*(?:\([^)]*\))?|\([क-ह]\)|\([0-9]+\))\s*[:.)-]")
+@dataclass
+class ValidationResult:
+    is_valid: bool
+    errors: List[str]
 
+class DavaValidator:
+    """
+    The final deterministic gatekeeper before document rendering.
+    Intercepts hallucinated facts, structural violations, and formatting leaks.
+    """
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+        
+        # Heuristics for catching reliefs leaked into factual paragraphs
+        self.relief_keywords = [
+            r"प्रार्थना करता है", 
+            r"राहत चाहता है", 
+            r"रोका जाए", 
+            r"मना किया जाए", 
+            r"निषेधाज्ञा जारी की जाए"
+        ]
+        
+        # Heuristics for catching hallucinated statutes/sections
+        self.statute_patterns = [
+            r"धारा \d+", 
+            r"Section \d+", 
+            r"सीपीसी", 
+            r"C\.?P\.?C\.?",
+            r"अधिनियम"
+        ]
 
-def _all_text(draft: dict[str, Any]) -> str:
-    chunks: list[str] = []
-    for value in draft.values():
-        if isinstance(value, str):
-            chunks.append(value)
-        elif isinstance(value, list):
-            chunks.extend(str(x) for x in value)
-    return "\n".join(chunks)
+    def validate(self, draft_schema: Dict[str, Any], case_data: Dict[str, Any]) -> ValidationResult:
+        self.logger.info(f"Validating draft for case: {case_data.get('case_id', 'unknown')}")
+        errors = []
 
+        # 1. Structural Completeness Check
+        required_keys = ['court_name', 'plaintiffs', 'defendants', 'factual_averments', 'prayer']
+        for key in required_keys:
+            if not draft_schema.get(key):
+                errors.append(f"संरचनात्मक त्रुटि: '{key}' अनुभाग गायब या रिक्त है।")
 
-def validate_dava_draft(draft: dict[str, Any], facts: dict[str, Any], structure: dict[str, Any] | None = None) -> list[str]:
-    errors: list[str] = []
-    text = _all_text(draft)
+        factual_averments = draft_schema.get('factual_averments', [])
+        
+        # 2. Formatting Leak Check (Numbering & "यह कि")
+        for i, averment in enumerate(factual_averments):
+            if re.match(r"^(\d+|\([कखगabc]\)|[ivx]+)[\.\)]?\s*", averment):
+                errors.append(f"प्रारूपण त्रुटि: तथ्य {i+1} में AI द्वारा संख्या (numbering) जोड़ी गई है।")
+            if averment.strip().startswith("यह कि"):
+                errors.append(f"प्रारूपण त्रुटि: तथ्य {i+1} 'यह कि' से शुरू हो रहा है, जिसे रेंडरर द्वारा जोड़ा जाना चाहिए।")
 
-    for heading in FORBIDDEN_HEADINGS:
-        if re.search(rf"(?m)^\s*{re.escape(heading)}\s*$", text):
-            errors.append(f"generic_metadata_heading:{heading}")
+        # 3. Relief as Fact Check
+        for i, averment in enumerate(factual_averments):
+            for keyword in self.relief_keywords:
+                if re.search(keyword, averment):
+                    errors.append(f"तथ्यात्मक त्रुटि: तथ्य {i+1} में राहत/प्रार्थना ('{keyword}') शामिल है। इसे केवल Prayer अनुभाग में होना चाहिए।")
+                    break
 
-    source = _all_text(facts)
-    if ATTEMPTED.search(source) and COMPLETED_POSITIVE.search(text):
-        errors.append("event_status_upgrade:attempted_to_completed")
+        # 4. Factual Escalation Check (The Golden Rule)
+        # Prevents AI from turning "attempt/threat" into a "completed act".
+        raw_facts = " ".join(case_data.get('facts', []))
+        draft_facts = " ".join(factual_averments)
+        
+        has_threat = "धमकी" in raw_facts or "प्रयास" in raw_facts
+        has_dispossession = "कब्जा कर लिया" in raw_facts or "बेदखल" in raw_facts
+        
+        if has_threat and not has_dispossession:
+            if "कब्जा कर लिया" in draft_facts or "बेदखल कर दिया" in draft_facts:
+                errors.append("तथ्यात्मक त्रुटि: AI ने 'धमकी/प्रयास' को 'पूर्ण कब्जे/बेदखली' में बदल दिया है।")
 
-    pleadings = [str(x).strip() for x in draft.get("pleadings", []) if str(x).strip()]
-    for item in pleadings:
-        if NUMBERED_PREFIX.search(item):
-            errors.append("model_numbered_paragraph:renderer_should_number")
-            break
+        # 5. Hallucinated Statutes Check
+        # If the user didn't mention specific acts/sections, the AI shouldn't invent them in the facts.
+        for pattern in self.statute_patterns:
+            if re.search(pattern, draft_facts, re.IGNORECASE) and not re.search(pattern, raw_facts, re.IGNORECASE):
+                errors.append(f"कानूनी त्रुटि: AI ने तथ्य अनुभाग में एक काल्पनिक क़ानून या धारा ('{pattern}') जोड़ दी है।")
+                break
+                
+        # 6. Duplication Check (Cause of Action vs Facts)
+        coa = draft_schema.get('cause_of_action', "")
+        if coa and coa in factual_averments:
+            errors.append("संरचनात्मक त्रुटि: 'वाद कारण' (Cause of Action) को तथ्यात्मक पैराग्राफ में हूबहू दोहराया गया है।")
 
-    # Exact duplicate paragraphs are almost always a planning/drafting failure.
-    normalized = [re.sub(r"\s+", "", x) for x in pleadings]
-    if len(normalized) != len(set(normalized)):
-        errors.append("duplicate_pleading_paragraph")
-
-    if structure:
-        expected = len(structure.get("paragraphs", []))
-        if expected and len(pleadings) != expected:
-            errors.append(f"structure_paragraph_count:{len(pleadings)}_expected_{expected}")
-
-    if not draft.get("prayer") and facts.get("reliefs"):
-        errors.append("missing_prayer")
-    if not str(draft.get("title", "")).strip() or str(draft.get("title", "")).strip() == "वाद पत्र":
-        errors.append("generic_title_only")
-    return errors
+        is_valid = len(errors) == 0
+        if not is_valid:
+            self.logger.warning(f"Validation failed with {len(errors)} errors: {errors}")
+            
+        return ValidationResult(is_valid=is_valid, errors=errors)
