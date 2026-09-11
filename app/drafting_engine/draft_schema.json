@@ -12,8 +12,5 @@
     "verification": {"type": "string"},
     "signature_block": {"type": "array", "items": {"type": "string"}}
   },
-  "required": [
-    "court_heading", "case_heading", "parties", "title", "opening_averment",
-    "pleadings", "prayer", "verification", "signature_block"
-  ]
+  "required": ["court_heading", "case_heading", "parties", "title", "opening_averment", "pleadings", "prayer", "verification", "signature_block"]
 }

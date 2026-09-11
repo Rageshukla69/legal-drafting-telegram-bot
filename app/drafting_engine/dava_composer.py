@@ -1,39 +1,35 @@
-"""Prompt package builder for the AI-structured Dava pipeline."""
+"""Prompt package builder for advocate-grade Dava drafting."""
 from __future__ import annotations
 from typing import Any
 
-
 class DavaComposer:
-    """Keeps drafting rules separate from the AI structural planner."""
-
     def plan(self, facts: dict[str, Any]) -> dict[str, Any]:
-        # Kept for backwards compatibility/tests. The live pipeline uses the AI planner.
         return {
             "document_type": "dava_plaint",
-            "style": "ai_structured_continuous_numbered_pleading",
-            "numbering_rule": "The renderer adds 1 (एक), 2 (दो), 3 (तीन) etc. The model must never number paragraphs.",
+            "style": "advocate_grade_continuous_numbered_pleading",
+            "numbering_rule": "Renderer assigns continuous 1 (एक), 2 (दो), ...; model never numbers paragraphs.",
             "required_facts_present": bool(facts),
         }
 
     def build_prompt_package(self, facts: dict, retrieval_context: str, structure: dict) -> dict:
         return {
             "system_rules": [
-                "Draft a genuine Indian civil Dava/Plaint, not a case summary, questionnaire, or intake report.",
-                "The supplied structure_plan is authoritative for the order and purpose of the numbered averments.",
-                "Write exactly one final pleading paragraph for each approved structure_plan.paragraphs item, in the same order. Do not add, merge, reorder, or duplicate paragraphs.",
-                "The renderer will add paragraph numbers. NEVER write paragraph numbers such as '1 (एक)', '1.', '(एक)' or similar numbering into the paragraph text.",
-                "Normally begin each numbered averment naturally with 'यह कि'.",
-                "Use only explicit case facts. Never invent names, parentage, addresses, dates, property particulars, rights, ownership, possession, events, documents, statutes, limitation, valuation, court fee, jurisdiction or reliefs.",
-                "Retrieved advocate corpus is only style/organization reference. It is never a factual source for this case.",
-                "Do not reproduce legacy/corrupted Hindi encoding from retrieved examples.",
-                "Do not expose internal metadata headings such as 'वादी का परिचय', 'प्रतिवादी का परिचय', 'विवादित संपत्ति' or 'वाद के तथ्य'.",
-                "Preserve factual modality exactly: an attempt remains an attempt; a threat remains a threat; apprehension remains apprehension; and no dispossession may be stated unless the facts expressly say dispossession occurred.",
-                "Do not convert a requested relief into a past event or factual allegation.",
-                "Avoid repetitive paragraphs. Cause of action, jurisdiction and other technical averments must have their own distinct purpose only when the structure plan includes them.",
-                "The prayer must contain only reliefs supported by the case facts and structure plan.",
-                "Do not assume conventional costs or other relief unless supported by the supplied facts/plan.",
-                "Use the fixed advocate block supplied in the application if present; never invent an advocate identity.",
-                "Use clean standard Unicode Hindi.",
+                "Draft a genuine Indian civil Dava/Plaint, not a summary, report, questionnaire, or template filled with labels.",
+                "The structure_plan is authoritative: produce exactly one substantive pleading paragraph for each approved plan item, in the same order.",
+                "The renderer adds numbering. Never put paragraph numbers into paragraph text.",
+                "Do not turn routine party identity into numbered averments; parties belong in the party block.",
+                "Do not expose generic metadata headings such as वादी का परिचय, प्रतिवादी का परिचय, विवादित संपत्ति, or वाद के तथ्य.",
+                "Use natural advocate-style Hindi, normally beginning substantive averments with 'यह कि'.",
+                "Group related facts naturally; do not create one paragraph for every input sentence.",
+                "Use only explicit case facts. Never invent ownership, title, dates, rights, possession, events, witnesses, documents, statutes, limitation, valuation, court fee, jurisdiction or relief.",
+                "Possession is not ownership. Cultivation is not automatically title. Attempt is not completion. Threat is not dispossession. Apprehension is not an event.",
+                "Preserve every material factual modality and chronology.",
+                "A requested relief belongs in prayer and must never appear as a past fact.",
+                "Cause of action and jurisdiction averments must add their distinct legal pleading purpose and must not merely repeat earlier sentences.",
+                "Only include limitation/valuation/court-fee material when the structure plan and supplied facts support it.",
+                "Prayer items must be supported by supplied reliefs; do not invent substantive remedies.",
+                "Use clean standard Unicode Hindi. Never copy corrupted legacy encoding.",
+                "Use the advocate identity in signature_block only if supplied by the application configuration; otherwise do not invent one.",
             ],
             "facts": facts,
             "structure_plan": structure,
