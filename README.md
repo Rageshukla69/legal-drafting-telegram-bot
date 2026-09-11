@@ -72,3 +72,27 @@ The repository is structured for a Heroku worker:
 `worker: python -m app.bot`
 
 Set the required environment variables in Heroku Config Vars. Never commit secrets.
+
+
+## Azure v1 configuration
+
+The Azure adapter uses the OpenAI Python client with the Azure OpenAI v1
+endpoint. Configure these Heroku Config Vars:
+
+- `TELEGRAM_BOT_TOKEN`
+- `AZURE_OPENAI_ENDPOINT` (for example, `https://<resource>.services.ai.azure.com/openai/v1`)
+- `AZURE_OPENAI_API_KEY`
+- `AZURE_OPENAI_DEPLOYMENT` (for example, `gpt-4.1-mini`)
+
+`AZURE_OPENAI_API_VERSION` is not required by this v1 adapter.
+
+## Package/import note
+
+Run the bot from the repository root with:
+
+```bash
+python -m app.bot
+```
+
+All internal imports use the `app.*` package path or relative imports, so the
+Heroku worker does not depend on the current working directory being `app/`.
