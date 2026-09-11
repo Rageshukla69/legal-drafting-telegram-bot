@@ -5,23 +5,20 @@
     "court_heading": {"type": "string"},
     "case_heading": {"type": "string"},
     "parties": {"type": "array", "items": {"type": "string"}},
-    "between_label": {"type": "string"},
-    "sections": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "key": {"type": "string"},
-          "title": {"type": "string"},
-          "paragraphs": {"type": "array", "items": {"type": "string"}}
-        },
-        "required": ["key", "title", "paragraphs"]
-      }
-    },
-    "reliefs": {"type": "array", "items": {"type": "string"}},
+    "title": {"type": "string"},
+    "opening_averment": {"type": "string"},
+    "pleadings": {"type": "array", "items": {"type": "string"}},
+    "cause_of_action": {"type": "array", "items": {"type": "string"}},
+    "jurisdiction": {"type": "array", "items": {"type": "string"}},
+    "limitation": {"type": "array", "items": {"type": "string"}},
+    "valuation_court_fee": {"type": "array", "items": {"type": "string"}},
+    "prayer": {"type": "array", "items": {"type": "string"}},
     "verification": {"type": "string"},
     "signature_block": {"type": "array", "items": {"type": "string"}}
   },
-  "required": ["court_heading", "case_heading", "parties", "between_label", "sections", "reliefs", "verification", "signature_block"]
+  "required": [
+    "court_heading", "case_heading", "parties", "title", "opening_averment",
+    "pleadings", "cause_of_action", "jurisdiction", "limitation",
+    "valuation_court_fee", "prayer", "verification", "signature_block"
+  ]
 }

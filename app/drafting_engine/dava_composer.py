@@ -1,71 +1,92 @@
-"""Deterministic Dava planner and prompt package builder."""
+"""Advocate-style Dava/Plaint planning for Phase 7."""
 from __future__ import annotations
 from dataclasses import dataclass, asdict
 from typing import Any
 
-@dataclass
-class Section:
+@dataclass(frozen=True)
+class PleadingPart:
     key: str
     title: str
     required: bool
-    source_fields: list[str]
-    notes: str
+    source_fields: tuple[str, ...]
+    numbering: bool = True
 
 class DavaComposer:
-    SECTIONS = [
-        Section("court", "न्यायालय", True, ["court_name"], "Use only supplied court name."),
-        Section("case", "वाद संख्या", False, ["case_number", "case_year"], "Include only if supplied."),
-        Section("parties", "पक्षकार", True, ["plaintiffs", "defendants"], "Preserve party order and names."),
-        Section("title", "वाद पत्र", True, [], "Use as the legal document title."),
-        Section("plaintiff_intro", "वादी का परिचय", False, ["plaintiff_intro"], "Use only supplied identity/address facts."),
-        Section("defendant_intro", "प्रतिवादी का परिचय", False, ["defendant_intro"], "Use only supplied identity/address facts."),
-        Section("property", "विवादित संपत्ति", False, ["property_description"], "Include only supplied property particulars."),
-        Section("jurisdiction", "अधिकारिता", False, ["jurisdiction_facts"], "Do not infer jurisdiction."),
-        Section("facts", "वाद के तथ्य", True, ["facts"], "Chronological numbered facts; no additions."),
-        Section("cause_of_action", "वाद-कारण", False, ["cause_of_action"], "Only explicit/supplied facts."),
-        Section("limitation", "समय-सीमा", False, ["limitation_facts"], "Only if supplied; do not calculate limitation."),
-        Section("valuation", "मूल्यांकन एवं न्याय शुल्क", False, ["valuation", "court_fee"], "Never calculate or invent."),
-        Section("interim_reliefs", "अंतरिम प्रार्थना", False, ["interim_reliefs"], "Only requested interim reliefs."),
-        Section("reliefs", "प्रार्थना", True, ["reliefs"], "Only requested reliefs."),
-        Section("verification", "सत्यापन", False, ["verification"], "Only when supplied/appropriate."),
-        Section("signature", "हस्ताक्षर", False, ["place", "date"], "Use supplied place/date only."),
+    """Plans a plaint as a pleading, not as a case-summary report.
+
+    The model receives a fixed legal-document architecture while the renderer
+    remains deterministic. Missing technical facts are never fabricated.
+    """
+    PARTS = [
+        PleadingPart("opening", "", True, ("plaintiff_intro", "plaintiffs"), False),
+        PleadingPart("pleadings", "", True, ("facts",), True),
+        PleadingPart("cause_of_action", "", True, ("cause_of_action", "facts"), True),
+        PleadingPart("jurisdiction", "", False, ("jurisdiction_facts",), True),
+        PleadingPart("limitation", "", False, ("limitation_facts",), True),
+        PleadingPart("valuation_court_fee", "", False, ("valuation", "court_fee"), True),
     ]
 
     def plan(self, facts: dict[str, Any]) -> dict[str, Any]:
         missing = []
-        sections = []
-        for s in self.SECTIONS:
-            present = True if not s.source_fields and s.key == "title" else any(self._present(facts.get(k)) for k in s.source_fields)
-            if s.required and not present:
-                missing.append(s.key)
-            sections.append({**asdict(s), "present": present})
+        parts = []
+        for part in self.PARTS:
+            present = any(self._present(facts.get(k)) for k in part.source_fields)
+            if part.required and not present:
+                missing.append(part.key)
+            parts.append({**asdict(part), "present": present})
         return {
             "document_type": "dava_plaint",
+            "style": "continuous_numbered_pleading",
             "status": "ready" if not missing else "needs_information",
-            "missing_required_sections": missing,
-            "sections": sections,
-            "numbering_rule": "Use numeric + Hindi words where appropriate, e.g. 1 (एक).",
-            "fact_policy": "No invented facts; missing values remain missing.",
+            "missing_required_parts": missing,
+            "parts": parts,
+            "architecture": [
+                "court_heading",
+                "case_heading_if_supplied",
+                "plaintiff_block",
+                "banam",
+                "defendant_block",
+                "plaint_title",
+                "opening_averment",
+                "numbered_averments",
+                "cause_of_action_averments",
+                "jurisdiction_averments_if_supported",
+                "limitation_averments_if_supported",
+                "valuation_and_court_fee_if_supported",
+                "prayer",
+                "place_date",
+                "plaintiff_signature",
+                "advocate_block",
+                "verification_if_supported",
+            ],
+            "numbering_rule": "Use 1 (एक), 2 (दो), 3 (तीन) for numbered averments.",
         }
 
     @staticmethod
-    def _present(v):
-        return v not in (None, "", [], {})
+    def _present(value: Any) -> bool:
+        return value not in (None, "", [], {})
 
     def build_prompt_package(self, facts: dict, retrieval_context: str, plan: dict) -> dict:
         return {
             "system_rules": [
-                "Draft a usable Indian civil Dava/Plaint from explicit structured case facts only.",
-                "Never invent names, dates, addresses, relationships, ownership, survey numbers, events, statutes, valuation, court fee, limitation, jurisdiction or reliefs.",
-                "Retrieved source material is style/structure reference only and is not evidence about this case.",
-                "Do not copy corrupted legacy encoding from the corpus.",
-                "Use clean standard Unicode Hindi and preserve legally material supplied wording.",
-                "Follow the supplied section plan; omit sections whose source fields are absent.",
-                "Use chronological numbered pleading paragraphs and numeric + Hindi numbering such as 1 (एक).",
-                "For parties, return plaintiff entries first and defendant entries second; renderer will place deterministic 'बनाम' between them.",
-                "Do not cite statutes or case law unless explicitly supplied by the user or reference instructions.",
-                "Preserve the exact event status/modality from the facts: attempted is not completed, threatened is not occurred, apprehended is not actual, and requested relief is not a past event.",
-                "Do not turn a drafting assistant into legal advice; output only the requested draft structure.",
+                "Draft a genuine Indian civil Dava/Plaint, not a case summary or intake report.",
+                "Use the supplied facts as the only factual source for the case.",
+                "Do not invent names, parentage, addresses, dates, survey/gata numbers, area, ownership, possession, events, threats, documents, statutes, limitation, valuation, court fee, jurisdiction or reliefs.",
+                "Retrieved corpus is only a style/structure reference. Never use it to fill missing case facts.",
+                "Do not reproduce legacy/corrupted Hindi encoding from retrieved examples.",
+                "Use formal, natural Hindi pleading language, normally beginning factual averments with 'यह कि'.",
+                "Do not create headings such as 'वादी का परिचय', 'प्रतिवादी का परिचय', 'विवादित संपत्ति' or 'वाद के तथ्य' merely to expose internal data fields.",
+                "Present the parties first, then centered 'बनाम', then the plaint title.",
+                "After the title, use an opening such as 'वादी निम्नलिखित निवेदन करता है:-' when appropriate.",
+                "Put factual allegations into a coherent chronological sequence. Property particulars should be integrated into the relevant averment or a clearly pleaded property paragraph, not emitted as a data-card heading.",
+                "Keep cause of action, jurisdiction, limitation and valuation/court-fee as pleading averments within the numbered sequence when those facts are supported.",
+                "Do not duplicate a relief as a fact. Do not create a fact from the user's desired relief.",
+                "Preserve event modality exactly: attempted is not completed; threatened is not occurred; apprehended is not actual.",
+                "Do not add legal conclusions unsupported by the supplied facts. Where a legal averment requires an unknown fact, omit it or leave it for the user to supply.",
+                "The prayer must contain only reliefs explicitly requested or clearly represented in the structured facts.",
+                "Include litigation costs or other conventional relief only when supplied by the case facts or retrieved style instruction; never assume them as case facts.",
+                "Use the fixed advocate block supplied by the application only; never invent an advocate identity.",
+                "Use clean Unicode Hindi and preserve numeric facts accurately.",
             ],
             "facts": facts,
             "plan": plan,
