@@ -1,29 +1,52 @@
 {
-  "type": "object",
-  "additionalProperties": false,
-  "properties": {
-    "document_type": {"type": "string", "enum": ["dava_plaint"]},
-    "nature": {"type": "string"},
-    "title": {"type": "string"},
-    "opening": {"type": "string"},
-    "paragraphs": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "order": {"type": "integer", "minimum": 1},
-          "section": {"type": "string", "enum": ["intro", "property", "right_or_possession", "defendant", "event", "response", "apprehension", "cause_of_action", "jurisdiction", "limitation", "valuation_court_fee", "other"]},
-          "purpose": {"type": "string"},
-          "source_fields": {"type": "array", "items": {"type": "string"}},
-          "required": {"type": "boolean"}
-        },
-        "required": ["order", "section", "purpose", "source_fields", "required"]
+  "name": "dava_structural_plan",
+  "strict": true,
+  "schema": {
+    "type": "object",
+    "properties": {
+      "document_type": {
+        "type": "string",
+        "description": "e.g., Dava, Written Statement"
+      },
+      "nature_of_suit": {
+        "type": "string",
+        "description": "e.g., स्थायी निषेधाज्ञा (Permanent Injunction)"
+      },
+      "factual_averments": {
+        "type": "array",
+        "description": "Chronological list of substantive facts. MUST NOT contain reliefs, prayer requests, or paragraph numbers.",
+        "items": {
+          "type": "string"
+        }
+      },
+      "cause_of_action": {
+        "type": "string",
+        "description": "When and where the cause of action arose (e.g., dates of threats)."
+      },
+      "jurisdiction": {
+        "type": "string",
+        "description": "Facts establishing the territorial and pecuniary jurisdiction of the court."
+      },
+      "valuation_and_court_fee": {
+        "type": "string",
+        "description": "Valuation of the suit and court fee details. Leave blank if not provided."
+      },
+      "prayer": {
+        "type": "array",
+        "description": "The specific reliefs requested by the plaintiff. MUST NOT be mixed into factual_averments.",
+        "items": {
+          "type": "string"
+        }
       }
     },
-    "prayer_items": {"type": "array", "items": {"type": "string"}},
-    "include_verification": {"type": "boolean"},
-    "warnings": {"type": "array", "items": {"type": "string"}}
-  },
-  "required": ["document_type", "nature", "title", "opening", "paragraphs", "prayer_items", "include_verification", "warnings"]
+    "required": [
+      "document_type",
+      "nature_of_suit",
+      "factual_averments",
+      "cause_of_action",
+      "jurisdiction",
+      "prayer"
+    ],
+    "additionalProperties": false
+  }
 }
