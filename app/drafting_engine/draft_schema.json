@@ -2,71 +2,26 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "court_heading": {
-      "type": "string"
-    },
-    "case_heading": {
-      "type": "string"
-    },
-    "parties": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
-    "between_label": {
-      "type": "string"
-    },
+    "court_heading": {"type": "string"},
+    "case_heading": {"type": "string"},
+    "parties": {"type": "array", "items": {"type": "string"}},
+    "between_label": {"type": "string"},
     "sections": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "key": {
-            "type": "string"
-          },
-          "title": {
-            "type": "string"
-          },
-          "paragraphs": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          }
+          "key": {"type": "string"},
+          "title": {"type": "string"},
+          "paragraphs": {"type": "array", "items": {"type": "string"}}
         },
-        "required": [
-          "key",
-          "title",
-          "paragraphs"
-        ]
+        "required": ["key", "title", "paragraphs"]
       }
     },
-    "reliefs": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
-    "verification": {
-      "type": "string"
-    },
-    "signature_block": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    }
+    "reliefs": {"type": "array", "items": {"type": "string"}},
+    "verification": {"type": "string"},
+    "signature_block": {"type": "array", "items": {"type": "string"}}
   },
-  "required": [
-    "court_heading",
-    "case_heading",
-    "parties",
-    "between_label",
-    "sections",
-    "reliefs",
-    "verification",
-    "signature_block"
-  ]
+  "required": ["court_heading", "case_heading", "parties", "between_label", "sections", "reliefs", "verification", "signature_block"]
 }

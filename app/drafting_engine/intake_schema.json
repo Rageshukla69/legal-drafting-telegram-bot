@@ -1,0 +1,33 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "court_name": {"type": "string"},
+    "case_number": {"type": "string"},
+    "case_year": {"type": "string"},
+    "plaintiffs": {"type": "array", "items": {"type": "string"}},
+    "defendants": {"type": "array", "items": {"type": "string"}},
+    "plaintiff_intro": {"type": "string"},
+    "defendant_intro": {"type": "string"},
+    "property_description": {"type": "string"},
+    "cause_of_action": {"type": "string"},
+    "jurisdiction_facts": {"type": "string"},
+    "limitation_facts": {"type": "string"},
+    "valuation": {"type": "string"},
+    "court_fee": {"type": "string"},
+    "facts": {"type": "array", "items": {"type": "string"}},
+    "reliefs": {"type": "array", "items": {"type": "string"}},
+    "interim_reliefs": {"type": "array", "items": {"type": "string"}},
+    "documents": {"type": "array", "items": {"type": "string"}},
+    "place": {"type": "string"},
+    "date": {"type": "string"},
+    "verification": {"type": "string"}
+  },
+  "required": [
+    "court_name", "case_number", "case_year", "plaintiffs", "defendants",
+    "plaintiff_intro", "defendant_intro", "property_description",
+    "cause_of_action", "jurisdiction_facts", "limitation_facts", "valuation",
+    "court_fee", "facts", "reliefs", "interim_reliefs", "documents", "place",
+    "date", "verification"
+  ]
+}
