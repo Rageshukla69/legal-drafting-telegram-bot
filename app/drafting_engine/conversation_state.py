@@ -62,6 +62,8 @@ REQUIRED_FIELDS = [
 ]
 
 IMPORTANT_FIELDS = [
+    # Advocate-style intake order: first collect facts needed to understand
+    # the dispute and draft; technical filing fields come afterwards.
     ("plaintiff_intro", "वादी का पूरा परिचय/पता"),
     ("defendant_intro", "प्रतिवादी का पूरा परिचय/पता"),
     ("property_description", "विवादित संपत्ति का पूरा विवरण"),
