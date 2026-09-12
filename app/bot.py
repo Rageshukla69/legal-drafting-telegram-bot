@@ -27,6 +27,7 @@ from app.drafting_engine.conversation_state import CaseState
 from app.drafting_engine.dava_orchestrator import DavaOrchestrator
 from app.drafting_engine.renderers.legal_document_renderer import render_both
 from app.drafting_engine.azure_speech import transcribe_voice
+from app.drafting_engine.gemini_client import GeminiError
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
 log = logging.getLogger("legal-bot")
@@ -189,6 +190,23 @@ def _ready_message(state: CaseState | None = None) -> str:
     )
 
 
+def _draft_failure_message(exc: Exception) -> str:
+    if isinstance(exc, GeminiError) and exc.retryable:
+        return (
+            "⏳ Gemini AI सेवा अभी अत्यधिक व्यस्त है (503/overload) और automatic retry के बाद भी उपलब्ध नहीं हुई।\n"
+            "कृपया 1-2 मिनट बाद फिर कोशिश करें, या दोबारा 'Dava Draft तैयार करें' दबाएँ।"
+        )
+    if isinstance(exc, GeminiError):
+        return (
+            "Draft generate नहीं हो सका। AI service configuration में समस्या लग रही है "
+            "(जैसे GEMINI_API_KEY/GEMINI_MODEL)। कृपया bot administrator से जाँच कराएँ।"
+        )
+    return (
+        "Draft generate नहीं हो सका। Azure configuration या document renderer जाँचें.\n"
+        "कृपया message दोबारा भेजें या /newcase से नया case शुरू करें।"
+    )
+
+
 def _draft_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Dava Draft तैयार करें", callback_data="draft")],
@@ -301,9 +319,9 @@ async def redraft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         state.status = "drafted"
         store.save(update.effective_user.id, state)
         await update.message.reply_text("✅ नया Dava draft तैयार है।")
-    except Exception:
+    except Exception as exc:
         log.exception("Redraft failed")
-        await update.message.reply_text("Draft generate नहीं हो सका। कृपया थोड़ी देर बाद फिर कोशिश करें।")
+        await update.message.reply_text(_draft_failure_message(exc))
 
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -339,10 +357,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.message.reply_text("✅ Dava तैयार है। DOCX और PDF दोनों भेज दिए गए हैं।")
     except Exception as exc:
         log.exception("Draft failed")
-        await query.message.reply_text(
-            "Draft generate नहीं हो सका। Azure configuration या document renderer जाँचें.\n"
-            "कृपया message दोबारा भेजें या /newcase से नया case शुरू करें।"
-        )
+        await query.message.reply_text(_draft_failure_message(exc))
 
 
 def build_application() -> Application:
