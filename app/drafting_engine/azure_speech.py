@@ -2,7 +2,15 @@ from __future__ import annotations
 import json, os
 import requests
 
+from .http_retry import build_retrying_session
+
 class AzureSpeechError(RuntimeError): pass
+
+_session = build_retrying_session(
+    max_retries=int(os.getenv('AZURE_SPEECH_MAX_RETRIES', '3')),
+    backoff_factor=float(os.getenv('AZURE_SPEECH_RETRY_BACKOFF_SECONDS', '1.5')),
+    backoff_max=float(os.getenv('AZURE_SPEECH_RETRY_BACKOFF_MAX_SECONDS', '60')),
+)
 
 def transcribe_voice(audio_bytes:bytes, filename='telegram_voice.ogg')->str:
     key=os.getenv('AZURE_SPEECH_KEY','').strip(); endpoint=os.getenv('AZURE_SPEECH_ENDPOINT','').strip().rstrip('/')
@@ -18,7 +26,7 @@ def transcribe_voice(audio_bytes:bytes, filename='telegram_voice.ogg')->str:
     elif filename.lower().endswith('.flac'): mime='audio/flac'
     url=f'{endpoint}/speechtotext/transcriptions:transcribe?api-version=2025-10-15'
     files={'audio':(filename,audio_bytes,mime),'definition':(None,json.dumps(definition,ensure_ascii=False),'application/json')}
-    try: r=requests.post(url,headers={'Ocp-Apim-Subscription-Key':key},files=files,timeout=float(os.getenv('AZURE_SPEECH_TIMEOUT_SECONDS','90')))
+    try: r=_session.post(url,headers={'Ocp-Apim-Subscription-Key':key},files=files,timeout=float(os.getenv('AZURE_SPEECH_TIMEOUT_SECONDS','90')))
     except requests.RequestException as e: raise AzureSpeechError(f'Azure Speech network error: {e}') from e
     if not r.ok: raise AzureSpeechError(f'Azure Speech HTTP {r.status_code}: {r.text[:3000]}')
     try: body=r.json()
