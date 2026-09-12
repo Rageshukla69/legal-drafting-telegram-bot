@@ -1,25 +1,16 @@
-"""Gemini Dava composer using a separately analyzed corpus plan."""
 from __future__ import annotations
-import json
+import json, os
 from pathlib import Path
 from typing import Any
 from .gemini_client import GeminiClient
-from .hybrid_retriever import AdvocateCorpusRetriever
-
-ROOT = Path(__file__).resolve().parent
-
-class DavaComposer81:
-    def __init__(self, client: GeminiClient | None = None):
-        self.client = client or GeminiClient()
-
-    def compose(self, facts: dict[str, Any], plan: dict[str, Any], hits: list[dict[str, Any]]) -> dict[str, Any]:
-        refs = AdvocateCorpusRetriever.compact_context(hits)
-        payload = {
-            "current_case_facts": facts,
-            "structure_plan": plan,
-            "retrieved_advocate_examples": refs,
-            "output_contract": "Generate only the new Dava JSON. Current facts are authoritative; examples are style/structure references only."
-        }
-        schema = json.loads((ROOT / "schemas" / "dava_draft.json").read_text(encoding="utf-8"))
-        system = (ROOT / "prompts" / "dava_master.txt").read_text(encoding="utf-8") + "\n\n" + (ROOT / "prompts" / "dava_composer.txt").read_text(encoding="utf-8")
-        return self.client.structured(system_instruction=system, payload=payload, schema=schema, temperature=0.15)
+from .gemini_prompts import DRAFT_SYSTEM
+ROOT=Path(__file__).resolve().parent
+class DavaComposer:
+    def __init__(self):
+        self.client=GeminiClient(); self.schema=json.loads((ROOT/'draft_schema.json').read_text(encoding='utf-8'))
+    def plan(self,facts):
+        return {'document_type':'dava_plaint','style':'advocate_grade_continuous_numbered_pleading','numbering_rule':'Renderer assigns continuous Hindi-numbered paragraphs; model never numbers paragraphs.','required_facts_present':bool(facts)}
+    def build_prompt_package(self,facts,retrieval_context,structure):
+        return {'CASE_FACTS':facts,'APPROVED_STRUCTURE_PLAN':structure,'ORIGINAL_ADVOCATE_DRAFTS':retrieval_context,'SYSTEM_RULES':['CASE_FACTS are the sole factual authority.','Original drafts are style/structure references only.','Never copy factual details from an original draft.','Never invent legal authorities or procedural facts.','Renderer assigns paragraph numbering.','Preserve event status and chronology.']}
+    def draft(self,package):
+        return self.client.generate_json(system=DRAFT_SYSTEM,prompt=json.dumps(package,ensure_ascii=False,indent=2),schema=self.schema,thinking_level=os.getenv('GEMINI_DRAFTING_THINKING_LEVEL','high'))
