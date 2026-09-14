@@ -49,7 +49,7 @@ class GeminiClient:
         # Used automatically as a last resort if the primary model keeps
         # returning transient errors (overloaded / rate-limited) after all
         # retries. Set GEMINI_FALLBACK_MODEL="" to disable.
-        self.fallback_model = os.getenv('GEMINI_FALLBACK_MODEL', 'gemini-2.5-flash').strip()
+        self.fallback_model = os.getenv('GEMINI_FALLBACK_MODEL', 'gemini-3.7-flash').strip()
         self.timeout = float(os.getenv('GEMINI_TIMEOUT_SECONDS', '90'))
         self.max_retries = int(os.getenv('GEMINI_MAX_RETRIES', '3'))
         self.retry_backoff_seconds = float(os.getenv('GEMINI_RETRY_BACKOFF_SECONDS', '1.5'))

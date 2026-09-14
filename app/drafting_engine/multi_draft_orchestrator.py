@@ -37,6 +37,15 @@ class MultiDraftOrchestrator:
 
     def collect(self, state: CaseState, new_facts: dict[str, Any]):
         state.merge_facts(new_facts)
+        # Safe cross-document carry-over: when a new affidavit/evidence affidavit is
+        # requested for an existing case, a single unambiguous plaintiff can serve as
+        # the deponent. This is a role mapping, not invention of a new case fact.
+        if state.document_type in {"affidavit", "evidence_pw_affidavit"} and not state.facts.get("deponent"):
+            plaintiffs = state.facts.get("plaintiffs", [])
+            if isinstance(plaintiffs, list) and len(plaintiffs) == 1:
+                state.facts["deponent"] = plaintiffs[0]
+        if state.document_type == "affidavit" and not state.facts.get("purpose"):
+            state.facts["purpose"] = "प्रस्तुत वाद/विवाद के संबंध में शपथपूर्वक कथन प्रस्तुत करने हेतु"
         missing = missing_fields(state.facts, state.document_type)
         if missing:
             state.status = "collecting"
@@ -94,7 +103,8 @@ class MultiDraftOrchestrator:
                 "pleadings":"Ordered substantive paragraphs; no numbering.",
                 "prayer":"Only supported reliefs/demands, empty when inappropriate.",
                 "verification":"Only when appropriate and grounded in supplied facts.",
-                "signature_block":"Use supplied signer/deponent information; advocate signature is presentation metadata if needed."
+                "signature_block":"Use supplied signer/deponent information; advocate signature is presentation metadata if needed.",
+                "layout":"Optional page-layout metadata. Use only when explicitly requested; page_break_before/page_break_after contain section names such as prayer or verification."
             }
         }
         system = style + "\n\nYou are now the FINAL DRAFTING ENGINE, not a planning-only assistant. Generate the actual filing-ready structured draft.\n" + "\n".join(f"- {x}" for x in BASE_RULES)

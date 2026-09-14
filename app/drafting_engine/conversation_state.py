@@ -20,6 +20,11 @@ class CaseState:
     draft_versions: list[dict[str, Any]] = field(default_factory=list)
     edit_mode: bool = False
     pending_edit: dict[str, Any] = field(default_factory=dict)
+    # All generated documents belonging to this case. Each item stores an independent
+    # structured draft, while `facts` remains shared case evidence across document types.
+    documents: list[dict[str, Any]] = field(default_factory=list)
+    active_document_id: str = ""
+    document_counter: int = 0
 
     def record(self, role: str, text: str) -> None:
         self.history.append({"role": role, "text": text})
@@ -73,12 +78,65 @@ class CaseState:
 
     def set_draft(self, draft: dict[str, Any]) -> None:
         self.draft = draft or {}
+        if not self.active_document_id:
+            self.document_counter += 1
+            self.active_document_id = f"{self.document_type}-{self.document_counter}"
         self.draft_version += 1
         self.draft_versions.append({"version": self.draft_version, "draft": self.draft})
         self.draft_versions = self.draft_versions[-10:]
         self.status = "drafted"
+        # Keep the multi-document registry live even while this document remains active.
+        item = {"document_id": self.active_document_id, "document_type": self.document_type, "version": self.draft_version, "draft": self.draft}
+        for i, existing in enumerate(self.documents):
+            if existing.get("document_id") == self.active_document_id:
+                self.documents[i] = item
+                break
+        else:
+            self.documents.append(item)
+        self.documents = self.documents[-20:]
         self.edit_mode = False
         self.pending_edit = {}
+
+
+    def archive_active_document(self) -> None:
+        """Persist the current generated document into the case's multi-document list."""
+        if not self.draft:
+            return
+        item = {
+            "document_id": self.active_document_id or f"{self.document_type}-1",
+            "document_type": self.document_type,
+            "version": self.draft_version,
+            "draft": self.draft,
+        }
+        replaced = False
+        for i, existing in enumerate(self.documents):
+            if existing.get("document_id") == item["document_id"]:
+                self.documents[i] = item
+                replaced = True
+                break
+        if not replaced:
+            self.documents.append(item)
+        self.documents = self.documents[-20:]
+
+    def begin_new_document(self, document_type: str) -> None:
+        """Keep shared case facts but start a fresh document of the requested type."""
+        self.archive_active_document()
+        self.document_type = document_type
+        self.draft = {}
+        self.draft_versions = []
+        self.draft_version = 0
+        self.edit_mode = False
+        self.pending_edit = {}
+        self.document_counter += 1
+        self.active_document_id = f"{document_type}-{self.document_counter}"
+        self.status = "collecting"
+
+    def document_summaries(self) -> list[dict[str, Any]]:
+        return [{
+            "document_id": x.get("document_id", ""),
+            "document_type": x.get("document_type", ""),
+            "version": x.get("version", 0),
+        } for x in self.documents]
 
     def to_dict(self): return asdict(self)
 
