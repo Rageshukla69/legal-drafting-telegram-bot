@@ -45,7 +45,7 @@ class MultiDraftOrchestrator:
         return {"status":"ready", "facts":state.facts}
 
     def extract_and_collect(self, state: CaseState, text: str):
-        return self.collect(state, extract_case_facts(text, current_facts=state.facts, document_type=state.document_type))
+        return self.collect(state, extract_case_facts(text, current_facts=state.facts, document_type=state.document_type, user_history=state.user_messages()))
 
     def _retrieve(self, facts, document_type):
         pieces=[]

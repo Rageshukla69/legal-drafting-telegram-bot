@@ -15,6 +15,7 @@ class CaseState:
     history: list[dict[str, str]] = field(default_factory=list)
     draft_version: int = 0
     last_error: str = ""
+    # Post-draft editor state. Defaults keep old Cosmos/SQLite records compatible.
     draft: dict[str, Any] = field(default_factory=dict)
     draft_versions: list[dict[str, Any]] = field(default_factory=list)
     edit_mode: bool = False
@@ -22,11 +23,14 @@ class CaseState:
 
     def record(self, role: str, text: str) -> None:
         self.history.append({"role": role, "text": text})
-        self.history = self.history[-60:]
+        self.history = self.history[-80:]
+
+    def user_messages(self, limit: int = 24) -> list[str]:
+        return [str(x.get("text", "")) for x in self.history if x.get("role") == "user"][-limit:]
 
     def merge_facts(self, new_facts: dict[str, Any]) -> None:
         list_fields = {"plaintiffs","defendants","parties","facts","reliefs","interim_reliefs","demands","defence_points","documents"}
-        for key, value in new_facts.items():
+        for key, value in (new_facts or {}).items():
             if value is None or value == "" or value == [] or value == {}:
                 continue
             if key in list_fields:
@@ -34,22 +38,33 @@ class CaseState:
                 existing = self.facts.get(key, [])
                 if not isinstance(existing, list): existing = [existing]
                 for item in incoming:
+                    if isinstance(item, dict):
+                        item = item.get("text") or item.get("content") or str(item)
                     item = str(item).strip()
-                    if item and item not in existing: existing.append(item)
+                    if item and item not in existing:
+                        existing.append(item)
                 self.facts[key] = existing
             else:
                 self.facts[key] = value
 
     def set_draft(self, draft: dict[str, Any]) -> None:
-        self.draft = draft
-        self.draft_versions.append({"version": self.draft_version, "draft": draft})
+        self.draft = draft or {}
+        self.draft_version += 1
+        self.draft_versions.append({"version": self.draft_version, "draft": self.draft})
         self.draft_versions = self.draft_versions[-10:]
+        self.status = "drafted"
         self.edit_mode = False
         self.pending_edit = {}
 
     def to_dict(self): return asdict(self)
+
     @classmethod
-    def from_dict(cls, data): return cls(**data)
+    def from_dict(cls, data):
+        # Ignore unknown legacy keys rather than making an old saved case unloadable.
+        allowed = {f.name for f in cls.__dataclass_fields__.values()}
+        clean = {k: v for k, v in (data or {}).items() if k in allowed}
+        return cls(**clean)
+
     def save(self, path): Path(path).write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
     @classmethod
     def load(cls, path): return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))

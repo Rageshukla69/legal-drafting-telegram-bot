@@ -2,34 +2,145 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "court_name": {"type": "string"},
-    "case_number": {"type": "string"},
-    "case_year": {"type": "string"},
-    "plaintiffs": {"type": "array", "items": {"type": "string"}},
-    "defendants": {"type": "array", "items": {"type": "string"}},
-    "parties": {"type": "array", "items": {"type": "string"}},
-    "plaintiff_intro": {"type": "string"},
-    "defendant_intro": {"type": "string"},
-    "sender": {"type": "string"},
-    "recipient": {"type": "string"},
-    "deponent": {"type": "string"},
-    "witness_name": {"type": "string"},
-    "property_description": {"type": "string"},
-    "cause_of_action": {"type": "string"},
-    "jurisdiction_facts": {"type": "string"},
-    "limitation_facts": {"type": "string"},
-    "valuation": {"type": "string"},
-    "court_fee": {"type": "string"},
-    "facts": {"type": "array", "items": {"type": "string"}},
-    "reliefs": {"type": "array", "items": {"type": "string"}},
-    "interim_reliefs": {"type": "array", "items": {"type": "string"}},
-    "demands": {"type": "array", "items": {"type": "string"}},
-    "defence_points": {"type": "array", "items": {"type": "string"}},
-    "documents": {"type": "array", "items": {"type": "string"}},
-    "purpose": {"type": "string"},
-    "place": {"type": "string"},
-    "date": {"type": "string"},
-    "verification": {"type": "string"}
+    "court_name": {
+      "type": "string",
+      "description": "Court/forum named or clearly identified in the user's case narrative, e.g. न्यायालय, कोर्ट, before the Civil Judge, तहसील/जिला forum."
+    },
+    "case_number": {
+      "type": "string",
+      "description": "Existing case/suit/application/notice number only if explicitly supplied."
+    },
+    "case_year": {
+      "type": "string",
+      "description": "Case year only if explicitly supplied."
+    },
+    "plaintiffs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Persons/entities bringing the proceeding: वादी, plaintiff, claimant, applicant where the document type treats them as the initiating party, petitioner/prार्थी when applicable."
+    },
+    "defendants": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Persons/entities proceeded against: प्रतिवादी, defendant, opposite party, respondent, विपक्षी, noticee when applicable."
+    },
+    "parties": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "All material parties when a generic party field is appropriate; preserve role/name/address wording from the source."
+    },
+    "plaintiff_intro": {
+      "type": "string",
+      "description": "The supplied plaintiff/claimant identity line, if useful for drafting."
+    },
+    "defendant_intro": {
+      "type": "string",
+      "description": "The supplied defendant/respondent identity line, if useful for drafting."
+    },
+    "sender": {
+      "type": "string",
+      "description": "Sender/notice-giver identity in a legal notice or communication."
+    },
+    "recipient": {
+      "type": "string",
+      "description": "Recipient/noticee identity in a legal notice or communication."
+    },
+    "deponent": {
+      "type": "string",
+      "description": "Person swearing the affidavit or giving evidence."
+    },
+    "witness_name": {
+      "type": "string",
+      "description": "Witness name if explicitly supplied."
+    },
+    "property_description": {
+      "type": "string",
+      "description": "Subject property/assets: land, house, plot, gata/khasra, municipal number, boundaries, area, possession description, or other disputed property identifiers."
+    },
+    "cause_of_action": {
+      "type": "string",
+      "description": "Events that legally give rise to the proceeding and their dates: e.g. interference, threat, refusal, breach, notice, non-compliance, dispossession, recurring cause. Keep the source's event status."
+    },
+    "jurisdiction_facts": {
+      "type": "string",
+      "description": "Facts showing territorial/pecuniary/subject-matter jurisdiction, only when supplied."
+    },
+    "limitation_facts": {
+      "type": "string",
+      "description": "Facts relevant to limitation/delay, only when supplied."
+    },
+    "valuation": {
+      "type": "string",
+      "description": "Suit/claim valuation, market value, consideration, or stated valuation only if supplied."
+    },
+    "court_fee": {
+      "type": "string",
+      "description": "Court-fee amount/basis only if supplied."
+    },
+    "facts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Material factual narrative: ownership, possession, transactions, relationships, dates, notices, threats, acts, payments, breaches, communications, procedural history, etc. Do NOT put requested relief here."
+    },
+    "reliefs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "What the user asks the court to grant: injunction, declaration, recovery, possession, damages, costs, any other prayer/अनुतोष/राहत. Natural phrases such as 'अतः प्रार्थना है', 'निवेदन है', 'मांगा जाता है' indicate relief."
+    },
+    "interim_reliefs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Temporary/interim relief sought pending final disposal, only if explicitly requested."
+    },
+    "demands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Demands/compliance requested outside a court prayer, especially legal notices: pay, perform, stop, vacate, reply, comply, etc."
+    },
+    "defence_points": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Defendant/respondent's denials, objections, admissions, alternative pleas, set-off/counterclaim points, or defence narrative."
+    },
+    "documents": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Documents/evidence explicitly mentioned: sale deed, registry, notice, receipt, order, khasra, photographs, witness, etc."
+    },
+    "purpose": {
+      "type": "string",
+      "description": "Why the requested document is being prepared, when explicitly stated or unambiguously stated by the user."
+    },
+    "place": {
+      "type": "string",
+      "description": "Execution/notice/affidavit place only if explicitly supplied."
+    },
+    "date": {
+      "type": "string",
+      "description": "Document/event date only if explicitly supplied and not already better represented elsewhere."
+    },
+    "verification": {
+      "type": "string",
+      "description": "Verification text or facts explicitly supplied for verification."
+    }
   },
   "required": []
 }
