@@ -35,9 +35,50 @@ def dashboard():
 def case_actions(state):
     rows=[[InlineKeyboardButton("✨ Generate Draft",callback_data="generate"),InlineKeyboardButton("👁 Review",callback_data="review")]]
     if state.draft:
-        rows.append([InlineKeyboardButton("✏️ Edit Draft",callback_data="edit_mode")])
+        rows.append([InlineKeyboardButton("➕ Add Another Document",callback_data="add_document"), InlineKeyboardButton("✏️ Edit Draft",callback_data="edit_mode")])
+    if len(state.documents) > 1:
+        rows.append([InlineKeyboardButton("📚 Case Documents",callback_data="case_documents")])
+    elif state.documents:
+        rows.append([InlineKeyboardButton("➕ Add Another Document",callback_data="add_document")])
     rows.append([InlineKeyboardButton("🗑 Cancel",callback_data="cancel")])
     return InlineKeyboardMarkup(rows)
+
+def document_menu():
+    rows=[]
+    for i in range(0,len(TYPE_ORDER),2):
+        rows.append([InlineKeyboardButton(f"{TYPE_ICONS[t]} {DISPLAY_NAMES[t].split(' / ')[0]}",callback_data=f"addtype:{t}") for t in TYPE_ORDER[i:i+2]])
+    rows.append([InlineKeyboardButton("↩️ Keep Current Document",callback_data="review")])
+    return InlineKeyboardMarkup(rows)
+
+def existing_documents_menu(state):
+    rows=[]
+    for item in state.documents[-20:][::-1]:
+        did=str(item.get("document_id", ""))
+        typ=str(item.get("document_type", ""))
+        if not did or typ not in DISPLAY_NAMES: continue
+        marker="✅ " if did == state.active_document_id else ""
+        rows.append([InlineKeyboardButton(f"{marker}{DISPLAY_NAMES[typ]}",callback_data=f"doc:{did}")])
+    rows.append([InlineKeyboardButton("➕ Add Another Document",callback_data="add_document")])
+    return InlineKeyboardMarkup(rows)
+
+def detect_additional_document_type(text: str):
+    """Detect an explicit request to create another document while a draft exists."""
+    low=re.sub(r"\s+", " ", str(text or "").strip().casefold())
+    if not low: return None
+    create_markers=("बना", "बनाओ", "बना दो", "तैयार", "तैयार कर", "ड्राफ्ट", "create", "generate", "draft", "make", "prepare", "चाहिए")
+    if not any(x in low for x in create_markers): return None
+    mapping={
+        "written_statement": ("written statement", "लिखित कथन", "जवाब दावा", "जवाब-दावा", "लिखित बयान"),
+        "application": ("application", "प्रार्थना पत्र", "प्रार्थना-पत्र", "आवेदन"),
+        "evidence_pw_affidavit": ("evidence affidavit", "pw affidavit", "साक्ष्य शपथपत्र", "साक्ष्य का शपथपत्र"),
+        "affidavit": ("affidavit", "शपथपत्र", "हलफनामा", "शपथ पत्र"),
+        "legal_notice": ("legal notice", "legal notice", "कानूनी नोटिस", "विधिक नोटिस"),
+        "other_civil": ("other civil", "अन्य सिविल", "सिविल ड्राफ्ट"),
+        "dava_plaint": ("dava", "दावा", "वाद पत्र", "वाद-पत्र", "plaint", "plaintiff suit"),
+    }
+    for typ, markers in mapping.items():
+        if any(m in low for m in markers): return typ
+    return None
 
 def edit_actions():
     return InlineKeyboardMarkup([[InlineKeyboardButton("✅ Apply Change",callback_data="edit_apply"),InlineKeyboardButton("❌ Discard",callback_data="edit_discard")]])
@@ -170,13 +211,52 @@ async def intake_text(update,context,text=None, *, suppress_questions=False, ann
         await update.message.reply_text(f"{questions_text(state)}\n\nProgress: {progress(state)}",reply_markup=case_actions(state)); return result
     await update.message.reply_text(f"✅ आवश्यक जानकारी मिल गई।\n\n{summary_text(state)}",parse_mode="Markdown",reply_markup=case_actions(state)); return result
 
+async def start_additional_document(update, context, document_type: str):
+    uid=update.effective_user.id
+    state=get_state(uid)
+    if not state or not state.facts:
+        await update.message.reply_text("पहले एक case तैयार करें, फिर उसमें दूसरा document जोड़ें।",reply_markup=dashboard())
+        return
+    if state.document_type == document_type and state.draft:
+        await update.message.reply_text("यह document type अभी active है। अलग document बनाने के लिए कोई दूसरा type चुनें।",reply_markup=document_menu())
+        return
+    state.begin_new_document(document_type)
+    try:
+        await asyncio.to_thread(orchestrator.refresh_intake,state)
+        store.save(uid,state)
+    except Exception:
+        log.exception("additional document intake reconciliation failed")
+    missing=missing_fields(state.facts,document_type)
+    if missing:
+        msg=(f"➕ *{DISPLAY_NAMES[document_type]}*\n\n"
+             "यह document इसी existing case के facts से बनाया जाएगा।\n\n"
+             f"{questions_text(state)}")
+        await update.message.reply_text(msg,parse_mode="Markdown",reply_markup=case_actions(state))
+        return
+    await update.message.reply_text(f"➕ {DISPLAY_NAMES[document_type]} इसी case की जानकारी से तैयार किया जा रहा है…")
+    await generate_for(update,uid,state,edit=False)
+
+async def add_document_command(update, context):
+    if not await require_access(update): return
+    state=get_state(update.effective_user.id)
+    if not state or not state.facts:
+        await update.message.reply_text("पहले /newcase से एक case तैयार करें।",reply_markup=dashboard()); return
+    await update.message.reply_text("➕ इसी case में अगला document type चुनें:",reply_markup=document_menu())
+
 async def text_message(update,context):
     if not update.effective_user: return
     state=get_state(update.effective_user.id)
     if state and state.edit_mode and state.draft:
         await edit_text_message(update,context)
-    else:
-        await intake_text(update,context)
+        return
+    # After a document is generated, an explicit natural-language request such as
+    # “इस दावे का affidavit बना दो” starts a second document in the same case.
+    if state and state.draft:
+        requested_type=detect_additional_document_type(update.message.text or "")
+        if requested_type:
+            await start_additional_document(update,context,requested_type)
+            return
+    await intake_text(update,context)
 
 async def voice_message(update,context):
     if not update.message or not update.message.voice or not update.effective_user:return
@@ -189,7 +269,13 @@ async def voice_message(update,context):
     try:
         f=await context.bot.get_file(update.message.voice.file_id); buf=BytesIO(); await f.download_to_memory(out=buf)
         transcript=await asyncio.to_thread(transcribe_voice,buf.getvalue(),"telegram_voice.ogg")
-        await update.message.reply_text("📝 Transcript तैयार है। अब legal facts extract किए जा रहे हैं…")
+        await update.message.reply_text("📝 Transcript तैयार है। अब legal instruction समझा जा रहा है…")
+        state=get_state(update.effective_user.id)
+        if state and state.draft:
+            requested_type=detect_additional_document_type(transcript)
+            if requested_type:
+                await start_additional_document(update,context,requested_type)
+                return
         await intake_text(update,context,transcript)
     except Exception: log.exception("voice failed"); await update.message.reply_text("❌ Voice note process नहीं हो सका।")
 
@@ -341,8 +427,10 @@ async def enter_edit_mode(update, context):
         "उदाहरण:\n"
         "• `पैराग्राफ 3 में 15.06.2026 की जगह 20.06.2026 कर दो।`\n"
         "• `पैराग्राफ 5 की यह लाइन हटा दो: ...`\n"
-        "• `पैराग्राफ 4 के बाद यह वाक्य जोड़ दो: ...`\n\n"
-        "AI केवल एक targeted change प्रस्तावित करेगा। Apply करने से पहले आपको preview मिलेगा।",
+        "• `पैराग्राफ 4 के बाद यह वाक्य जोड़ दो: ...`\n"
+        "• `प्रार्थना को दूसरे पेज पर ले जाओ।`\n"
+        "• `सत्यापन नए पेज से शुरू करो।`\n\n"
+        "AI केवल एक targeted change प्रस्तावित करेगा। Text edit के अलावा page-layout बदलाव भी preview के बाद apply होंगे।",
         parse_mode="Markdown",
     )
 
@@ -400,11 +488,7 @@ async def apply_edit(update, context):
     candidate=pending.get("candidate") if pending else None
     if not state or not candidate:
         await q.edit_message_text("⚠️ यह edit अब उपलब्ध नहीं है।"); return
-    state.draft=candidate
-    state.draft_version += 1
-    state.draft_versions.append({"version":state.draft_version,"draft":candidate})
-    state.draft_versions=state.draft_versions[-10:]
-    state.pending_edit={}; state.edit_mode=False; state.status="drafted"
+    state.set_draft(candidate)
     store.save(uid,state)
     await q.edit_message_text("⏳ Change applied. DOCX/PDF को फिर से render किया जा रहा है…")
     try:
@@ -423,6 +507,43 @@ async def button(update,context):
         await q.edit_message_text("🔒 यह bot private है। आप authorized नहीं हैं। /myid से अपना User ID देखें।")
         return
     uid=q.from_user.id; cid=case_id_for(uid)
+    if q.data=="case_documents":
+        state=store.get(cid)
+        if not state or not state.documents:
+            await q.edit_message_text("इस case में अभी कोई generated document नहीं है।"); return
+        await q.edit_message_text("📚 इस case के generated documents:",reply_markup=existing_documents_menu(state)); return
+    if q.data.startswith("doc:"):
+        state=store.get(cid)
+        did=q.data.split(":",1)[1]
+        item=next((x for x in (state.documents if state else []) if x.get("document_id")==did),None)
+        if not state or not item:
+            await q.edit_message_text("⚠️ यह document अब उपलब्ध नहीं है।"); return
+        state.document_type=str(item.get("document_type"))
+        state.active_document_id=did
+        state.draft=item.get("draft") or {}
+        state.draft_version=int(item.get("version",1) or 1)
+        state.draft_versions=[{"version":state.draft_version,"draft":state.draft}]
+        state.edit_mode=False; state.pending_edit={}; state.status="drafted"
+        store.save(uid,state)
+        await q.edit_message_text(f"📄 *{DISPLAY_NAMES[state.document_type]}* selected.\n\nअब इसे review/edit कर सकते हैं या इसी case में दूसरा document जोड़ सकते हैं।",parse_mode="Markdown",reply_markup=case_actions(state)); return
+    if q.data=="add_document":
+        await q.edit_message_text("➕ इसी case में अगला document type चुनें:",reply_markup=document_menu()); return
+    if q.data.startswith("addtype:"):
+        t=q.data.split(":",1)[1]
+        # Callback has no update.message, so perform the same transition inline.
+        state=store.get(cid)
+        if not state or not state.facts:
+            await q.edit_message_text("पहले एक case तैयार करें।",reply_markup=dashboard()); return
+        if state.document_type == t and state.draft:
+            await q.edit_message_text("यह document अभी active है। कोई दूसरा type चुनें।",reply_markup=document_menu()); return
+        state.begin_new_document(t)
+        try:
+            await asyncio.to_thread(orchestrator.refresh_intake,state); store.save(uid,state)
+        except Exception: log.exception("additional document callback reconciliation failed")
+        if missing_fields(state.facts,t):
+            await q.edit_message_text(f"➕ *{DISPLAY_NAMES[t]}*\n\n{questions_text(state)}",parse_mode="Markdown",reply_markup=case_actions(state)); return
+        await q.edit_message_text(f"➕ *{DISPLAY_NAMES[t]}* इसी case के facts से तैयार किया जा रहा है…",parse_mode="Markdown")
+        await generate_for(update,uid,state,edit=True); return
     if q.data.startswith("type:"):
         t=q.data.split(":",1)[1]; state=CaseState(cid,document_type=t); store.save(uid,state)
         await q.edit_message_text(f"⚖️ *{DISPLAY_NAMES[t]}*\n\nProgress: {progress(state)}\n\n{questions_text(state)}\n\nआप Hindi/English text या voice note भेज सकते हैं।",parse_mode="Markdown",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel",callback_data="cancel")]])); return
@@ -454,7 +575,7 @@ def build_application():
     token=os.getenv("TELEGRAM_BOT_TOKEN")
     if not token: raise RuntimeError("TELEGRAM_BOT_TOKEN is not set.")
     app=Application.builder().token(token).build()
-    app.add_handler(CommandHandler("start",start)); app.add_handler(CommandHandler("newcase",newcase)); app.add_handler(CommandHandler("cancel",cancel)); app.add_handler(CommandHandler("summary",summary)); app.add_handler(CommandHandler("edit",edit_command)); app.add_handler(CommandHandler("myid",myid)); app.add_handler(CommandHandler("authorize",authorize)); app.add_handler(CommandHandler("unauthorize",unauthorize)); app.add_handler(CommandHandler("authorized",authorized))
+    app.add_handler(CommandHandler("start",start)); app.add_handler(CommandHandler("newcase",newcase)); app.add_handler(CommandHandler("cancel",cancel)); app.add_handler(CommandHandler("summary",summary)); app.add_handler(CommandHandler("edit",edit_command)); app.add_handler(CommandHandler("adddocument",add_document_command)); app.add_handler(CommandHandler("myid",myid)); app.add_handler(CommandHandler("authorize",authorize)); app.add_handler(CommandHandler("unauthorize",unauthorize)); app.add_handler(CommandHandler("authorized",authorized))
     app.add_handler(CallbackQueryHandler(button)); app.add_handler(MessageHandler(filters.VOICE,voice_message)); app.add_handler(MessageHandler(filters.PHOTO, image_document_message)); app.add_handler(MessageHandler(filters.Document.ALL, image_document_message)); app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,text_message))
     return app
 
