@@ -4,3 +4,4 @@ reportlab>=4.2,<5
 uharfbuzz>=0.40,<1
 requests>=2.32,<3
 azure-cosmos>=4.9,<5
+azure-ai-documentintelligence>=1.0.0,<2
