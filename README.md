@@ -26,3 +26,7 @@ User facts are authoritative for facts. The corpus is authoritative only for dra
 
 ## Important
 This phase does NOT change the existing Telegram bot flow yet. First build and inspect the corpus index. Then Phase 8.1 can wire classification + retrieval into the bot safely.
+
+## Multi-document case workflow
+
+A single active case can now contain multiple generated legal documents. After generating a Dava, the user can say or type an explicit request such as “इस दावे का affidavit बना दो” / “create an affidavit for this case”. The bot preserves the shared case facts, starts the requested document type, reconciles the facts for that document, and sends its DOCX/PDF. Generated documents remain in the case registry and can be selected later from **📚 Case Documents**. `/adddocument` opens the document-type picker directly.
