@@ -150,21 +150,25 @@ async def summary(update,context):
     if not state: await update.message.reply_text("कोई active draft नहीं है। /newcase दबाएँ।"); return
     await update.message.reply_text(summary_text(state),parse_mode="Markdown",reply_markup=case_actions(state))
 
-async def intake_text(update,context,text=None):
+async def intake_text(update,context,text=None, *, suppress_questions=False, announce=True):
     if not update.effective_user:return
     if not access.is_authorized(update.effective_user.id):
         await deny(update); return
     text=(text or update.message.text).strip(); state=get_state(update.effective_user.id)
     if not state:
         await update.message.reply_text("पहले /newcase दबाकर document type चुनें।",reply_markup=dashboard()); return
-    state.record("user",text); await update.message.reply_text(f"⏳ {DISPLAY_NAMES[state.document_type]} के लिए जानकारी समझी जा रही है…")
+    state.record("user",text)
+    if announce:
+        await update.message.reply_text(f"⏳ {DISPLAY_NAMES[state.document_type]} के लिए जानकारी अर्थ के आधार पर समझी जा रही है…")
     try:
         result=await asyncio.to_thread(orchestrator.extract_and_collect,state,text); store.save(update.effective_user.id,state)
     except Exception as exc:
         log.exception("Intake failed"); await update.message.reply_text("❌ जानकारी process नहीं हो सकी। कृपया दोबारा भेजें।"); return
+    if suppress_questions:
+        return result
     if result["status"]=="needs_information":
-        await update.message.reply_text(f"{questions_text(state)}\n\nProgress: {progress(state)}",reply_markup=case_actions(state)); return
-    await update.message.reply_text(f"✅ आवश्यक जानकारी मिल गई।\n\n{summary_text(state)}",parse_mode="Markdown",reply_markup=case_actions(state))
+        await update.message.reply_text(f"{questions_text(state)}\n\nProgress: {progress(state)}",reply_markup=case_actions(state)); return result
+    await update.message.reply_text(f"✅ आवश्यक जानकारी मिल गई।\n\n{summary_text(state)}",parse_mode="Markdown",reply_markup=case_actions(state)); return result
 
 async def text_message(update,context):
     if not update.effective_user: return
@@ -281,10 +285,17 @@ async def image_document_message(update, context):
         # Reuse the same Gemini intake path used by typed/voice input. Large
         # OCR results are chunked so a long scanned file cannot overwhelm one
         # Gemini request; CaseState merges facts across all chunks.
+        # Feed all OCR chunks into the same persistent CaseState. Do not ask for
+        # missing fields between chunks; the document may describe a field on a later page.
         for index, chunk in enumerate(chunks, 1):
-            if len(chunks) > 1:
-                await update.message.reply_text(f"🧠 Processing OCR chunk {index}/{len(chunks)}…")
-            await intake_text(update, context, chunk)
+            if len(chunks) > 1 and index in {1, len(chunks)}:
+                await update.message.reply_text(f"🧠 OCR semantic extraction {index}/{len(chunks)}…")
+            await intake_text(update, context, chunk, suppress_questions=True, announce=False)
+        state=get_state(uid)
+        if state and not missing_fields(state.facts,state.document_type):
+            await update.message.reply_text(f"✅ पूरे document से आवश्यक case facts समझ लिए गए।\n\n{summary_text(state)}",parse_mode="Markdown",reply_markup=case_actions(state))
+        else:
+            await update.message.reply_text(f"📋 OCR/semantic extraction पूरा हुआ। अभी केवल वास्तव में न मिली जानकारी पूछी जाएगी:\n\n{questions_text(state)}\n\nProgress: {progress(state)}",reply_markup=case_actions(state))
     except DocumentIntelligenceError as exc:
         log.exception("Document Intelligence failed")
         await update.message.reply_text(
