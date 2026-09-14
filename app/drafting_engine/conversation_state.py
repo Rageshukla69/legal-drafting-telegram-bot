@@ -15,6 +15,10 @@ class CaseState:
     history: list[dict[str, str]] = field(default_factory=list)
     draft_version: int = 0
     last_error: str = ""
+    draft: dict[str, Any] = field(default_factory=dict)
+    draft_versions: list[dict[str, Any]] = field(default_factory=list)
+    edit_mode: bool = False
+    pending_edit: dict[str, Any] = field(default_factory=dict)
 
     def record(self, role: str, text: str) -> None:
         self.history.append({"role": role, "text": text})
@@ -35,6 +39,13 @@ class CaseState:
                 self.facts[key] = existing
             else:
                 self.facts[key] = value
+
+    def set_draft(self, draft: dict[str, Any]) -> None:
+        self.draft = draft
+        self.draft_versions.append({"version": self.draft_version, "draft": draft})
+        self.draft_versions = self.draft_versions[-10:]
+        self.edit_mode = False
+        self.pending_edit = {}
 
     def to_dict(self): return asdict(self)
     @classmethod
