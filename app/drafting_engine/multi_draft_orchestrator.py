@@ -2,7 +2,7 @@ from __future__ import annotations
 import json, os
 from pathlib import Path
 from typing import Any
-from .case_intake import extract_case_facts
+from .case_intake import extract_case_facts, reconcile_case_state
 from .conversation_state import CaseState, missing_fields, next_questions
 from .gemini_client import GeminiClient
 from .hybrid_retriever import HybridCorpusRetriever
@@ -45,7 +45,22 @@ class MultiDraftOrchestrator:
         return {"status":"ready", "facts":state.facts}
 
     def extract_and_collect(self, state: CaseState, text: str):
-        return self.collect(state, extract_case_facts(text, current_facts=state.facts, document_type=state.document_type, user_history=state.user_messages()))
+        extracted = extract_case_facts(
+            text,
+            current_facts=state.facts,
+            document_type=state.document_type,
+            user_history=state.user_messages(limit=int(os.getenv("GEMINI_INTAKE_HISTORY_MESSAGES", "40"))),
+        )
+        return self.collect(state, extracted)
+
+    def refresh_intake(self, state: CaseState):
+        """Reconcile the entire accumulated user evidence before drafting."""
+        refreshed = reconcile_case_state(
+            state.facts,
+            state.document_type,
+            state.user_messages(limit=int(os.getenv("GEMINI_INTAKE_HISTORY_MESSAGES", "40"))),
+        )
+        return self.collect(state, refreshed)
 
     def _retrieve(self, facts, document_type):
         pieces=[]
@@ -87,7 +102,7 @@ class MultiDraftOrchestrator:
             draft=self.client.generate_json(system=system, prompt=json.dumps(package,ensure_ascii=False,indent=2), schema=SCHEMA, thinking_level=os.getenv("GEMINI_DRAFTING_THINKING_LEVEL","high"))
             errors=self.validate(draft,state.facts,state.document_type)
             if not errors:
-                state.draft_version += 1; state.status="drafted"; return draft
+                state.status="ready"; return draft
             package["SYSTEM_RULES"].append("Previous candidate failed validation: "+"; ".join(errors)+". Regenerate without changing approved facts.")
         raise RuntimeError("Generated draft failed deterministic validation: "+"; ".join(errors))
 

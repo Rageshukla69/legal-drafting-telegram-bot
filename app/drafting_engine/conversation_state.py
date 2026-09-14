@@ -23,29 +23,53 @@ class CaseState:
 
     def record(self, role: str, text: str) -> None:
         self.history.append({"role": role, "text": text})
-        self.history = self.history[-80:]
+        self.history = self.history[-120:]
 
-    def user_messages(self, limit: int = 24) -> list[str]:
+    def user_messages(self, limit: int = 40) -> list[str]:
         return [str(x.get("text", "")) for x in self.history if x.get("role") == "user"][-limit:]
 
     def merge_facts(self, new_facts: dict[str, Any]) -> None:
-        list_fields = {"plaintiffs","defendants","parties","facts","reliefs","interim_reliefs","demands","defence_points","documents"}
+        """Merge semantic evidence without dropping earlier supported statements."""
+        list_fields = {
+            "plaintiffs", "defendants", "parties", "facts", "reliefs",
+            "interim_reliefs", "demands", "defence_points", "documents",
+        }
         for key, value in (new_facts or {}).items():
             if value is None or value == "" or value == [] or value == {}:
                 continue
             if key in list_fields:
                 incoming = value if isinstance(value, list) else [value]
                 existing = self.facts.get(key, [])
-                if not isinstance(existing, list): existing = [existing]
+                if not isinstance(existing, list):
+                    existing = [existing]
+                seen = {str(x).strip().casefold() for x in existing if str(x).strip()}
                 for item in incoming:
                     if isinstance(item, dict):
                         item = item.get("text") or item.get("content") or str(item)
                     item = str(item).strip()
-                    if item and item not in existing:
+                    marker = item.casefold()
+                    if item and marker not in seen:
                         existing.append(item)
+                        seen.add(marker)
                 self.facts[key] = existing
             else:
                 self.facts[key] = value
+
+        # Generic party fields are derived only from explicitly extracted party roles.
+        party_values = []
+        for key in ("plaintiffs", "defendants"):
+            value = self.facts.get(key, [])
+            party_values.extend(value if isinstance(value, list) else [value])
+        if party_values:
+            existing = self.facts.get("parties", [])
+            existing = existing if isinstance(existing, list) else [existing]
+            seen = {str(x).strip().casefold() for x in existing if str(x).strip()}
+            for item in party_values:
+                item = str(item).strip()
+                if item and item.casefold() not in seen:
+                    existing.append(item)
+                    seen.add(item.casefold())
+            self.facts["parties"] = existing
 
     def set_draft(self, draft: dict[str, Any]) -> None:
         self.draft = draft or {}
