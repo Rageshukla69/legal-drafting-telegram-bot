@@ -210,6 +210,22 @@ def _add_docx_para(
     return p
 
 
+LAYOUT_SECTIONS = {"court_heading","case_heading","parties","title","opening_averment","pleadings","prayer","signature_block","verification"}
+
+def _layout_break(draft: dict[str, Any], kind: str, section: str) -> bool:
+    layout = draft.get("layout", {}) or {}
+    if not isinstance(layout, dict):
+        return False
+    values = layout.get(kind, []) or []
+    if not isinstance(values, list):
+        values = [values]
+    return section in values
+
+def _docx_page_break_if_needed(doc: Document, draft: dict[str, Any], section: str, *, before: bool = True):
+    if _layout_break(draft, "page_break_before" if before else "page_break_after", section):
+        doc.add_page_break()
+
+
 def _ordered_pleading_items(draft: dict[str, Any]) -> list[str]:
     """Return the single approved pleading sequence.
 
@@ -254,11 +270,14 @@ def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "le
     case = str(draft.get("case_heading", "")).strip()
     parties = [str(x).strip() for x in draft.get("parties", []) if str(x).strip()]
 
+    _docx_page_break_if_needed(doc, draft, "court_heading")
     if court:
         _add_docx_para(doc, court, align=WD_ALIGN_PARAGRAPH.CENTER, size=16, bold=True, first_indent=False, after=8)
     if case:
+        _docx_page_break_if_needed(doc, draft, "case_heading")
         _add_docx_para(doc, case, align=WD_ALIGN_PARAGRAPH.CENTER, size=14, bold=True, first_indent=False, after=10)
 
+    _docx_page_break_if_needed(doc, draft, "parties")
     plaintiff, defendant, other = split_party_blocks(parties)
     if plaintiff and defendant:
         for party in plaintiff:
@@ -272,17 +291,21 @@ def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "le
         for party in parties:
             _add_docx_para(doc, party, align=WD_ALIGN_PARAGRAPH.LEFT, size=14, first_indent=False, after=4)
 
+    _docx_page_break_if_needed(doc, draft, "title")
     _add_docx_para(doc, _title_text(draft), align=WD_ALIGN_PARAGRAPH.CENTER, size=16, bold=True, underline=True, first_indent=False, after=10)
 
     opening = str(draft.get("opening_averment", "")).strip()
     if opening:
+        _docx_page_break_if_needed(doc, draft, "opening_averment")
         _add_docx_para(doc, opening, align=WD_ALIGN_PARAGRAPH.JUSTIFY, size=14, first_indent=False, after=10)
 
+    _docx_page_break_if_needed(doc, draft, "pleadings")
     for idx, paragraph in enumerate(_ordered_pleading_items(draft), 1):
         _add_docx_para(doc, numbered(paragraph, idx), align=WD_ALIGN_PARAGRAPH.JUSTIFY, size=14, first_indent=True, after=12)
 
     prayer = [str(x).strip() for x in draft.get("prayer", []) or [] if str(x).strip()]
     if prayer:
+        _docx_page_break_if_needed(doc, draft, "prayer")
         _add_docx_para(doc, "प्रार्थना", align=WD_ALIGN_PARAGRAPH.CENTER, size=16, bold=True, underline=True, first_indent=False, after=8)
         _add_docx_para(doc, "अतः वादी माननीय न्यायालय से प्रार्थना करता है कि:-", align=WD_ALIGN_PARAGRAPH.JUSTIFY, size=14, first_indent=False, after=10)
         for idx, item in enumerate(prayer):
@@ -293,11 +316,13 @@ def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "le
 
     signatures = _signature_lines(draft)
     if signatures:
+        _docx_page_break_if_needed(doc, draft, "signature_block")
         for line in signatures:
             _add_docx_para(doc, line, align=WD_ALIGN_PARAGRAPH.RIGHT, size=14, first_indent=False, after=4)
 
     verification = str(draft.get("verification", "") or "").strip()
     if verification:
+        _docx_page_break_if_needed(doc, draft, "verification")
         _add_docx_para(doc, "सत्यापन", align=WD_ALIGN_PARAGRAPH.CENTER, size=16, bold=True, underline=True, first_indent=False, after=8)
         for line in verification.splitlines():
             if line.strip():
@@ -329,11 +354,17 @@ def _pdf_story(draft: dict[str, Any], font: str, bold_font: str):
     court = str(draft.get("court_heading", "")).strip()
     case = str(draft.get("case_heading", "")).strip()
     parties = [str(x).strip() for x in draft.get("parties", []) if str(x).strip()]
+    if _layout_break(draft, "page_break_before", "court_heading"):
+        story.append(PageBreak())
     if court:
         story.append(Paragraph(_escape_xml(court), center16))
     if case:
+        if _layout_break(draft, "page_break_before", "case_heading"):
+            story.append(PageBreak())
         story.append(Paragraph(_escape_xml(case), ParagraphStyle("Case", parent=center16, fontSize=14, leading=20, spaceAfter=10)))
 
+    if _layout_break(draft, "page_break_before", "parties"):
+        story.append(PageBreak())
     plaintiff, defendant, other = split_party_blocks(parties)
     if plaintiff and defendant:
         for party in plaintiff:
@@ -347,17 +378,25 @@ def _pdf_story(draft: dict[str, Any], font: str, bold_font: str):
         for party in parties:
             story.append(Paragraph(_escape_xml(party), left))
 
+    if _layout_break(draft, "page_break_before", "title"):
+        story.append(PageBreak())
     story.append(Paragraph(_escape_xml(_title_text(draft)), ParagraphStyle("Title", parent=center16, underline=True, spaceBefore=4, spaceAfter=10)))
 
     opening = str(draft.get("opening_averment", "")).strip()
     if opening:
+        if _layout_break(draft, "page_break_before", "opening_averment"):
+            story.append(PageBreak())
         story.append(Paragraph(_escape_xml(opening), noindent))
 
+    if _layout_break(draft, "page_break_before", "pleadings"):
+        story.append(PageBreak())
     for idx, paragraph in enumerate(_ordered_pleading_items(draft), 1):
         story.append(Paragraph(_escape_xml(numbered(paragraph, idx)), body))
 
     prayer = [str(x).strip() for x in draft.get("prayer", []) or [] if str(x).strip()]
     if prayer:
+        if _layout_break(draft, "page_break_before", "prayer"):
+            story.append(PageBreak())
         story.append(Paragraph("प्रार्थना", ParagraphStyle("PrayerTitle", parent=center16, underline=True, spaceBefore=2, spaceAfter=8)))
         story.append(Paragraph(_escape_xml("अतः वादी माननीय न्यायालय से प्रार्थना करता है कि:-"), noindent))
         labels = ["(क)", "(ख)", "(ग)", "(घ)", "(ङ)", "(च)"]
@@ -365,11 +404,15 @@ def _pdf_story(draft: dict[str, Any], font: str, bold_font: str):
             label = labels[idx] if idx < len(labels) else f"({idx + 1})"
             story.append(Paragraph(_escape_xml(f"{label} {item}"), ParagraphStyle(f"Prayer{idx}", parent=body, firstLineIndent=0, spaceAfter=10)))
 
+    if _layout_break(draft, "page_break_before", "signature_block"):
+        story.append(PageBreak())
     for line in _signature_lines(draft):
         story.append(Paragraph(_escape_xml(line), right))
 
     verification = str(draft.get("verification", "") or "").strip()
     if verification:
+        if _layout_break(draft, "page_break_before", "verification"):
+            story.append(PageBreak())
         story.append(Paragraph("सत्यापन", ParagraphStyle("VerificationTitle", parent=center16, underline=True, spaceBefore=8, spaceAfter=8)))
         for line in verification.splitlines():
             if line.strip():
