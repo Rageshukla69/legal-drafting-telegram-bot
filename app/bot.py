@@ -1,386 +1,141 @@
-"""Telegram entry point for the Legal Drafting Bot.
-
-Phase 6A:
-- conversational Dava/Plaint intake in Hindi/English
-- Azure structured extraction for natural-language messages
-- targeted missing-information questions
-- Dava retrieval/composition
-- deterministic DOCX + PDF generation
-- persistent SQLite case state
-"""
+"""Professional Telegram UI for all seven legal draft types."""
 from __future__ import annotations
-
-import asyncio
-import logging
-import os
-import re
-import tempfile
+import asyncio, logging, os, re, tempfile
 from io import BytesIO
-from pathlib import Path
-from typing import Any
-
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
-
 from app.case_store import CaseStore
-from app.drafting_engine.conversation_state import CaseState
-from app.drafting_engine.dava_orchestrator import DavaOrchestrator
+from app.drafting_engine.conversation_state import CaseState, DISPLAY_NAMES, missing_fields, next_questions
+from app.drafting_engine.multi_draft_orchestrator import MultiDraftOrchestrator
 from app.drafting_engine.renderers.legal_document_renderer import render_both
 from app.drafting_engine.azure_speech import transcribe_voice
 from app.drafting_engine.gemini_client import GeminiError
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
-log = logging.getLogger("legal-bot")
+log=logging.getLogger("legal-bot")
+store=CaseStore(); orchestrator=MultiDraftOrchestrator()
 
-store = CaseStore()
-orchestrator = DavaOrchestrator()
+TYPE_ORDER=["dava_plaint","written_statement","application","evidence_pw_affidavit","affidavit","legal_notice","other_civil"]
+TYPE_ICONS={"dava_plaint":"📜","written_statement":"📝","application":"📄","evidence_pw_affidavit":"⚖️","affidavit":"📋","legal_notice":"📬","other_civil":"📑"}
 
+def case_id_for(user_id:int)->str: return f"tg-{user_id}-current"
+def get_state(uid:int): return store.get(case_id_for(uid))
 
-def case_id_for(user_id: int) -> str:
-    return f"tg-{user_id}-current"
+def dashboard():
+    rows=[]
+    for i in range(0,len(TYPE_ORDER),2):
+        row=[]
+        for t in TYPE_ORDER[i:i+2]: row.append(InlineKeyboardButton(f"{TYPE_ICONS[t]} {DISPLAY_NAMES[t].split(' / ')[0]}",callback_data=f"type:{t}"))
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
 
+def case_actions(state):
+    rows=[[InlineKeyboardButton("✨ Generate Draft",callback_data="generate"),InlineKeyboardButton("👁 Review",callback_data="review")], [InlineKeyboardButton("🗑 Cancel",callback_data="cancel")]]
+    return InlineKeyboardMarkup(rows)
 
-def get_or_create_state(user_id: int) -> CaseState:
-    case_id = case_id_for(user_id)
-    state = store.get(case_id)
-    if state is None:
-        state = CaseState(case_id)
-        store.save(user_id, state)
-    return state
+def progress(state):
+    missing=missing_fields(state.facts,state.document_type)
+    total=len(missing_fields({},state.document_type)); done=max(0,total-len(missing)); pct=int(done/total*100) if total else 100
+    filled="█"*max(1,pct//10); empty="░"*(10-len(filled))
+    return f"{filled}{empty} {pct}%"
 
+def questions_text(state):
+    qs=next_questions(state.facts,state.document_type)
+    if not qs: return "सारी आवश्यक जानकारी मिल गई है।"
+    return "अभी इन जानकारी की आवश्यकता है:\n\n"+"\n".join(f"• {label}" for _,label in qs)+"\n\nआप एक message में एक या कई उत्तर भेज सकते हैं।"
 
-def _clean_value(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip()
+def summary_text(state):
+    facts=state.facts
+    def val(k):
+        v=facts.get(k,"—"); return "\n".join(f"• {x}" for x in v) if isinstance(v,list) else str(v)
+    return (f"⚖️ *{DISPLAY_NAMES[state.document_type]}*\n\n*Progress:* {progress(state)}\n\n"
+            f"*न्यायालय:* {val('court_name')}\n*पक्षकार:* {val('parties') or val('plaintiffs')}\n"
+            f"*मुख्य तथ्य:* {val('facts')}\n*राहत/मांग:* {val('reliefs') if facts.get('reliefs') else val('demands')}\n")
 
+async def start(update,context):
+    if not update.message:return
+    await update.message.reply_text("⚖️ *LEGAL DRAFTING WORKSPACE*\n\nसात प्रकार के legal drafts तैयार करें। नीचे document type चुनें।",parse_mode="Markdown",reply_markup=dashboard())
 
-def parse_simple_fact_input(text: str) -> dict[str, Any]:
-    """Parse explicit labels without asking Azure to re-interpret them."""
-    label_map = {
-        "court_name": ["court", "न्यायालय"],
-        "plaintiffs": ["plaintiff", "plaintiffs", "वादी", "वादीगण"],
-        "defendants": ["defendant", "defendants", "प्रतिवादी", "प्रतिवादीगण"],
-        "reliefs": ["relief", "reliefs", "राहत", "प्रार्थना"],
-        "plaintiff_intro": ["plaintiff intro", "वादी परिचय"],
-        "defendant_intro": ["defendant intro", "प्रतिवादी परिचय"],
-        "property_description": ["property", "property description", "संपत्ति", "सम्पत्ति", "संपत्ति विवरण"],
-        "valuation": ["valuation", "मूल्यांकन"],
-        "court_fee": ["court fee", "न्यायालय शुल्क"],
-        "cause_of_action": ["cause of action", "वाद-कारण", "वाद कारण"],
-        "jurisdiction_facts": ["jurisdiction", "क्षेत्राधिकार"],
-        "limitation_facts": ["limitation", "समय-सीमा", "समय सीमा"],
-        "facts": ["facts", "तथ्य"],
-        "interim_reliefs": ["interim relief", "अंतरिम राहत", "अंतरिम प्रार्थना"],
-        "documents": ["documents", "दस्तावेज", "दस्तावेज़"],
-        "place": ["place", "स्थान"],
-        "date": ["date", "दिनांक"],
-        "case_number": ["case number", "वाद संख्या", "वाद संख्‍या"],
-        "case_year": ["case year", "वाद वर्ष"],
-        "verification": ["verification", "सत्यापन"],
-    }
-    patterns = [(key, label) for key, labels in label_map.items() for label in labels]
-    patterns.sort(key=lambda x: len(x[1]), reverse=True)
-    pattern = re.compile(r"^\s*(?P<label>" + "|".join(re.escape(x[1]) for x in patterns) + r")\s*[:\-]\s*(?P<value>.*?)\s*$", re.I)
-    out: dict[str, Any] = {}
-    for line in text.splitlines():
-        m = pattern.match(line)
-        if not m:
-            continue
-        raw = m.group("label").strip().casefold()
-        value = _clean_value(m.group("value"))
-        if not value:
-            continue
-        key = next(k for k, label in patterns if label.casefold() == raw)
-        if key in {"plaintiffs", "defendants", "reliefs", "interim_reliefs", "documents"}:
-            parts = [_clean_value(x) for x in re.split(r"[;,]", value) if _clean_value(x)]
-            out[key] = parts or [value]
-        elif key == "facts":
-            out.setdefault("facts", []).append(value)
-        else:
-            out[key] = value
-    return out
+async def newcase(update,context):
+    if not update.message or not update.effective_user:return
+    await update.message.reply_text("⚖️ *नया Legal Draft*\n\nपहले document type चुनें:",parse_mode="Markdown",reply_markup=dashboard())
 
+async def cancel(update,context):
+    if not update.message or not update.effective_user:return
+    store.delete(case_id_for(update.effective_user.id)); await update.message.reply_text("✅ Current draft session बंद कर दी गई है। /newcase से नया draft शुरू करें।")
 
-def _questions_message(questions: list[str]) -> str:
-    return (
-        "ठीक है। Draft को पर्याप्त रूप से पूरा करने के लिए अभी ये जानकारी चाहिए:\n\n"
-        + "\n".join(questions)
-        + "\n\nआप एक-एक करके या एक ही message में सभी उत्तर दे सकते हैं।"
-    )
+async def summary(update,context):
+    if not update.message or not update.effective_user:return
+    state=get_state(update.effective_user.id)
+    if not state: await update.message.reply_text("कोई active draft नहीं है। /newcase दबाएँ।"); return
+    await update.message.reply_text(summary_text(state),parse_mode="Markdown",reply_markup=case_actions(state))
 
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message or not update.effective_user:
-        return
-    await update.message.reply_text(
-        "नमस्ते। यह Legal Drafting Bot है।\n\n"
-        "/newcase — नया वाद शुरू करें\n"
-        "/cancel — वर्तमान case रद्द करें\n\n"
-        "आप text या Hindi voice note दोनों से case बता सकते हैं।\n"
-        "अब आप case को सामान्य भाषा में भी बता सकते हैं। उदाहरण:\n"
-        "\"राम कुमार की जमीन पर श्याम कुमार ने कब्जा कर लिया है और स्थायी निषेधाज्ञा चाहिए।\"\n\n"
-        "Bot आवश्यक जानकारी पूछेगा और अंत में DOCX + PDF Dava तैयार करेगा।"
-    )
-
-
-async def newcase(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message or not update.effective_user:
-        return
-    state = CaseState(case_id_for(update.effective_user.id))
-    store.save(update.effective_user.id, state)
-    inline = " ".join(context.args).strip()
-    if inline:
-        state.record("user", inline)
-        try:
-            parsed = parse_simple_fact_input(inline)
-            result = await asyncio.to_thread(orchestrator.extract_and_collect, state, inline) if not parsed else orchestrator.collect(state, parsed)
-            store.save(update.effective_user.id, state)
-            if result["status"] == "needs_information":
-                await update.message.reply_text(_questions_message(result["questions"]))
-            else:
-                await update.message.reply_text(_ready_message(), reply_markup=_draft_keyboard())
-            return
-        except Exception:
-            log.exception("Inline /newcase intake failed")
-    await update.message.reply_text(
-        "नया वाद शुरू हो गया है।\n\n"
-        "अब आप मामले की जानकारी सामान्य भाषा में भेज सकते हैं।\n"
-        "उदाहरण: \"राम कुमार की जमीन पर श्याम कुमार ने कब्जा किया है।\"\n\n"
-        "या labelled format भी भेज सकते हैं: न्यायालय:, वादी:, प्रतिवादी:, तथ्य:, राहत:"
-    )
-
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message or not update.effective_user:
-        return
-    store.delete(case_id_for(update.effective_user.id))
-    await update.message.reply_text("वर्तमान case रद्द कर दिया गया है। /newcase से नया case शुरू करें।")
-
-
-def _case_summary(state: CaseState) -> str:
-    f = state.facts
-    def val(key, default="—"):
-        v = f.get(key)
-        if isinstance(v, list):
-            return "\n".join(f"• {x}" for x in v) if v else default
-        return str(v).strip() if v else default
-    return (
-        "📋 *Case Review / मामले का सारांश*\n\n"
-        f"*न्यायालय:* {val('court_name')}\n"
-        f"*वादी:* {val('plaintiffs')}\n"
-        f"*प्रतिवादी:* {val('defendants')}\n"
-        f"*वादी परिचय:* {val('plaintiff_intro')}\n"
-        f"*प्रतिवादी परिचय:* {val('defendant_intro')}\n"
-        f"*संपत्ति:* {val('property_description')}\n"
-        f"*वाद-कारण:* {val('cause_of_action')}\n"
-        f"*क्षेत्राधिकार:* {val('jurisdiction_facts')}\n"
-        f"*समय-सीमा:* {val('limitation_facts')}\n"
-        f"*मूल्यांकन:* {val('valuation')}\n"
-        f"*न्यायालय शुल्क:* {val('court_fee')}\n"
-        f"*तथ्य:*\n{val('facts')}\n"
-        f"*राहत:*\n{val('reliefs')}\n\n"
-        "यदि कोई तथ्य गलत है, उसे स्पष्ट रूप से सुधारकर नया message भेजें।"
-    )
-
-
-def _ready_message(state: CaseState | None = None) -> str:
-    return (
-        "आवश्यक न्यूनतम जानकारी मिल गई है।\n\n"
-        "Draft बनाने से पहले case summary जाँच लें।\n"
-        "कोई तथ्य गलत हो तो नया message भेजकर स्पष्ट correction दें; फिर /summary से दोबारा जाँच सकते हैं।"
-    )
-
-
-def _draft_failure_message(exc: Exception) -> str:
-    if isinstance(exc, GeminiError) and exc.retryable:
-        return (
-            "⏳ Gemini AI सेवा अभी अत्यधिक व्यस्त है (503/overload) और automatic retry के बाद भी उपलब्ध नहीं हुई।\n"
-            "कृपया 1-2 मिनट बाद फिर कोशिश करें, या दोबारा 'Dava Draft तैयार करें' दबाएँ।"
-        )
-    if isinstance(exc, GeminiError):
-        return (
-            "Draft generate नहीं हो सका। AI service configuration में समस्या लग रही है "
-            "(जैसे GEMINI_API_KEY/GEMINI_MODEL)। कृपया bot administrator से जाँच कराएँ।"
-        )
-    return (
-        "Draft generate नहीं हो सका। Azure configuration या document renderer जाँचें.\n"
-        "कृपया message दोबारा भेजें या /newcase से नया case शुरू करें।"
-    )
-
-
-def _draft_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Dava Draft तैयार करें", callback_data="draft")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="cancel")],
-    ])
-
-
-async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message or not update.message.text or not update.effective_user:
-        return
-    state = get_or_create_state(update.effective_user.id)
-    text = update.message.text.strip()
-    state.record("user", text)
-
-    parsed = parse_simple_fact_input(text)
+async def intake_text(update,context,text=None):
+    if not update.effective_user:return
+    text=(text or update.message.text).strip(); state=get_state(update.effective_user.id)
+    if not state:
+        await update.message.reply_text("पहले /newcase दबाकर document type चुनें।",reply_markup=dashboard()); return
+    state.record("user",text); await update.message.reply_text(f"⏳ {DISPLAY_NAMES[state.document_type]} के लिए जानकारी समझी जा रही है…")
     try:
-        if parsed:
-            result = orchestrator.collect(state, parsed)
-        else:
-            await update.message.reply_text("ठीक है, मैं इस message से case की उपलब्ध जानकारी निकाल रहा हूँ…")
-            result = await asyncio.to_thread(orchestrator.extract_and_collect, state, text)
-        store.save(update.effective_user.id, state)
+        result=await asyncio.to_thread(orchestrator.extract_and_collect,state,text); store.save(update.effective_user.id,state)
     except Exception as exc:
-        log.exception("Intake failed")
-        await update.message.reply_text(
-            "इस message को process नहीं कर सका। कृपया फिर से भेजें।\n"
-            "कृपया message दोबारा भेजें या /newcase से नया case शुरू करें।"
-        )
-        return
+        log.exception("Intake failed"); await update.message.reply_text("❌ जानकारी process नहीं हो सकी। कृपया दोबारा भेजें।"); return
+    if result["status"]=="needs_information":
+        await update.message.reply_text(f"{questions_text(state)}\n\nProgress: {progress(state)}",reply_markup=case_actions(state)); return
+    await update.message.reply_text(f"✅ आवश्यक जानकारी मिल गई।\n\n{summary_text(state)}",parse_mode="Markdown",reply_markup=case_actions(state))
 
-    if result["status"] == "needs_information":
-        await update.message.reply_text(_questions_message(result["questions"]))
-        return
+async def text_message(update,context): await intake_text(update,context)
 
-    facts = state.facts
-    summary = (
-        f"{_ready_message()}\n\n"
-        f"वादी: {', '.join(map(str, facts.get('plaintiffs', [])))}\n"
-        f"प्रतिवादी: {', '.join(map(str, facts.get('defendants', [])))}\n"
-        f"तथ्य: {len(facts.get('facts', []))} item(s)\n"
-        f"राहत: {len(facts.get('reliefs', []))} item(s)"
-    )
-    await update.message.reply_text(summary, reply_markup=_draft_keyboard())
-
-
-async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Transcribe Telegram voice with MAI-Transcribe-2, then use normal intake."""
-    if not update.message or not update.message.voice or not update.effective_user:
-        return
-    state = get_or_create_state(update.effective_user.id)
-    await update.message.reply_text("🎙️ Voice note मिल गया। MAI-Transcribe-2 से transcript निकाला जा रहा है…")
+async def voice_message(update,context):
+    if not update.message or not update.message.voice or not update.effective_user:return
+    state=get_state(update.effective_user.id)
+    if not state: await update.message.reply_text("पहले /newcase से document type चुनें।",reply_markup=dashboard()); return
+    await update.message.reply_text("🎙️ Voice note मिला। Transcript तैयार किया जा रहा है…")
     try:
-        telegram_file = await context.bot.get_file(update.message.voice.file_id)
-        buffer = BytesIO()
-        await telegram_file.download_to_memory(out=buffer)
-        transcript = await asyncio.to_thread(transcribe_voice, buffer.getvalue(), "telegram_voice.ogg")
-        state.record("user_voice_transcript", transcript)
-        store.save(update.effective_user.id, state)
-        await update.message.reply_text("📝 Transcript:\n\n" + transcript + "\n\nअब इसी transcript से case facts निकाले जा रहे हैं…")
-        result = await asyncio.to_thread(orchestrator.extract_and_collect, state, transcript)
-        store.save(update.effective_user.id, state)
-    except Exception:
-        log.exception("Voice transcription/intake failed")
-        await update.message.reply_text("Voice note process नहीं हो सका। Azure Speech/MAI configuration जाँचें और फिर कोशिश करें।")
-        return
-    if result["status"] == "needs_information":
-        await update.message.reply_text(_questions_message(result["questions"]))
-        return
-    facts = state.facts
-    await update.message.reply_text(
-        f"{_ready_message()}\n\n"
-        f"वादी: {', '.join(map(str, facts.get('plaintiffs', [])))}\n"
-        f"प्रतिवादी: {', '.join(map(str, facts.get('defendants', [])))}\n"
-        f"तथ्य: {len(facts.get('facts', []))} item(s)\n"
-        f"राहत: {len(facts.get('reliefs', []))} item(s)",
-        reply_markup=_draft_keyboard(),
-    )
+        f=await context.bot.get_file(update.message.voice.file_id); buf=BytesIO(); await f.download_to_memory(out=buf)
+        transcript=await asyncio.to_thread(transcribe_voice,buf.getvalue(),"telegram_voice.ogg")
+        await update.message.reply_text("📝 Transcript तैयार है। अब legal facts extract किए जा रहे हैं…")
+        await intake_text(update,context,transcript)
+    except Exception: log.exception("voice failed"); await update.message.reply_text("❌ Voice note process नहीं हो सका।")
 
-
-async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message or not update.effective_user:
-        return
-    state = store.get(case_id_for(update.effective_user.id))
-    if state is None:
-        await update.message.reply_text("कोई active case नहीं है। /newcase से शुरू करें।")
-        return
-    await update.message.reply_text(_case_summary(state), parse_mode="Markdown", reply_markup=_draft_keyboard())
-
-
-async def redraft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message or not update.effective_user:
-        return
-    state = store.get(case_id_for(update.effective_user.id))
-    if state is None:
-        await update.message.reply_text("कोई active case नहीं है। /newcase से शुरू करें।")
-        return
-    if state.status not in {"ready", "drafted"}:
-        await update.message.reply_text("Case अभी पूरा नहीं है। पहले आवश्यक जानकारी दें।")
-        return
-    await update.message.reply_text("ठीक है। Case की वर्तमान जानकारी से नया Dava draft बनाया जा रहा है…")
+async def generate_for(update,uid,state,edit=False):
+    target=update.callback_query.message if update.callback_query else update.message
+    if edit: await update.callback_query.edit_message_text(f"⚖️ *{DISPLAY_NAMES[state.document_type]}*\n\n⏳ Draft तैयार किया जा रहा है…\n\n1/4 Case verified\n2/4 Advocate examples selected\n3/4 Drafting & validation\n4/4 DOCX/PDF rendering",parse_mode="Markdown")
+    else: await target.reply_text("⏳ Draft तैयार किया जा रहा है…")
     try:
-        draft = await asyncio.to_thread(orchestrator.draft_live, state)
+        draft=await asyncio.to_thread(orchestrator.draft_live,state)
         with tempfile.TemporaryDirectory() as tmp:
-            base = f"Dava_Draft_{update.effective_user.id}"
-            docx_path, pdf_path = render_both(draft, tmp, base_name=base, paper=os.getenv("LEGAL_PAPER", "legal"))
-            with open(docx_path, "rb") as f:
-                await update.message.reply_document(f, filename=docx_path.name, caption="📄 Editable DOCX Dava")
-            with open(pdf_path, "rb") as f:
-                await update.message.reply_document(f, filename=pdf_path.name, caption="📑 PDF Dava")
-        state.status = "drafted"
-        store.save(update.effective_user.id, state)
-        await update.message.reply_text("✅ नया Dava draft तैयार है।")
+            label=DISPLAY_NAMES[state.document_type].split(" /")[0].replace(" ","_")
+            docx,pdf=render_both(draft,tmp,base_name=f"{label}_{uid}",paper=os.getenv("LEGAL_PAPER","legal"))
+            with open(docx,"rb") as f: await target.reply_document(f,filename=docx.name,caption=f"📄 Editable DOCX — {DISPLAY_NAMES[state.document_type]}")
+            with open(pdf,"rb") as f: await target.reply_document(f,filename=pdf.name,caption=f"📑 PDF — {DISPLAY_NAMES[state.document_type]}")
+        store.save(uid,state); await target.reply_text("✅ Draft तैयार है। आप /summary से case review कर सकते हैं या फिर से Generate कर सकते हैं।",reply_markup=case_actions(state))
     except Exception as exc:
-        log.exception("Redraft failed")
-        await update.message.reply_text(_draft_failure_message(exc))
+        log.exception("generation failed")
+        msg="⏳ AI service अभी व्यस्त है। थोड़ी देर बाद फिर कोशिश करें।" if isinstance(exc,GeminiError) and exc.retryable else f"❌ Draft तैयार नहीं हो सका: {str(exc)[:500]}"
+        await target.reply_text(msg)
 
+async def button(update,context):
+    q=update.callback_query; await q.answer()
+    uid=q.from_user.id; cid=case_id_for(uid)
+    if q.data.startswith("type:"):
+        t=q.data.split(":",1)[1]; state=CaseState(cid,document_type=t); store.save(uid,state)
+        await q.edit_message_text(f"⚖️ *{DISPLAY_NAMES[t]}*\n\nProgress: {progress(state)}\n\n{questions_text(state)}\n\nआप Hindi/English text या voice note भेज सकते हैं।",parse_mode="Markdown",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel",callback_data="cancel")]])); return
+    state=store.get(cid)
+    if q.data=="cancel": store.delete(cid); await q.edit_message_text("✅ Draft session cancelled."); return
+    if not state: await q.edit_message_text("कोई active draft नहीं है। /newcase से शुरू करें।"); return
+    if q.data=="review": await q.edit_message_text(summary_text(state),parse_mode="Markdown",reply_markup=case_actions(state)); return
+    if q.data=="generate":
+        if missing_fields(state.facts,state.document_type): await q.edit_message_text(questions_text(state)); return
+        await generate_for(update,uid,state,edit=True)
 
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    if not query or not query.from_user:
-        return
-    await query.answer()
-    case_id = case_id_for(query.from_user.id)
-    state = store.get(case_id)
+def build_application():
+    token=os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token: raise RuntimeError("TELEGRAM_BOT_TOKEN is not set.")
+    app=Application.builder().token(token).build()
+    app.add_handler(CommandHandler("start",start)); app.add_handler(CommandHandler("newcase",newcase)); app.add_handler(CommandHandler("cancel",cancel)); app.add_handler(CommandHandler("summary",summary))
+    app.add_handler(CallbackQueryHandler(button)); app.add_handler(MessageHandler(filters.VOICE,voice_message)); app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,text_message))
+    return app
 
-    if query.data == "cancel":
-        store.delete(case_id)
-        await query.edit_message_text("Case cancelled.")
-        return
-    if query.data != "draft":
-        return
-    if state is None:
-        await query.edit_message_text("कोई active case नहीं है। /newcase से शुरू करें।")
-        return
-
-    await query.edit_message_text("Dava तैयार किया जा रहा है…")
-    try:
-        draft = await asyncio.to_thread(orchestrator.draft_live, state)
-        with tempfile.TemporaryDirectory() as tmp:
-            base = f"Dava_Draft_{query.from_user.id}"
-            docx_path, pdf_path = render_both(draft, tmp, base_name=base, paper=os.getenv("LEGAL_PAPER", "legal"))
-            with open(docx_path, "rb") as f:
-                await query.message.reply_document(f, filename=docx_path.name, caption="📄 Editable DOCX Dava")
-            with open(pdf_path, "rb") as f:
-                await query.message.reply_document(f, filename=pdf_path.name, caption="📑 PDF Dava")
-        state.status = "drafted"
-        store.save(query.from_user.id, state)
-        await query.message.reply_text("✅ Dava तैयार है। DOCX और PDF दोनों भेज दिए गए हैं।")
-    except Exception as exc:
-        log.exception("Draft failed")
-        await query.message.reply_text(_draft_failure_message(exc))
-
-
-def build_application() -> Application:
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    if not token:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN is not set.")
-    application = Application.builder().token(token).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("newcase", newcase))
-    application.add_handler(CommandHandler("cancel", cancel))
-    application.add_handler(CommandHandler("summary", summary))
-    application.add_handler(CommandHandler("redraft", redraft))
-    application.add_handler(CallbackQueryHandler(button))
-    application.add_handler(MessageHandler(filters.VOICE, voice_message))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
-    return application
-
-
-def main() -> None:
-    application = build_application()
-    log.info("Legal Drafting Bot starting.")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-
-if __name__ == "__main__":
-    main()
+def main(): build_application().run_polling(allowed_updates=Update.ALL_TYPES)
+if __name__=="__main__": main()
