@@ -1,9 +1,9 @@
-"""Serializable Dava intake state and deterministic missing-information checks."""
+"""Serializable multi-document intake state and deterministic missing checks."""
 from __future__ import annotations
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 from typing import Any
 import json
+from pathlib import Path
 
 @dataclass
 class CaseState:
@@ -13,77 +13,59 @@ class CaseState:
     asked_fields: list[str] = field(default_factory=list)
     status: str = "collecting"
     history: list[dict[str, str]] = field(default_factory=list)
+    draft_version: int = 0
+    last_error: str = ""
 
     def record(self, role: str, text: str) -> None:
         self.history.append({"role": role, "text": text})
-        self.history = self.history[-40:]
+        self.history = self.history[-60:]
 
     def merge_facts(self, new_facts: dict[str, Any]) -> None:
-        list_fields = {
-            "plaintiffs", "defendants", "facts", "reliefs", "interim_reliefs", "documents"
-        }
+        list_fields = {"plaintiffs","defendants","parties","facts","reliefs","interim_reliefs","demands","defence_points","documents"}
         for key, value in new_facts.items():
             if value is None or value == "" or value == [] or value == {}:
                 continue
             if key in list_fields:
                 incoming = value if isinstance(value, list) else [value]
                 existing = self.facts.get(key, [])
-                if not isinstance(existing, list):
-                    existing = [existing]
+                if not isinstance(existing, list): existing = [existing]
                 for item in incoming:
                     item = str(item).strip()
-                    if item and item not in existing:
-                        existing.append(item)
+                    if item and item not in existing: existing.append(item)
                 self.facts[key] = existing
             else:
                 self.facts[key] = value
 
-    def to_dict(self):
-        return asdict(self)
-
+    def to_dict(self): return asdict(self)
     @classmethod
-    def from_dict(cls, data):
-        return cls(**data)
-
-    def save(self, path: str | Path) -> None:
-        Path(path).write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
-
+    def from_dict(cls, data): return cls(**data)
+    def save(self, path): Path(path).write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
     @classmethod
-    def load(cls, path: str | Path):
-        return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
+    def load(cls, path): return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
+DISPLAY_NAMES = {
+    "dava_plaint":"Dava / वाद पत्र",
+    "written_statement":"Written Statement / लिखित कथन",
+    "application":"Application / प्रार्थना पत्र",
+    "evidence_pw_affidavit":"Evidence / PW Affidavit",
+    "affidavit":"Affidavit / शपथपत्र",
+    "legal_notice":"Legal Notice / विधिक नोटिस",
+    "other_civil":"Other Civil Draft / अन्य सिविल ड्राफ्ट",
+}
 
-REQUIRED_FIELDS = [
-    ("court_name", "न्यायालय का नाम"),
-    ("plaintiffs", "वादी का/वादियों का पूरा नाम"),
-    ("defendants", "प्रतिवादी का/प्रतिवादियों का पूरा नाम"),
-    ("facts", "वाद के मुख्य तथ्य"),
-    ("reliefs", "मांगी जाने वाली राहत"),
-]
+REQUIRED_BY_TYPE = {
+    "dava_plaint": [("court_name","न्यायालय"),("plaintiffs","वादी"),("defendants","प्रतिवादी"),("facts","मुख्य तथ्य"),("reliefs","राहत")],
+    "written_statement": [("court_name","न्यायालय"),("plaintiffs","वादी"),("defendants","प्रतिवादी"),("facts","जवाब/प्रतिरक्षा के तथ्य")],
+    "application": [("court_name","न्यायालय"),("parties","पक्षकार"),("facts","मुख्य तथ्य"),("reliefs","मांगी गई राहत")],
+    "evidence_pw_affidavit": [("court_name","न्यायालय"),("deponent","शपथकर्ता/साक्षी"),("facts","साक्ष्य के तथ्य")],
+    "affidavit": [("deponent","शपथकर्ता"),("facts","शपथपत्र के तथ्य"),("purpose","शपथपत्र का उद्देश्य")],
+    "legal_notice": [("sender","प्रेषक"),("recipient","प्राप्तकर्ता"),("facts","नोटिस के तथ्य"),("demands","मांग/अनुपालन")],
+    "other_civil": [("parties","पक्षकार"),("facts","मुख्य तथ्य"),("purpose","ड्राफ्ट का उद्देश्य")],
+}
 
-IMPORTANT_FIELDS = [
-    # Advocate-style intake order: first collect facts needed to understand
-    # the dispute and draft; technical filing fields come afterwards.
-    ("plaintiff_intro", "वादी का पूरा परिचय/पता"),
-    ("defendant_intro", "प्रतिवादी का पूरा परिचय/पता"),
-    ("property_description", "विवादित संपत्ति का पूरा विवरण"),
-    ("cause_of_action", "वाद-कारण और वह कब उत्पन्न हुआ"),
-    ("jurisdiction_facts", "इस न्यायालय के क्षेत्राधिकार के तथ्य"),
-    ("limitation_facts", "समय-सीमा से संबंधित तथ्य, यदि उपलब्ध हों"),
-    ("valuation", "वाद का मूल्यांकन, यदि उपलब्ध हो"),
-    ("court_fee", "न्यायालय शुल्क की उपलब्ध जानकारी"),
-]
+def missing_fields(facts, document_type="dava_plaint"):
+    return [key for key, _ in REQUIRED_BY_TYPE.get(document_type, REQUIRED_BY_TYPE["other_civil"]) if not facts.get(key)]
 
-
-def missing_fields(facts):
-    return [key for key, _ in REQUIRED_FIELDS if not facts.get(key)]
-
-
-def next_questions(facts, max_questions=5):
-    result = []
-    for key, label in REQUIRED_FIELDS + IMPORTANT_FIELDS:
-        if not facts.get(key):
-            result.append((key, label))
-        if len(result) >= max_questions:
-            break
-    return result
+def next_questions(facts, document_type="dava_plaint", max_questions=5):
+    labels = REQUIRED_BY_TYPE.get(document_type, REQUIRED_BY_TYPE["other_civil"])
+    return [(key,label) for key,label in labels if not facts.get(key)][:max_questions]

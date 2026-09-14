@@ -1,16 +1,16 @@
 {
-  "type": "object",
-  "additionalProperties": false,
-  "properties": {
-    "court_heading": {"type": "string"},
-    "case_heading": {"type": "string"},
-    "parties": {"type": "array", "items": {"type": "string"}},
-    "title": {"type": "string"},
-    "opening_averment": {"type": "string"},
-    "pleadings": {"type": "array", "items": {"type": "string"}},
-    "prayer": {"type": "array", "items": {"type": "string"}},
-    "verification": {"type": "string"},
-    "signature_block": {"type": "array", "items": {"type": "string"}}
+  "type":"object",
+  "additionalProperties":false,
+  "properties":{
+    "court_heading":{"type":"string"},
+    "case_heading":{"type":"string"},
+    "parties":{"type":"array","items":{"type":"string"}},
+    "title":{"type":"string"},
+    "opening_averment":{"type":"string"},
+    "pleadings":{"type":"array","items":{"type":"string"}},
+    "prayer":{"type":"array","items":{"type":"string"}},
+    "verification":{"type":"string"},
+    "signature_block":{"type":"array","items":{"type":"string"}}
   },
-  "required": ["court_heading", "case_heading", "parties", "title", "opening_averment", "pleadings", "prayer", "verification", "signature_block"]
+  "required":["court_heading","case_heading","parties","title","opening_averment","pleadings","prayer","verification","signature_block"]
 }
