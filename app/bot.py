@@ -437,7 +437,17 @@ async def button(update,context):
     if q.data=="edit_discard":
         state.pending_edit={}; store.save(uid,state); await q.edit_message_text("❌ Proposed change discarded. Original draft unchanged.",reply_markup=case_actions(state)); return
     if q.data=="generate":
-        if missing_fields(state.facts,state.document_type): await q.edit_message_text(questions_text(state)); return
+        # Re-audit the accumulated user evidence immediately before generation.
+        # This repairs older/incomplete intake state and prevents the bot from
+        # asking for a field that the user already supplied in an earlier message.
+        try:
+            await q.edit_message_text("🧠 पूरे case की जानकारी दोबारा verify की जा रही है…")
+            await asyncio.to_thread(orchestrator.refresh_intake, state)
+            store.save(uid, state)
+        except Exception:
+            log.exception("pre-generation intake reconciliation failed")
+        if missing_fields(state.facts,state.document_type):
+            await q.edit_message_text(questions_text(state)); return
         await generate_for(update,uid,state,edit=True)
 
 def build_application():
