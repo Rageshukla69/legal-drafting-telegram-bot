@@ -5,6 +5,7 @@ from io import BytesIO
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 from app.case_store import CaseStore
+from app.access_control import AccessController
 from app.drafting_engine.conversation_state import CaseState, DISPLAY_NAMES, missing_fields, next_questions
 from app.drafting_engine.multi_draft_orchestrator import MultiDraftOrchestrator
 from app.drafting_engine.renderers.legal_document_renderer import render_both
@@ -13,7 +14,7 @@ from app.drafting_engine.gemini_client import GeminiError
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
 log=logging.getLogger("legal-bot")
-store=CaseStore(); orchestrator=MultiDraftOrchestrator()
+store=CaseStore(); access=AccessController(store); orchestrator=MultiDraftOrchestrator()
 
 TYPE_ORDER=["dava_plaint","written_statement","application","evidence_pw_affidavit","affidavit","legal_notice","other_civil"]
 TYPE_ICONS={"dava_plaint":"📜","written_statement":"📝","application":"📄","evidence_pw_affidavit":"⚖️","affidavit":"📋","legal_notice":"📬","other_civil":"📑"}
@@ -52,26 +53,99 @@ def summary_text(state):
             f"*न्यायालय:* {val('court_name')}\n*पक्षकार:* {val('parties') or val('plaintiffs')}\n"
             f"*मुख्य तथ्य:* {val('facts')}\n*राहत/मांग:* {val('reliefs') if facts.get('reliefs') else val('demands')}\n")
 
+async def deny(update):
+    if update.message:
+        await update.message.reply_text(
+            "🔒 *Private Legal Drafting Bot*\n\n"
+            "आप इस bot का उपयोग करने के लिए authorized नहीं हैं।\n"
+            "अपना Telegram User ID देखने के लिए /myid भेजें।",
+            parse_mode="Markdown",
+        )
+
+async def require_access(update) -> bool:
+    user = update.effective_user
+    if not user or not access.is_authorized(user.id):
+        await deny(update)
+        return False
+    return True
+
+async def myid(update, context):
+    if not update.message or not update.effective_user:
+        return
+    await update.message.reply_text(f"🆔 आपका Telegram User ID है: `{update.effective_user.id}`", parse_mode="Markdown")
+
+async def authorize(update, context):
+    if not update.message or not update.effective_user:
+        return
+    if not access.is_owner(update.effective_user.id):
+        await deny(update)
+        return
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: `/authorize TELEGRAM_USER_ID`", parse_mode="Markdown")
+        return
+    target = context.args[0]
+    if access.is_owner(target):
+        await update.message.reply_text("👑 Owner पहले से permanently authorized है।")
+        return
+    access.authorize(target, update.effective_user.id)
+    await update.message.reply_text(f"✅ User `{target}` को authorize कर दिया गया है।", parse_mode="Markdown")
+
+async def unauthorize(update, context):
+    if not update.message or not update.effective_user:
+        return
+    if not access.is_owner(update.effective_user.id):
+        await deny(update)
+        return
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: `/unauthorize TELEGRAM_USER_ID`", parse_mode="Markdown")
+        return
+    target = context.args[0]
+    if access.is_owner(target):
+        await update.message.reply_text("🛡️ Owner को unauthorize नहीं किया जा सकता।")
+        return
+    removed = access.unauthorize(target)
+    await update.message.reply_text(
+        f"{'✅ User removed from allowlist.' if removed else 'ℹ️ User allowlist में नहीं था.'}\nUser ID: `{target}`",
+        parse_mode="Markdown",
+    )
+
+async def authorized(update, context):
+    if not update.message or not update.effective_user:
+        return
+    if not access.is_owner(update.effective_user.id):
+        await deny(update)
+        return
+    users = access.authorized_users()
+    lines = [f"👑 Owner: `{access.owner_id}`", "", "*Authorized users:*" ]
+    lines.extend(f"• `{u['user_id']}`" for u in users)
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
 async def start(update,context):
     if not update.message:return
+    if not await require_access(update): return
     await update.message.reply_text("⚖️ *LEGAL DRAFTING WORKSPACE*\n\nसात प्रकार के legal drafts तैयार करें। नीचे document type चुनें।",parse_mode="Markdown",reply_markup=dashboard())
 
 async def newcase(update,context):
     if not update.message or not update.effective_user:return
+    if not await require_access(update): return
     await update.message.reply_text("⚖️ *नया Legal Draft*\n\nपहले document type चुनें:",parse_mode="Markdown",reply_markup=dashboard())
 
 async def cancel(update,context):
     if not update.message or not update.effective_user:return
+    if not await require_access(update): return
     store.delete(case_id_for(update.effective_user.id)); await update.message.reply_text("✅ Current draft session बंद कर दी गई है। /newcase से नया draft शुरू करें।")
 
 async def summary(update,context):
     if not update.message or not update.effective_user:return
+    if not await require_access(update): return
     state=get_state(update.effective_user.id)
     if not state: await update.message.reply_text("कोई active draft नहीं है। /newcase दबाएँ।"); return
     await update.message.reply_text(summary_text(state),parse_mode="Markdown",reply_markup=case_actions(state))
 
 async def intake_text(update,context,text=None):
     if not update.effective_user:return
+    if not access.is_authorized(update.effective_user.id):
+        await deny(update); return
     text=(text or update.message.text).strip(); state=get_state(update.effective_user.id)
     if not state:
         await update.message.reply_text("पहले /newcase दबाकर document type चुनें।",reply_markup=dashboard()); return
@@ -88,6 +162,7 @@ async def text_message(update,context): await intake_text(update,context)
 
 async def voice_message(update,context):
     if not update.message or not update.message.voice or not update.effective_user:return
+    if not await require_access(update): return
     state=get_state(update.effective_user.id)
     if not state: await update.message.reply_text("पहले /newcase से document type चुनें।",reply_markup=dashboard()); return
     await update.message.reply_text("🎙️ Voice note मिला। Transcript तैयार किया जा रहा है…")
@@ -117,6 +192,9 @@ async def generate_for(update,uid,state,edit=False):
 
 async def button(update,context):
     q=update.callback_query; await q.answer()
+    if not access.is_authorized(q.from_user.id):
+        await q.edit_message_text("🔒 यह bot private है। आप authorized नहीं हैं। /myid से अपना User ID देखें।")
+        return
     uid=q.from_user.id; cid=case_id_for(uid)
     if q.data.startswith("type:"):
         t=q.data.split(":",1)[1]; state=CaseState(cid,document_type=t); store.save(uid,state)
@@ -133,7 +211,7 @@ def build_application():
     token=os.getenv("TELEGRAM_BOT_TOKEN")
     if not token: raise RuntimeError("TELEGRAM_BOT_TOKEN is not set.")
     app=Application.builder().token(token).build()
-    app.add_handler(CommandHandler("start",start)); app.add_handler(CommandHandler("newcase",newcase)); app.add_handler(CommandHandler("cancel",cancel)); app.add_handler(CommandHandler("summary",summary))
+    app.add_handler(CommandHandler("start",start)); app.add_handler(CommandHandler("newcase",newcase)); app.add_handler(CommandHandler("cancel",cancel)); app.add_handler(CommandHandler("summary",summary)); app.add_handler(CommandHandler("myid",myid)); app.add_handler(CommandHandler("authorize",authorize)); app.add_handler(CommandHandler("unauthorize",unauthorize)); app.add_handler(CommandHandler("authorized",authorized))
     app.add_handler(CallbackQueryHandler(button)); app.add_handler(MessageHandler(filters.VOICE,voice_message)); app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,text_message))
     return app
 

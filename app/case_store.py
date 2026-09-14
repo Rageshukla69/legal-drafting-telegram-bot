@@ -19,6 +19,7 @@ class CaseStore:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with sqlite3.connect(self.path) as db:
                 db.execute("CREATE TABLE IF NOT EXISTS cases (case_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, state_json TEXT NOT NULL)")
+                db.execute("CREATE TABLE IF NOT EXISTS authorized_users (user_id TEXT PRIMARY KEY, added_by TEXT NOT NULL, authorized_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
                 db.commit()
         else:
             from azure.cosmos import CosmosClient, PartitionKey
@@ -49,6 +50,58 @@ class CaseStore:
         with sqlite3.connect(self.path) as db:
             db.execute("INSERT OR REPLACE INTO cases(case_id,user_id,state_json) VALUES (?,?,?)",(state.case_id,str(user_id),json.dumps(state.to_dict(),ensure_ascii=False)))
             db.commit()
+
+    def is_user_authorized(self, user_id: str) -> bool:
+        if self.use_cosmos:
+            try:
+                self.container.read_item(item=f"auth:{user_id}", partition_key="__auth__")
+                return True
+            except Exception:
+                return False
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("SELECT 1 FROM authorized_users WHERE user_id=?", (str(user_id),)).fetchone()
+        return row is not None
+
+    def authorize_user(self, user_id: str, added_by: str) -> None:
+        if self.use_cosmos:
+            self.container.upsert_item({
+                "id": f"auth:{user_id}",
+                "user_id": "__auth__",
+                "record_type": "authorized_user",
+                "authorized_user_id": str(user_id),
+                "added_by": str(added_by),
+            })
+            return
+        with sqlite3.connect(self.path) as db:
+            db.execute(
+                "INSERT OR REPLACE INTO authorized_users(user_id,added_by,authorized_at) VALUES (?,?,CURRENT_TIMESTAMP)",
+                (str(user_id), str(added_by)),
+            )
+            db.commit()
+
+    def unauthorize_user(self, user_id: str) -> bool:
+        if self.use_cosmos:
+            try:
+                self.container.delete_item(item=f"auth:{user_id}", partition_key="__auth__")
+                return True
+            except Exception:
+                return False
+        with sqlite3.connect(self.path) as db:
+            cur = db.execute("DELETE FROM authorized_users WHERE user_id=?", (str(user_id),))
+            db.commit()
+            return cur.rowcount > 0
+
+    def list_authorized_users(self) -> list[dict]:
+        if self.use_cosmos:
+            query = "SELECT c.authorized_user_id, c.added_by FROM c WHERE c.record_type = 'authorized_user'"
+            items = list(self.container.query_items(query=query, enable_cross_partition_query=True))
+            return [
+                {"user_id": str(i.get("authorized_user_id")), "added_by": str(i.get("added_by", ""))}
+                for i in items
+            ]
+        with sqlite3.connect(self.path) as db:
+            rows = db.execute("SELECT user_id, added_by FROM authorized_users ORDER BY user_id").fetchall()
+        return [{"user_id": str(uid), "added_by": str(added_by)} for uid, added_by in rows]
 
     def delete(self, case_id: str) -> None:
         if self.use_cosmos:
