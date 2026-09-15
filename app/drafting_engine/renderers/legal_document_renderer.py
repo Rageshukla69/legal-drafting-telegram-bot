@@ -10,12 +10,14 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Any
+import unicodedata
 
 from docx import Document
 from docx.enum.section import WD_SECTION
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches, Pt
 from docx.oxml.ns import qn
+from ..legal_number_formatter import format_draft_numbers
 
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import LETTER, legal
@@ -134,14 +136,100 @@ def _font_bold_path() -> str:
             return p
     return _font_path()
 
-def _register_pdf_fonts() -> tuple[str, str]:
+def _latin_font_path() -> str:
+    bundled = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "NotoSans-Regular.ttf"
+    if bundled.exists():
+        return str(bundled)
+    for p in (
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ):
+        if Path(p).exists():
+            return p
+    raise RuntimeError("Unicode Latin fallback font not found.")
+
+def _symbol_font_path() -> str:
+    bundled = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "DejaVuSans.ttf"
+    if bundled.exists():
+        return str(bundled)
+    p = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    if Path(p).exists():
+        return p
+    return _latin_font_path()
+
+def _register_pdf_fonts() -> tuple[str, str, str, str]:
     regular = "VakilDeva"
     bold = "VakilDevaBold"
+    latin = "VakilLatin"
+    symbols = "VakilSymbols"
     if regular not in pdfmetrics.getRegisteredFontNames():
         pdfmetrics.registerFont(TTFont(regular, _font_path()))
     if bold not in pdfmetrics.getRegisteredFontNames():
         pdfmetrics.registerFont(TTFont(bold, _font_bold_path()))
-    return regular, bold
+    if latin not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont(latin, _latin_font_path()))
+    if symbols not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont(symbols, _symbol_font_path()))
+    return regular, bold, latin, symbols
+
+
+def _pdf_font_coverage(font_name: str) -> set[int]:
+    font = pdfmetrics.getFont(font_name)
+    return set(getattr(font.face, "charWidths", {}).keys())
+
+
+def _pdf_inline_font_markup(text: str, primary: str, fallback: str, symbols: str) -> str:
+    """Escape text and split it into font runs so unsupported glyphs never become □.
+
+    Devanagari stays in the bundled Devanagari font. Latin/punctuation uses
+    Noto Sans, while symbols missing from both use DejaVu Sans. Characters
+    unsupported by every bundled font are removed rather than rendered as a
+    tofu square; this is preferable for court-ready output.
+    """
+    primary_cov = _pdf_font_coverage(primary)
+    fallback_cov = _pdf_font_coverage(fallback)
+    symbol_cov = _pdf_font_coverage(symbols)
+    out: list[str] = []
+    current = None
+    buf: list[str] = []
+
+    def flush():
+        nonlocal current, buf
+        if not buf:
+            return
+        escaped = _escape_xml("".join(buf))
+        if current == primary:
+            out.append(escaped)
+        else:
+            out.append(f'<font name="{current}">{escaped}</font>')
+        buf = []
+
+    for ch in str(text):
+        cp = ord(ch)
+        # ASCII letters/digits are deliberately routed to the bundled Latin
+        # font. Noto Sans Devanagari does not contain A-D, and relying on PDF
+        # viewer fallback can produce tofu squares in map labels such as A/B/C/D.
+        if cp < 128 and (ch.isalnum() or unicodedata.category(ch).startswith("P")):
+            chosen = fallback
+        # Preserve whitespace and normal combining marks with the current
+        # script where possible.
+        elif cp in primary_cov:
+            chosen = primary
+        elif cp in fallback_cov:
+            chosen = fallback
+        elif cp in symbol_cov:
+            chosen = symbols
+        elif unicodedata.category(ch) in {"Cf", "Mn", "Me"}:
+            chosen = current or primary
+        else:
+            # Do not allow an unrenderable character to become a tofu box.
+            continue
+        if chosen != current:
+            flush()
+            current = chosen
+        buf.append(ch)
+    flush()
+    return "".join(out)
 
 
 def _set_run_font(run, name: str, size: float, bold: bool = False):
@@ -204,9 +292,50 @@ def _add_docx_para(
     if left_indent:
         pf.left_indent = Inches(left_indent)
 
-    run = p.add_run(str(text))
-    _set_run_font(run, "Noto Sans Devanagari", size, bold=bold)
-    run.underline = underline
+    text = str(text)
+    # Word can perform font fallback, but explicit run-level fallback is more
+    # reliable across Android viewers, LibreOffice and Microsoft Word.
+    primary = _font_path()
+    latin = _latin_font_path()
+    symbol = _symbol_font_path()
+    from fontTools.ttLib import TTFont as _FTFont
+    coverages = {}
+    for key, path in (("primary", primary), ("latin", latin), ("symbol", symbol)):
+        ft = _FTFont(path, lazy=True)
+        cmap = set()
+        for table in ft["cmap"].tables:
+            cmap.update(table.cmap.keys())
+        coverages[key] = cmap
+        ft.close()
+
+    runs = []
+    current_font = None
+    buf = []
+    for ch in text:
+        cp = ord(ch)
+        if cp < 128 and (ch.isalnum() or unicodedata.category(ch).startswith("P")):
+            font_name = "Noto Sans"
+        elif cp in coverages["primary"]:
+            font_name = "Noto Sans Devanagari"
+        elif cp in coverages["latin"]:
+            font_name = "Noto Sans"
+        elif cp in coverages["symbol"]:
+            font_name = "DejaVu Sans"
+        elif unicodedata.category(ch) in {"Cf", "Mn", "Me"}:
+            font_name = current_font or "Noto Sans Devanagari"
+        else:
+            continue
+        if font_name != current_font and buf:
+            runs.append((current_font, "".join(buf)))
+            buf = []
+        current_font = font_name
+        buf.append(ch)
+    if buf:
+        runs.append((current_font, "".join(buf)))
+    for font_name, chunk in runs:
+        run = p.add_run(chunk)
+        _set_run_font(run, font_name, size, bold=bold)
+        run.underline = underline
     return p
 
 
@@ -261,6 +390,7 @@ def _signature_lines(draft: dict[str, Any]) -> list[str]:
 
 
 def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "legal"):
+    draft = format_draft_numbers(draft)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc = Document()
@@ -341,7 +471,7 @@ def _escape_xml(text: str) -> str:
     )
 
 
-def _pdf_story(draft: dict[str, Any], font: str, bold_font: str):
+def _pdf_story(draft: dict[str, Any], font: str, bold_font: str, latin_font: str, symbol_font: str):
     styles = getSampleStyleSheet()
     body = ParagraphStyle("VakilBody", parent=styles["BodyText"], fontName=font, fontSize=14, leading=21, alignment=TA_JUSTIFY, shaping=1, firstLineIndent=0.5 * inch, spaceAfter=12)
     center16 = ParagraphStyle("VakilCenter16", parent=body, fontName=bold_font, fontSize=16, leading=22, alignment=TA_CENTER, shaping=1, firstLineIndent=0, spaceAfter=8)
@@ -357,57 +487,57 @@ def _pdf_story(draft: dict[str, Any], font: str, bold_font: str):
     if _layout_break(draft, "page_break_before", "court_heading"):
         story.append(PageBreak())
     if court:
-        story.append(Paragraph(_escape_xml(court), center16))
+        story.append(Paragraph(_pdf_inline_font_markup(court, font, latin_font, symbol_font), center16))
     if case:
         if _layout_break(draft, "page_break_before", "case_heading"):
             story.append(PageBreak())
-        story.append(Paragraph(_escape_xml(case), ParagraphStyle("Case", parent=center16, fontSize=14, leading=20, spaceAfter=10)))
+        story.append(Paragraph(_pdf_inline_font_markup(case, font, latin_font, symbol_font), ParagraphStyle("Case", parent=center16, fontSize=14, leading=20, spaceAfter=10)))
 
     if _layout_break(draft, "page_break_before", "parties"):
         story.append(PageBreak())
     plaintiff, defendant, other = split_party_blocks(parties)
     if plaintiff and defendant:
         for party in plaintiff:
-            story.append(Paragraph(_escape_xml(party), left))
-        story.append(Paragraph(_escape_xml("बनाम"), center))
+            story.append(Paragraph(_pdf_inline_font_markup(party, font, latin_font, symbol_font), left))
+        story.append(Paragraph(_pdf_inline_font_markup("बनाम", font, latin_font, symbol_font), center))
         for party in defendant:
-            story.append(Paragraph(_escape_xml(party), left))
+            story.append(Paragraph(_pdf_inline_font_markup(party, font, latin_font, symbol_font), left))
         for party in other:
-            story.append(Paragraph(_escape_xml(party), left))
+            story.append(Paragraph(_pdf_inline_font_markup(party, font, latin_font, symbol_font), left))
     else:
         for party in parties:
-            story.append(Paragraph(_escape_xml(party), left))
+            story.append(Paragraph(_pdf_inline_font_markup(party, font, latin_font, symbol_font), left))
 
     if _layout_break(draft, "page_break_before", "title"):
         story.append(PageBreak())
-    story.append(Paragraph(_escape_xml(_title_text(draft)), ParagraphStyle("Title", parent=center16, underline=True, spaceBefore=4, spaceAfter=10)))
+    story.append(Paragraph(_pdf_inline_font_markup(_title_text(draft), font, latin_font, symbol_font), ParagraphStyle("Title", parent=center16, underline=True, spaceBefore=4, spaceAfter=10)))
 
     opening = str(draft.get("opening_averment", "")).strip()
     if opening:
         if _layout_break(draft, "page_break_before", "opening_averment"):
             story.append(PageBreak())
-        story.append(Paragraph(_escape_xml(opening), noindent))
+        story.append(Paragraph(_pdf_inline_font_markup(opening, font, latin_font, symbol_font), noindent))
 
     if _layout_break(draft, "page_break_before", "pleadings"):
         story.append(PageBreak())
     for idx, paragraph in enumerate(_ordered_pleading_items(draft), 1):
-        story.append(Paragraph(_escape_xml(numbered(paragraph, idx)), body))
+        story.append(Paragraph(_pdf_inline_font_markup(numbered(paragraph, idx), font, latin_font, symbol_font), body))
 
     prayer = [str(x).strip() for x in draft.get("prayer", []) or [] if str(x).strip()]
     if prayer:
         if _layout_break(draft, "page_break_before", "prayer"):
             story.append(PageBreak())
         story.append(Paragraph("प्रार्थना", ParagraphStyle("PrayerTitle", parent=center16, underline=True, spaceBefore=2, spaceAfter=8)))
-        story.append(Paragraph(_escape_xml("अतः वादी माननीय न्यायालय से प्रार्थना करता है कि:-"), noindent))
+        story.append(Paragraph(_pdf_inline_font_markup("अतः वादी माननीय न्यायालय से प्रार्थना करता है कि:-", font, latin_font, symbol_font), noindent))
         labels = ["(क)", "(ख)", "(ग)", "(घ)", "(ङ)", "(च)"]
         for idx, item in enumerate(prayer):
             label = labels[idx] if idx < len(labels) else f"({idx + 1})"
-            story.append(Paragraph(_escape_xml(f"{label} {item}"), ParagraphStyle(f"Prayer{idx}", parent=body, firstLineIndent=0, spaceAfter=10)))
+            story.append(Paragraph(_pdf_inline_font_markup(f"{label} {item}", font, latin_font, symbol_font), ParagraphStyle(f"Prayer{idx}", parent=body, firstLineIndent=0, spaceAfter=10)))
 
     if _layout_break(draft, "page_break_before", "signature_block"):
         story.append(PageBreak())
     for line in _signature_lines(draft):
-        story.append(Paragraph(_escape_xml(line), right))
+        story.append(Paragraph(_pdf_inline_font_markup(line, font, latin_font, symbol_font), right))
 
     verification = str(draft.get("verification", "") or "").strip()
     if verification:
@@ -416,7 +546,7 @@ def _pdf_story(draft: dict[str, Any], font: str, bold_font: str):
         story.append(Paragraph("सत्यापन", ParagraphStyle("VerificationTitle", parent=center16, underline=True, spaceBefore=8, spaceAfter=8)))
         for line in verification.splitlines():
             if line.strip():
-                story.append(Paragraph(_escape_xml(line.strip()), body))
+                story.append(Paragraph(_pdf_inline_font_markup(line.strip(), font, latin_font, symbol_font), body))
     return story
 
 
@@ -445,9 +575,10 @@ class NumberedCanvas(Canvas):
 
 
 def render_pdf(draft: dict[str, Any], output_path: str | Path, paper: str = "legal"):
+    draft = format_draft_numbers(draft)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    font, bold_font = _register_pdf_fonts()
+    font, bold_font, latin_font, symbol_font = _register_pdf_fonts()
 
     paper = str(paper or "legal").strip().lower()
     if paper not in {"legal", "letter"}:
@@ -473,7 +604,7 @@ def render_pdf(draft: dict[str, Any], output_path: str | Path, paper: str = "leg
     )
     doc.addPageTemplates([PageTemplate(id="legal", frames=[frame])])
     doc.build(
-        _pdf_story(draft, font, bold_font),
+        _pdf_story(draft, font, bold_font, latin_font, symbol_font),
         canvasmaker=NumberedCanvas,
     )
     return output_path
