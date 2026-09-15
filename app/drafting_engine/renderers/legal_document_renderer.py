@@ -17,7 +17,6 @@ from docx.enum.section import WD_SECTION
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches, Pt
 from docx.oxml.ns import qn
-from ..legal_number_formatter import format_draft_numbers
 
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import LETTER, legal
@@ -178,48 +177,55 @@ def _pdf_font_coverage(font_name: str) -> set[int]:
     return set(getattr(font.face, "charWidths", {}).keys())
 
 
-def _pdf_inline_font_markup(text: str, primary: str, fallback: str, symbols: str) -> str:
-    """Create shaping-safe contiguous font runs.
+def _is_devanagari(cp: int) -> bool:
+    """Return True for Devanagari letters/marks used by Hindi text."""
+    return (
+        0x0900 <= cp <= 0x097F
+        or 0xA8E0 <= cp <= 0xA8FF
+        or 0x11B00 <= cp <= 0x11B5F
+    )
 
-    Devanagari is a complex script. Splitting it character-by-character (or
-    switching fonts for every punctuation mark) can break HarfBuzz shaping and
-    produce cramped/malformed glyphs in PDF viewers. Keep complete Devanagari
-    runs together and switch only for actual Latin/numeric runs or symbols.
+
+def _pdf_inline_font_markup(text: str, primary: str, fallback: str, symbols: str) -> str:
+    """Create safe PDF font runs without breaking Hindi shaping.
+
+    The previous implementation selected a font independently for every
+    character. That is dangerous for Indic scripts because a Devanagari word
+    must remain a continuous shaping run. This implementation keeps contiguous
+    Hindi text together and switches to the Latin font only for actual Latin
+    letters/digits. Combining marks and zero-width joiners stay with the
+    surrounding Hindi run.
+
+    The resulting markup is still Unicode text; no transliteration or content
+    rewriting occurs here.
     """
     primary_cov = _pdf_font_coverage(primary)
     fallback_cov = _pdf_font_coverage(fallback)
     symbol_cov = _pdf_font_coverage(symbols)
-    out: list[str] = []
-    current: str | None = None
-    buf: list[str] = []
 
-    def flush() -> None:
-        nonlocal current, buf
-        if not buf or current is None:
-            return
-        escaped = _escape_xml("".join(buf))
-        if current == primary:
-            out.append(escaped)
-        else:
-            out.append(f'<font name="{current}">{escaped}</font>')
-        buf = []
-
-    def choose_font(ch: str) -> str | None:
+    def choose(ch: str, current: str | None) -> str | None:
         cp = ord(ch)
-        # Keep Devanagari letters and combining marks in one continuous run.
-        # Spaces/common punctuation remain with the surrounding Hindi run.
-        if (0x0900 <= cp <= 0x097F) or unicodedata.category(ch) in {"Mn", "Mc", "Me"}:
-            return primary if cp in primary_cov else (fallback if cp in fallback_cov else symbols if cp in symbol_cov else None)
-        if ch.isspace():
+        cat = unicodedata.category(ch)
+
+        # Keep Indic combining marks and join controls in the current run so
+        # HarfBuzz/ReportLab can shape the base + mark sequence together.
+        if cat in {"Mn", "Mc", "Me", "Cf"}:
             return current or primary
-        # ASCII letters/digits are deliberately routed to Noto Sans. This keeps
-        # A/B/C/D map labels and legal identifiers readable without disrupting
-        # the surrounding Devanagari shaping run.
-        if cp < 128 and ch.isalnum():
-            return fallback if cp in fallback_cov else primary if cp in primary_cov else symbols if cp in symbol_cov else None
-        # Keep ordinary punctuation with the current script whenever possible.
-        if unicodedata.category(ch).startswith("P"):
-            return current or (primary if cp in primary_cov else fallback if cp in fallback_cov else symbols if cp in symbol_cov else None)
+
+        if _is_devanagari(cp):
+            return primary if cp in primary_cov else None
+
+        # ASCII letters, digits and punctuation are intentionally kept in the
+        # Latin run. This covers case numbers, ABCD, dates, amounts, etc.
+        if cp < 128:
+            if ch.isspace():
+                return current or primary
+            return fallback if cp in fallback_cov else None
+
+        # Other Unicode whitespace should not force a font switch.
+        if cat.startswith("Z"):
+            return current or primary
+
         if cp in primary_cov:
             return primary
         if cp in fallback_cov:
@@ -228,9 +234,26 @@ def _pdf_inline_font_markup(text: str, primary: str, fallback: str, symbols: str
             return symbols
         return None
 
+    out: list[str] = []
+    current: str | None = None
+    buf: list[str] = []
+
+    def flush() -> None:
+        nonlocal current, buf
+        if not buf:
+            return
+        escaped = _escape_xml("".join(buf))
+        if current == primary:
+            out.append(escaped)
+        else:
+            out.append(f'<font name="{current}">{escaped}</font>')
+        buf = []
+
     for ch in str(text):
-        chosen = choose_font(ch)
+        chosen = choose(ch, current)
         if chosen is None:
+            # An unsupported character must never be silently converted into a
+            # tofu glyph. Drop it only when no bundled font can represent it.
             continue
         if chosen != current:
             flush()
@@ -321,9 +344,7 @@ def _add_docx_para(
     buf = []
     for ch in text:
         cp = ord(ch)
-        if cp < 128 and (ch.isalnum() or unicodedata.category(ch).startswith("P")):
-            font_name = "Noto Sans"
-        elif cp in coverages["primary"]:
+        if cp in coverages["primary"]:
             font_name = "Noto Sans Devanagari"
         elif cp in coverages["latin"]:
             font_name = "Noto Sans"
@@ -398,7 +419,6 @@ def _signature_lines(draft: dict[str, Any]) -> list[str]:
 
 
 def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "legal"):
-    draft = format_draft_numbers(draft)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc = Document()
@@ -583,7 +603,6 @@ class NumberedCanvas(Canvas):
 
 
 def render_pdf(draft: dict[str, Any], output_path: str | Path, paper: str = "legal"):
-    draft = format_draft_numbers(draft)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     font, bold_font, latin_font, symbol_font = _register_pdf_fonts()
