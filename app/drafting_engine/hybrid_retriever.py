@@ -3,6 +3,7 @@ import json, math, os, re
 from collections import Counter
 from pathlib import Path
 from typing import Any
+from .hindi_corpus_guard import safe_reference_block
 TOKEN_RE=re.compile(r'[A-Za-z0-9\u0900-\u097F]+',re.UNICODE)
 def toks(t): return [x.casefold() for x in TOKEN_RE.findall(t or '') if len(x)>1]
 def tokset(t): return set(toks(t))
@@ -31,9 +32,16 @@ class HybridCorpusRetriever:
         return [{**{k:d.get(k) for k in ('id','category','document_type','filename','relative_path','text','structure')},'score':round(s,4)} for s,d in scored[:top_k]]
     def format_context(self,results,max_chars=None):
         max_chars=max_chars or int(os.getenv('CORPUS_CONTEXT_MAX_CHARS','90000')); blocks=[]; used=0
+        # The supplied 306-document index contains mixed legacy-font artifacts.
+        # Do not send those bodies to Gemini by default; they can poison Hindi
+        # terminology and make the model reproduce strings such as "mपराsDत".
+        include_legacy_text = os.getenv('CORPUS_ALLOW_LEGACY_TEXT','false').strip().lower() == 'true'
         for i,r in enumerate(results,1):
-            text=str(r.get('text','')); text=text if len(text)<=18000 else text[:18000]+'\n[END OF EXCERPT]'
-            block=f"[ORIGINAL DRAFT {i}]\nfilename: {r.get('filename','')}\ncategory: {r.get('category','')}\nretrieval_score: {r.get('score',0)}\nROLE: STYLE/STRUCTURE REFERENCE ONLY — NOT FACTUAL EVIDENCE.\n{text}"
+            if include_legacy_text:
+                text=str(r.get('text','')); text=text if len(text)<=18000 else text[:18000]+'\n[END OF EXCERPT]'
+                block=f"[ORIGINAL DRAFT {i}]\nfilename: {r.get('filename','')}\ncategory: {r.get('category','')}\nretrieval_score: {r.get('score',0)}\nROLE: STYLE/STRUCTURE REFERENCE ONLY — NOT FACTUAL EVIDENCE.\n{text}"
+            else:
+                block=safe_reference_block(r, i)
             if used+len(block)>max_chars:break
             blocks.append(block); used+=len(block)
         return '\n\n'.join(blocks)

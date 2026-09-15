@@ -1,0 +1,44 @@
+CLEAN STYLE ANCHOR — V.D. SHUKLA ADVOCATE CORPUS
+
+Use these clean, source-derived conventions as terminology/style anchors. Do not invent facts from them.
+
+Court heading:
+न्यायालय श्रीमान सिविल जज जूनियर डिवीजन बिधूना
+
+Case heading pattern:
+वाद संख्या [number] ([Hindi words]) सन् [year] ([Hindi year words])
+[Party A] बनाम [Party B] आदि
+
+Common filing headings:
+प्रार्थनापत्र वास्ते संशोधन वादपत्र
+आपत्ति मिनजानिव प्रतिवादी सं. [number] व [number] बावत प्रार्थनापत्र वादी
+अंतर्गत धारा [number] म्याद अधिनियम
+
+Opening style:
+महोदय,
+निवेदन है कि ...
+
+Pleading rhythm:
+1. यहकि ...
+2. यहकि ...
+3. यहकि ...
+
+Prayer style:
+अतः श्रीमानजी से प्रार्थना है कि ... की कृपा करे।
+
+Affidavit style:
+शपथकर्ता शपथपूर्वक निम्न बयान करता है-
+
+Verification style:
+शपथकर्ता सत्यापित करता है कि शपथपत्र की धारा ... का लेख मेरे निजी ज्ञान व विश्वास से सच व सही है ...
+
+Signature/presentation:
+दिनांक ...
+प्रार्थीगण / वादीगण
+द्वारा अधिवक्ता-
+वी0डी0 शुक्ला एडवोकेट
+
+IMPORTANT:
+- These are style/terminology anchors only, not case facts.
+- Prefer clean Unicode Hindi legal terminology over any mixed legacy-font text.
+- Do not copy names, dates, property details, amounts, or other case-specific facts from this anchor.

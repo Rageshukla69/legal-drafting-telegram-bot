@@ -6,6 +6,7 @@ from .case_intake import extract_case_facts, reconcile_case_state
 from .conversation_state import CaseState, missing_fields, next_questions
 from .gemini_client import GeminiClient
 from .hybrid_retriever import HybridCorpusRetriever
+from .hindi_corpus_guard import legacy_corruption_score
 
 TYPE_META = {
     "dava_plaint": ("dava", "dava_specialist.txt", "Dava / वाद पत्र"),
@@ -89,11 +90,18 @@ class MultiDraftOrchestrator:
         corpus_type, prompt_file, label = TYPE_META[state.document_type]
         style = (PROMPTS / prompt_file).read_text(encoding="utf-8")
         context = self._retrieve(state.facts, state.document_type)
+        style_anchor = (ROOT / "style_reference.txt").read_text(encoding="utf-8")
         package = {
             "DOCUMENT_TYPE": label,
             "CASE_FACTS": state.facts,
             "ORIGINAL_ADVOCATE_DRAFTS": context,
-            "SYSTEM_RULES": BASE_RULES,
+            "CLEAN_STYLE_ANCHOR": style_anchor,
+            "SYSTEM_RULES": BASE_RULES + [
+                "The indexed legacy corpus body text is intentionally excluded unless CORPUS_ALLOW_LEGACY_TEXT=true.",
+                "Use CLEAN_STYLE_ANCHOR for clean Hindi legal terminology and drafting rhythm; it contains no case-specific facts.",
+                "Never output legacy-font artifacts or mixed Latin characters inside Hindi words (for example mपराsDत, जwनियर, डिवhजन, vौरSयk).",
+                "Use standard Unicode Devanagari Hindi in every Hindi sentence.",
+            ],
             "OUTPUT_REQUIREMENTS": {
                 "court_heading":"Court heading if supplied/applicable; otherwise empty.",
                 "case_heading":"Party/case heading using only supplied facts.",
@@ -125,6 +133,12 @@ class MultiDraftOrchestrator:
         for k in ("plaintiffs","defendants","parties","sender","recipient","deponent"):
             v=facts.get(k,[]); source_names.extend(v if isinstance(v,list) else [v])
         text=json.dumps(draft,ensure_ascii=False)
+        # Reject mixed-font legacy artifacts before rendering. This is deliberately
+        # a retry trigger, not a silent word replacement: we never want to guess
+        # what a corrupted legal word was supposed to mean.
+        hindi_chars=sum("\u0900" <= c <= "\u097f" for c in text)
+        if hindi_chars >= 80 and legacy_corruption_score(text) > 0.18:
+            errors.append("draft contains mixed legacy-font Hindi artifacts; regenerate using clean Unicode Hindi")
         if source_names and not any(str(n).strip() and str(n).strip() in text for n in source_names):
             errors.append("draft does not contain identifiable supplied party/deponent information")
         return errors
