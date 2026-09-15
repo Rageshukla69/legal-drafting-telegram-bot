@@ -179,23 +179,23 @@ def _pdf_font_coverage(font_name: str) -> set[int]:
 
 
 def _pdf_inline_font_markup(text: str, primary: str, fallback: str, symbols: str) -> str:
-    """Escape text and split it into font runs so unsupported glyphs never become □.
+    """Create shaping-safe contiguous font runs.
 
-    Devanagari stays in the bundled Devanagari font. Latin/punctuation uses
-    Noto Sans, while symbols missing from both use DejaVu Sans. Characters
-    unsupported by every bundled font are removed rather than rendered as a
-    tofu square; this is preferable for court-ready output.
+    Devanagari is a complex script. Splitting it character-by-character (or
+    switching fonts for every punctuation mark) can break HarfBuzz shaping and
+    produce cramped/malformed glyphs in PDF viewers. Keep complete Devanagari
+    runs together and switch only for actual Latin/numeric runs or symbols.
     """
     primary_cov = _pdf_font_coverage(primary)
     fallback_cov = _pdf_font_coverage(fallback)
     symbol_cov = _pdf_font_coverage(symbols)
     out: list[str] = []
-    current = None
+    current: str | None = None
     buf: list[str] = []
 
-    def flush():
+    def flush() -> None:
         nonlocal current, buf
-        if not buf:
+        if not buf or current is None:
             return
         escaped = _escape_xml("".join(buf))
         if current == primary:
@@ -204,25 +204,33 @@ def _pdf_inline_font_markup(text: str, primary: str, fallback: str, symbols: str
             out.append(f'<font name="{current}">{escaped}</font>')
         buf = []
 
-    for ch in str(text):
+    def choose_font(ch: str) -> str | None:
         cp = ord(ch)
-        # ASCII letters/digits are deliberately routed to the bundled Latin
-        # font. Noto Sans Devanagari does not contain A-D, and relying on PDF
-        # viewer fallback can produce tofu squares in map labels such as A/B/C/D.
-        if cp < 128 and (ch.isalnum() or unicodedata.category(ch).startswith("P")):
-            chosen = fallback
-        # Preserve whitespace and normal combining marks with the current
-        # script where possible.
-        elif cp in primary_cov:
-            chosen = primary
-        elif cp in fallback_cov:
-            chosen = fallback
-        elif cp in symbol_cov:
-            chosen = symbols
-        elif unicodedata.category(ch) in {"Cf", "Mn", "Me"}:
-            chosen = current or primary
-        else:
-            # Do not allow an unrenderable character to become a tofu box.
+        # Keep Devanagari letters and combining marks in one continuous run.
+        # Spaces/common punctuation remain with the surrounding Hindi run.
+        if (0x0900 <= cp <= 0x097F) or unicodedata.category(ch) in {"Mn", "Mc", "Me"}:
+            return primary if cp in primary_cov else (fallback if cp in fallback_cov else symbols if cp in symbol_cov else None)
+        if ch.isspace():
+            return current or primary
+        # ASCII letters/digits are deliberately routed to Noto Sans. This keeps
+        # A/B/C/D map labels and legal identifiers readable without disrupting
+        # the surrounding Devanagari shaping run.
+        if cp < 128 and ch.isalnum():
+            return fallback if cp in fallback_cov else primary if cp in primary_cov else symbols if cp in symbol_cov else None
+        # Keep ordinary punctuation with the current script whenever possible.
+        if unicodedata.category(ch).startswith("P"):
+            return current or (primary if cp in primary_cov else fallback if cp in fallback_cov else symbols if cp in symbol_cov else None)
+        if cp in primary_cov:
+            return primary
+        if cp in fallback_cov:
+            return fallback
+        if cp in symbol_cov:
+            return symbols
+        return None
+
+    for ch in str(text):
+        chosen = choose_font(ch)
+        if chosen is None:
             continue
         if chosen != current:
             flush()
