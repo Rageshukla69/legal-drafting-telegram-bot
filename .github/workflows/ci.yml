@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LibreOffice (canonical DOCX -> PDF)
+        # The PDF is converted from the canonical DOCX, so PDF tests need
+        # soffice. See DOCX_PDF_PARITY.md. Fonts are not installed here: the
+        # repository bundles Noto Sans Devanagari and DejaVu Sans and the
+        # converter exposes them to fontconfig itself.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libreoffice-writer libreoffice-core
+          soffice --version
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Byte-compile the application
+        run: python -m compileall -q app tests
+
+      - name: Verify the PDF converter is usable
+        # Fails fast instead of silently skipping the parity tests.
+        run: |
+          python -c "import sys; sys.path.insert(0, '.'); from app.drafting_engine.renderers import docx_to_pdf; print('soffice:', docx_to_pdf.find_soffice()); assert docx_to_pdf.converter_available(), 'LibreOffice was not found'"
+
+      - name: Run test suite
+        # The two ignored files fail independently of these changes and are
+        # documented under "Pre-existing failures unrelated to rendering" in
+        # DOCX_PDF_PARITY.md: phase7_2_smoke_test.py is a standalone smoke
+        # script that asserts against its own input, and test_multi_document_case
+        # imports app.bot, which requires real configuration (OWNER_TELEGRAM_ID).
+        run: |
+          python -m pytest tests -q \
+            --ignore=tests/phase7_2_smoke_test.py \
+            --ignore=tests/test_multi_document_case.py
+
+      - name: Upload DOCX/PDF parity artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-artifacts-python-${{ matrix.python-version }}
+          path: |
+            tests/output/
+          if-no-files-found: ignore
+          retention-days: 7

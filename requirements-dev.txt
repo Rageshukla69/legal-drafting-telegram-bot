@@ -1,0 +1,7 @@
+# Development / verification only — none of these are needed to run the bot.
+-r requirements.txt
+
+pytest>=8,<10
+# PDF rasterisation, text extraction and page metrics for the DOCX/PDF parity
+# checks (imported as `fitz`).
+pymupdf>=1.24,<2
