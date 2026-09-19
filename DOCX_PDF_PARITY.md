@@ -116,22 +116,24 @@ The committed `Aptfile` installs `libreoffice-writer` and `libreoffice-core`.
 Notes:
 
 * **Fonts need no packages.** `NotoSansDevanagari-Regular/Bold.ttf` and
-  `DejaVuSans.ttf` ship in `app/drafting_engine/assets/fonts/` and are copied by
-  the converter into a private `HOME` (`.fonts` and `.local/share/fonts`) so
-  `fontconfig` finds them even on a host with no fonts installed. This is why
-  the DOCX now names `Noto Sans Devanagari` / `DejaVu Sans` — the faces that are
+  `DejaVuSans.ttf` ship in `app/drafting_engine/assets/fonts/`. This is why the
+  DOCX names `Noto Sans Devanagari` / `DejaVu Sans` — the faces that are
   actually present.
-* **Font resolution is pinned, not inherited.** The converter also points
-  `FONTCONFIG_FILE` at a config that exposes *only* those bundled files. Font
-  choice changes glyph metrics (and therefore line breaking) and the PDF's
-  ToUnicode CMap, so resolving against whatever the host has installed made the
-  same draft render differently on two machines — a newer Noto Sans Devanagari
-  build extracted `श््रीमान` where the bundled build extracts `श्रीमान`. Every
-  family the DOCX names is a family this repository ships, so pinning is both
-  sufficient and deterministic.
-* The bundled font is byte-identical to the distribution build
-  (`v2.001`, sha256 `79a47036…`), so pinning changes nothing on a normal Linux
-  image; it only removes the dependency.
+* **Font resolution is pinned, not inherited.** Each conversion stages those
+  fonts into its private temporary directory and points `FONTCONFIG_FILE` at a
+  config exposing *only* them (`docx_to_pdf.prepare_fonts()`). Font choice
+  changes glyph metrics (and therefore line breaking) and the PDF's ToUnicode
+  CMap, so resolving against whatever the host had installed made the same draft
+  render differently on two machines — a newer Noto Sans Devanagari build
+  extracted `श््रीमान` where the bundled build extracts `श्रीमान`, and shifted
+  line breaks by 6–8 % of the page. Every family the DOCX names is a family this
+  repository ships, so pinning is both sufficient and deterministic. The fonts
+  are staged rather than referenced in place because fontconfig writes a
+  `.uuid` cache id into every directory it scans; the repository is never
+  written to.
+* The bundled font is byte-identical to the distribution build (`v2.001`,
+  sha256 `79a47036…`), so pinning changes nothing on a normal Linux image; it
+  only removes the dependency.
 * **No GUI, no shared state.** Every conversion gets its own temporary `HOME`,
   font directory and `-env:UserInstallation` profile, so concurrent users cannot
   collide on a LibreOffice profile lock, and nothing is left behind.

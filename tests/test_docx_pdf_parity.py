@@ -273,12 +273,24 @@ def test_converter_pins_the_bundled_fonts(tmp_path):
     different metrics and a different ToUnicode CMap, which changed both the
     layout and the extracted text before this was pinned.
     """
-    config = docx_to_pdf._write_fontconfig(tmp_path)
+    config = docx_to_pdf.prepare_fonts(tmp_path)
     assert config is not None, "bundled fonts must be present to pin"
     body = Path(config).read_text(encoding="utf-8")
-    assert str(docx_to_pdf._ASSETS_FONTS_DIR) in body
-    assert (docx_to_pdf._ASSETS_FONTS_DIR / "NotoSansDevanagari-Regular.ttf").exists()
-    assert (docx_to_pdf._ASSETS_FONTS_DIR / "DejaVuSans.ttf").exists()
+    font_dir = tmp_path / "fonts"
+    assert str(font_dir) in body
+    # Staged into the temporary work dir, never referenced in the repository.
+    assert str(docx_to_pdf._ASSETS_FONTS_DIR) not in body
+    assert (font_dir / "NotoSansDevanagari-Regular.ttf").exists()
+    assert (font_dir / "DejaVuSans.ttf").exists()
+
+
+def test_preparing_fonts_does_not_write_into_the_repository(tmp_path):
+    """fontconfig drops a `.uuid` cache id into any directory it scans."""
+    assets = docx_to_pdf._ASSETS_FONTS_DIR
+    before = {p.name for p in assets.iterdir()}
+    docx_to_pdf.prepare_fonts(tmp_path)
+    assert {p.name for p in assets.iterdir()} == before
+    assert not (assets / ".uuid").exists()
 
 
 @pytest.mark.skipif(shutil.which("fc-match") is None, reason="fontconfig CLI is not available")
@@ -291,7 +303,7 @@ def test_converter_pins_the_bundled_fonts(tmp_path):
 )
 def test_pinned_fontconfig_resolves_to_the_bundled_files(tmp_path, family, expected_file):
     """The pinned fontconfig must resolve the DOCX's families to shipped files."""
-    config = docx_to_pdf._write_fontconfig(tmp_path)
+    config = docx_to_pdf.prepare_fonts(tmp_path)
     env = dict(os.environ, FONTCONFIG_FILE=str(config), HOME=str(tmp_path))
     result = subprocess.run(
         ["fc-match", "-f", "%{file}", family], capture_output=True, text=True, env=env

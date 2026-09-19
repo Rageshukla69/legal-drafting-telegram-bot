@@ -17,9 +17,10 @@ Deployment notes
 * Runs without a GUI and without a writable home directory: every conversion
   gets a private temporary ``HOME``, font dir and LibreOffice user profile, so
   concurrent bot users cannot collide on a shared profile lock.
-* The bundled Unicode Devanagari fonts are copied into the private ``HOME`` and
-  pinned through ``FONTCONFIG_FILE``, so the conversion uses exactly the fonts
-  this repository ships instead of whatever the host happens to have installed.
+* The bundled Unicode Devanagari fonts are staged into the conversion's private
+  temporary directory and pinned through ``FONTCONFIG_FILE``, so the conversion
+  uses exactly the fonts this repository ships instead of whatever the host
+  happens to have installed. Nothing is ever written inside the repository.
   Font choice changes glyph metrics, line breaking and the PDF's ToUnicode
   mapping, so without this pinning the same draft would not lay out the same way
   on two different machines.
@@ -99,15 +100,18 @@ def bundled_font_files() -> list[Path]:
     return sorted(_ASSETS_FONTS_DIR.glob("*.ttf"))
 
 
-def _write_fontconfig(work_dir: Path) -> str | None:
-    """Write a fontconfig that exposes *only* the bundled fonts.
+def prepare_fonts(work_dir: Path) -> str | None:
+    """Stage the bundled fonts and return a pinned ``FONTCONFIG_FILE``.
 
-    Resolving fonts against the host would make the output non-deterministic:
-    a newer Noto Sans Devanagari build renders with slightly different metrics
-    and emits a different ToUnicode CMap, so the same draft would produce a
-    different PDF — and would no longer match the DOCX the advocate signs. The
-    DOCX only names families this repository ships, so restricting fontconfig to
-    them is sufficient as well as deterministic.
+    Resolving fonts against the host would make the output non-deterministic: a
+    newer Noto Sans Devanagari build renders with different metrics and emits a
+    different ToUnicode CMap, so the same draft produced a different PDF on a
+    different machine. The DOCX only names families this repository ships, so
+    exposing just those is both sufficient and deterministic.
+
+    The fonts are staged into ``work_dir`` rather than referenced in place
+    because fontconfig writes a per-directory cache id (``.uuid``) into every
+    directory it is pointed at, and the repository's assets must stay untouched.
 
     Returns the path for ``FONTCONFIG_FILE``, or None when no bundled fonts are
     available (the conversion then falls back to the host's fonts).
@@ -121,6 +125,15 @@ def _write_fontconfig(work_dir: Path) -> str | None:
         )
         return None
 
+    font_dir = work_dir / "fonts"
+    font_dir.mkdir(parents=True, exist_ok=True)
+    for source in fonts:
+        destination = font_dir / source.name
+        try:
+            os.link(source, destination)
+        except OSError:
+            shutil.copy2(source, destination)
+
     cache = work_dir / "fontcache"
     cache.mkdir(parents=True, exist_ok=True)
     config = work_dir / "fonts.conf"
@@ -128,40 +141,12 @@ def _write_fontconfig(work_dir: Path) -> str | None:
         '<?xml version="1.0"?>\n'
         '<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n'
         "<fontconfig>\n"
-        f"  <dir>{_ASSETS_FONTS_DIR}</dir>\n"
+        f"  <dir>{font_dir}</dir>\n"
         f"  <cachedir>{cache}</cachedir>\n"
         "</fontconfig>\n",
         encoding="utf-8",
     )
     return str(config)
-
-
-def _install_bundled_fonts(home: Path) -> list[Path]:
-    """Expose the repository's Unicode fonts to fontconfig inside ``home``.
-
-    Both of the conventional per-user font locations are populated, because
-    ``/etc/fonts/fonts.conf`` may or may not list ``~/.fonts`` depending on the
-    distribution. Hard links are used when possible so nothing is duplicated on
-    disk; a copy is used as the fallback across filesystems.
-    """
-    targets = (home / ".fonts", home / ".local" / "share" / "fonts")
-    for target in targets:
-        target.mkdir(parents=True, exist_ok=True)
-
-    installed: list[Path] = []
-    if not _ASSETS_FONTS_DIR.is_dir():
-        return installed
-    for source in sorted(_ASSETS_FONTS_DIR.glob("*.ttf")):
-        for target_dir in targets:
-            destination = target_dir / source.name
-            try:
-                if destination.exists():
-                    destination.unlink()
-                os.link(source, destination)
-            except OSError:
-                shutil.copy2(source, destination)
-            installed.append(destination)
-    return installed
 
 
 def convert(docx_path: str | Path, pdf_path: str | Path, timeout: int | None = None) -> Path:
@@ -189,8 +174,7 @@ def convert(docx_path: str | Path, pdf_path: str | Path, timeout: int | None = N
         tmp = Path(raw_tmp)
         home = tmp / "home"
         home.mkdir()
-        _install_bundled_fonts(home)
-        fontconfig = _write_fontconfig(tmp)
+        fontconfig = prepare_fonts(tmp)
 
         # Unicode/space-safe staging name: the advocate-facing filename may be
         # Devanagari, but the converter only ever sees ASCII paths.
@@ -210,7 +194,7 @@ def convert(docx_path: str | Path, pdf_path: str | Path, timeout: int | None = N
         env["XDG_CONFIG_HOME"] = str(home / ".config")
         env["XDG_CACHE_HOME"] = str(home / ".cache")
         if fontconfig:
-            # Pin the font set so rendering cannot depend on the host.
+            # Pin the font set so the layout cannot depend on the host.
             env["FONTCONFIG_FILE"] = fontconfig
         # Never let a stale developer profile or an X connection interfere.
         env.pop("SAL_USE_VCLPLUGIN", None)

@@ -57,13 +57,20 @@ def reference_docx_to_pdf(docx_path: Path, out_dir: Path) -> Path | None:
     env["XDG_CACHE_HOME"] = str(cache)
 
     bundled_fonts = ROOT / "app" / "drafting_engine" / "assets" / "fonts"
-    if list(bundled_fonts.glob("*.ttf")):
+    sources = sorted(bundled_fonts.glob("*.ttf"))
+    if sources:
+        # Staged, not referenced in place: fontconfig writes a `.uuid` cache id
+        # into every directory it is pointed at.
+        font_dir = out_dir / "_reference_fonts"
+        font_dir.mkdir(exist_ok=True)
+        for source in sources:
+            shutil.copy2(source, font_dir / source.name)
         config = out_dir / "_reference_fonts.conf"
         config.write_text(
             '<?xml version="1.0"?>\n'
             '<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n'
             "<fontconfig>\n"
-            f"  <dir>{bundled_fonts}</dir>\n"
+            f"  <dir>{font_dir}</dir>\n"
             f"  <cachedir>{cache}</cachedir>\n"
             "</fontconfig>\n",
             encoding="utf-8",
