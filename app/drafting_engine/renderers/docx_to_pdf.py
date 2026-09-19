@@ -17,8 +17,12 @@ Deployment notes
 * Runs without a GUI and without a writable home directory: every conversion
   gets a private temporary ``HOME``, font dir and LibreOffice user profile, so
   concurrent bot users cannot collide on a shared profile lock.
-* The bundled Unicode Devanagari fonts are copied into the private ``HOME`` so
-  ``fontconfig`` finds them even on a host with no system fonts installed.
+* The bundled Unicode Devanagari fonts are copied into the private ``HOME`` and
+  pinned through ``FONTCONFIG_FILE``, so the conversion uses exactly the fonts
+  this repository ships instead of whatever the host happens to have installed.
+  Font choice changes glyph metrics, line breaking and the PDF's ToUnicode
+  mapping, so without this pinning the same draft would not lay out the same way
+  on two different machines.
 * No transliteration, no rasterisation and no image-only pages: the produced
   PDF keeps real selectable/searchable Unicode text.
 """
@@ -88,6 +92,50 @@ def converter_available() -> bool:
     return find_soffice() is not None
 
 
+def bundled_font_files() -> list[Path]:
+    """Return the TrueType fonts shipped with this repository."""
+    if not _ASSETS_FONTS_DIR.is_dir():
+        return []
+    return sorted(_ASSETS_FONTS_DIR.glob("*.ttf"))
+
+
+def _write_fontconfig(work_dir: Path) -> str | None:
+    """Write a fontconfig that exposes *only* the bundled fonts.
+
+    Resolving fonts against the host would make the output non-deterministic:
+    a newer Noto Sans Devanagari build renders with slightly different metrics
+    and emits a different ToUnicode CMap, so the same draft would produce a
+    different PDF — and would no longer match the DOCX the advocate signs. The
+    DOCX only names families this repository ships, so restricting fontconfig to
+    them is sufficient as well as deterministic.
+
+    Returns the path for ``FONTCONFIG_FILE``, or None when no bundled fonts are
+    available (the conversion then falls back to the host's fonts).
+    """
+    fonts = bundled_font_files()
+    if not fonts:
+        log.warning(
+            "No bundled fonts found in %s; LibreOffice will resolve fonts against "
+            "the host, so the PDF may differ from the DOCX on another machine.",
+            _ASSETS_FONTS_DIR,
+        )
+        return None
+
+    cache = work_dir / "fontcache"
+    cache.mkdir(parents=True, exist_ok=True)
+    config = work_dir / "fonts.conf"
+    config.write_text(
+        '<?xml version="1.0"?>\n'
+        '<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n'
+        "<fontconfig>\n"
+        f"  <dir>{_ASSETS_FONTS_DIR}</dir>\n"
+        f"  <cachedir>{cache}</cachedir>\n"
+        "</fontconfig>\n",
+        encoding="utf-8",
+    )
+    return str(config)
+
+
 def _install_bundled_fonts(home: Path) -> list[Path]:
     """Expose the repository's Unicode fonts to fontconfig inside ``home``.
 
@@ -142,6 +190,7 @@ def convert(docx_path: str | Path, pdf_path: str | Path, timeout: int | None = N
         home = tmp / "home"
         home.mkdir()
         _install_bundled_fonts(home)
+        fontconfig = _write_fontconfig(tmp)
 
         # Unicode/space-safe staging name: the advocate-facing filename may be
         # Devanagari, but the converter only ever sees ASCII paths.
@@ -160,6 +209,9 @@ def convert(docx_path: str | Path, pdf_path: str | Path, timeout: int | None = N
         env["XDG_DATA_HOME"] = str(home / ".local" / "share")
         env["XDG_CONFIG_HOME"] = str(home / ".config")
         env["XDG_CACHE_HOME"] = str(home / ".cache")
+        if fontconfig:
+            # Pin the font set so rendering cannot depend on the host.
+            env["FONTCONFIG_FILE"] = fontconfig
         # Never let a stale developer profile or an X connection interfere.
         env.pop("SAL_USE_VCLPLUGIN", None)
         env.pop("DISPLAY", None)

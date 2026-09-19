@@ -121,6 +121,17 @@ Notes:
   `fontconfig` finds them even on a host with no fonts installed. This is why
   the DOCX now names `Noto Sans Devanagari` / `DejaVu Sans` — the faces that are
   actually present.
+* **Font resolution is pinned, not inherited.** The converter also points
+  `FONTCONFIG_FILE` at a config that exposes *only* those bundled files. Font
+  choice changes glyph metrics (and therefore line breaking) and the PDF's
+  ToUnicode CMap, so resolving against whatever the host has installed made the
+  same draft render differently on two machines — a newer Noto Sans Devanagari
+  build extracted `श््रीमान` where the bundled build extracts `श्रीमान`. Every
+  family the DOCX names is a family this repository ships, so pinning is both
+  sufficient and deterministic.
+* The bundled font is byte-identical to the distribution build
+  (`v2.001`, sha256 `79a47036…`), so pinning changes nothing on a normal Linux
+  image; it only removes the dependency.
 * **No GUI, no shared state.** Every conversion gets its own temporary `HOME`,
   font directory and `-env:UserInstallation` profile, so concurrent users cannot
   collide on a LibreOffice profile lock, and nothing is left behind.
@@ -162,9 +173,11 @@ python tests/render_parity_report.py --legacy       # human-readable report
 ```
 
 `tests/render_parity_report.py` renders every fixture, independently converts
-the DOCX with a bare `soffice` call (so an application bug cannot make the check
-pass), and reports page counts, page sizes, per-page first lines, extracted
-text, Unicode integrity and a rasterised ink difference. `--legacy` also renders
+the DOCX with a bare `soffice` call (so a converter bug — wrong paper size, a
+stale staged file — cannot make the check pass), and reports page counts, page
+sizes, per-page first lines, extracted text, Unicode integrity and a rasterised
+ink difference. Both sides pin the same bundled fonts, so the comparison
+measures layout parity rather than font availability. `--legacy` also renders
 the old ReportLab PDF for comparison. Artifacts go to `tests/output/parity/`.
 
 ## Pre-existing failures unrelated to rendering

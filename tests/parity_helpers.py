@@ -35,14 +35,41 @@ def find_soffice() -> str | None:
 
 
 def reference_docx_to_pdf(docx_path: Path, out_dir: Path) -> Path | None:
-    """Convert a DOCX to PDF with a bare-minimum, self-contained soffice call."""
+    """Convert a DOCX to PDF with a bare-minimum, self-contained soffice call.
+
+    Fonts are pinned to the repository's bundled faces for the same reason the
+    application converter pins them: a conversion that resolves fonts against
+    the host would use a different Devanagari build and produce a different
+    layout, so the comparison against the application PDF would be measuring
+    font availability instead of layout parity.
+    """
     soffice = find_soffice()
     if not soffice:
         return None
     out_dir.mkdir(parents=True, exist_ok=True)
     profile = out_dir / "_reference_profile"
+    home = out_dir / "_reference_home"
+    home.mkdir(exist_ok=True)
+    cache = out_dir / "_reference_fontcache"
+    cache.mkdir(exist_ok=True)
     env = dict(os.environ)
-    env["HOME"] = str(out_dir)
+    env["HOME"] = str(home)
+    env["XDG_CACHE_HOME"] = str(cache)
+
+    bundled_fonts = ROOT / "app" / "drafting_engine" / "assets" / "fonts"
+    if list(bundled_fonts.glob("*.ttf")):
+        config = out_dir / "_reference_fonts.conf"
+        config.write_text(
+            '<?xml version="1.0"?>\n'
+            '<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n'
+            "<fontconfig>\n"
+            f"  <dir>{bundled_fonts}</dir>\n"
+            f"  <cachedir>{cache}</cachedir>\n"
+            "</fontconfig>\n",
+            encoding="utf-8",
+        )
+        env["FONTCONFIG_FILE"] = str(config)
+
     cmd = [
         soffice,
         "--headless",

@@ -11,6 +11,8 @@ converter are skipped when it is not installed.
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -262,6 +264,39 @@ def test_docx_fonts_are_shipped_font_families(tmp_path):
                 families.add(run.font.name)
     assert "Noto Sans Devanagari" in families
     assert families <= {"Noto Sans Devanagari", "DejaVu Sans"}, families
+
+
+def test_converter_pins_the_bundled_fonts(tmp_path):
+    """Rendering must not depend on the fonts installed on the host.
+
+    A newer Noto Sans Devanagari build on another machine renders with
+    different metrics and a different ToUnicode CMap, which changed both the
+    layout and the extracted text before this was pinned.
+    """
+    config = docx_to_pdf._write_fontconfig(tmp_path)
+    assert config is not None, "bundled fonts must be present to pin"
+    body = Path(config).read_text(encoding="utf-8")
+    assert str(docx_to_pdf._ASSETS_FONTS_DIR) in body
+    assert (docx_to_pdf._ASSETS_FONTS_DIR / "NotoSansDevanagari-Regular.ttf").exists()
+    assert (docx_to_pdf._ASSETS_FONTS_DIR / "DejaVuSans.ttf").exists()
+
+
+@pytest.mark.skipif(shutil.which("fc-match") is None, reason="fontconfig CLI is not available")
+@pytest.mark.parametrize(
+    ("family", "expected_file"),
+    (
+        ("Noto Sans Devanagari", "NotoSansDevanagari-Regular.ttf"),
+        ("DejaVu Sans", "DejaVuSans.ttf"),
+    ),
+)
+def test_pinned_fontconfig_resolves_to_the_bundled_files(tmp_path, family, expected_file):
+    """The pinned fontconfig must resolve the DOCX's families to shipped files."""
+    config = docx_to_pdf._write_fontconfig(tmp_path)
+    env = dict(os.environ, FONTCONFIG_FILE=str(config), HOME=str(tmp_path))
+    result = subprocess.run(
+        ["fc-match", "-f", "%{file}", family], capture_output=True, text=True, env=env
+    )
+    assert Path(result.stdout.strip()).name == expected_file
 
 
 def test_bundled_fonts_cover_latin_and_devanagari():
