@@ -3,11 +3,32 @@
 The renderer is deliberately separate from the LLM: the model supplies only
 structured content, while this module controls paper size, margins, fonts,
 alignment, numbering, spacing, and output files.
+
+Canonical pipeline
+------------------
+The DOCX is the single layout source::
+
+    Dava JSON -> python-docx (canonical DOCX) -> LibreOffice -> PDF
+
+so the PDF is a faithful conversion of the document the advocate can edit and
+sign. Only one layout engine decides line wrapping, paragraph heights, page
+breaks, and Devanagari glyph runs, which is what keeps the two files in step.
+
+The former independent ReportLab PDF layout is retained as
+:func:`render_pdf_reportlab`. It is used only when LibreOffice is not available
+on the host (or when ``LEGAL_PDF_ENGINE=reportlab`` is set explicitly), because
+it can paginate differently from the DOCX and its text layer loses Devanagari
+conjuncts to private-use codepoints. Set ``LEGAL_PDF_REQUIRE_CANONICAL=1`` to
+fail loudly instead of falling back.
 """
 
 from __future__ import annotations
 
+import functools
+import logging
+import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 import unicodedata
@@ -34,6 +55,10 @@ from reportlab.platypus import (
 )
 from reportlab.pdfgen.canvas import Canvas
 
+from . import docx_to_pdf
+
+
+log = logging.getLogger(__name__)
 
 HINDI_WORDS = {
     1: "एक", 2: "दो", 3: "तीन", 4: "चार", 5: "पाँच",
@@ -78,6 +103,10 @@ def split_party_blocks(parties: list[str]) -> tuple[list[str], list[str], list[s
 
     We never use the model's ``between_label`` for the actual separator; the
     renderer always writes the legal convention "बनाम".
+
+    The defendant labels are tested first on purpose: "प्रतिवादी" contains the
+    substring "वादी", so testing the plaintiff labels first classified labelled
+    defendants as plaintiffs and dropped the "बनाम" separator entirely.
     """
     plaintiff, defendant, other = [], [], []
 
@@ -90,12 +119,15 @@ def split_party_blocks(parties: list[str]) -> tuple[list[str], list[str], list[s
         lines = [line.strip() for line in re.split(r"\\r?\\n", value) if line.strip()]
         expanded.extend(lines or [value])
 
+    defendant_labels = ("प्रतिवादीगण", "प्रतिवादी", "defendant", "defendants")
+    plaintiff_labels = ("वादीगण", "वादी", "plaintiff", "plaintiffs")
+
     for party in expanded:
         low = party.casefold()
-        if any(label in low for label in ("वादीगण", "वादी", "plaintiff", "plaintiffs")):
-            plaintiff.append(party)
-        elif any(label in low for label in ("प्रतिवादीगण", "प्रतिवादी", "defendant", "defendants")):
+        if any(label in low for label in defendant_labels):
             defendant.append(party)
+        elif any(label in low for label in plaintiff_labels):
+            plaintiff.append(party)
         else:
             other.append(party)
 
@@ -110,9 +142,14 @@ def split_party_blocks(parties: list[str]) -> tuple[list[str], list[str], list[s
     return plaintiff, defendant, other
 
 
+def _bundled_font(name: str) -> Path | None:
+    candidate = Path(__file__).resolve().parents[1] / "assets" / "fonts" / name
+    return candidate if candidate.exists() else None
+
+
 def _font_path() -> str:
-    bundled = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "NotoSansDevanagari-Regular.ttf"
-    if bundled.exists():
+    bundled = _bundled_font("NotoSansDevanagari-Regular.ttf")
+    if bundled:
         return str(bundled)
     for p in (
         "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
@@ -124,8 +161,8 @@ def _font_path() -> str:
 
 
 def _font_bold_path() -> str:
-    bundled = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "NotoSansDevanagari-Bold.ttf"
-    if bundled.exists():
+    bundled = _bundled_font("NotoSansDevanagari-Bold.ttf")
+    if bundled:
         return str(bundled)
     for p in (
         "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf",
@@ -136,25 +173,75 @@ def _font_bold_path() -> str:
     return _font_path()
 
 def _latin_font_path() -> str:
-    bundled = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "NotoSans-Regular.ttf"
-    if bundled.exists():
+    bundled = _bundled_font("NotoSans-Regular.ttf")
+    if bundled:
         return str(bundled)
+    # ``assets/fonts/DejaVuSans.ttf`` is the Latin/symbol face the repository
+    # already expected to ship; prefer the bundled copy so the renderer never
+    # depends on the font packages of the host.
+    bundled_dejavu = _bundled_font("DejaVuSans.ttf")
+    if bundled_dejavu:
+        return str(bundled_dejavu)
     for p in (
         "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
     ):
         if Path(p).exists():
             return p
     raise RuntimeError("Unicode Latin fallback font not found.")
 
 def _symbol_font_path() -> str:
-    bundled = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "DejaVuSans.ttf"
-    if bundled.exists():
+    bundled = _bundled_font("DejaVuSans.ttf")
+    if bundled:
         return str(bundled)
     p = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     if Path(p).exists():
         return p
     return _latin_font_path()
+
+
+@functools.lru_cache(maxsize=None)
+def _font_coverage(path: str) -> frozenset[int]:
+    """Return the set of Unicode codepoints a font file can actually render.
+
+    Parsing a font is comparatively expensive, and this used to happen three
+    times per paragraph. The result is immutable and cached for the life of the
+    process.
+    """
+    from fontTools.ttLib import TTFont as _FTFont
+
+    font = _FTFont(path, lazy=True)
+    try:
+        coverage: set[int] = set()
+        for table in font["cmap"].tables:
+            coverage.update(table.cmap.keys())
+    finally:
+        font.close()
+    return frozenset(coverage)
+
+
+@functools.lru_cache(maxsize=None)
+def _font_family_name(path: str) -> str:
+    """Return the real family name declared inside a font file.
+
+    The DOCX must name the font that is actually going to be on the machine
+    performing layout; naming a family we do not ship makes Word/LibreOffice
+    silently substitute and then the DOCX and PDF drift apart again.
+    """
+    from fontTools.ttLib import TTFont as _FTFont
+
+    font = _FTFont(path, lazy=True)
+    try:
+        for record in font["name"].names:
+            if record.nameID == 1 and record.platformID == 3:
+                return str(record.toUnicode())
+        for record in font["name"].names:
+            if record.nameID == 1:
+                return str(record.toUnicode())
+    finally:
+        font.close()
+    return Path(path).stem
 
 def _register_pdf_fonts() -> tuple[str, str, str, str]:
     regular = "VakilDeva"
@@ -278,6 +365,59 @@ def _set_run_font(run, name: str, size: float, bold: bool = False):
         rfonts.set(qn(f"w:{attr}"), name)
 
 
+def _docx_font_plan() -> tuple[str, str, str, dict[str, frozenset[int]]]:
+    """Resolve the Devanagari / Latin / symbol fonts and their real names."""
+    primary_path = _font_path()
+    latin_path = _latin_font_path()
+    symbol_path = _symbol_font_path()
+    coverages = {
+        "primary": _font_coverage(primary_path),
+        "latin": _font_coverage(latin_path),
+        "symbol": _font_coverage(symbol_path),
+    }
+    return (
+        _font_family_name(primary_path),
+        _font_family_name(latin_path),
+        _font_family_name(symbol_path),
+        coverages,
+    )
+
+
+def _add_docx_page_number_footer(document: Document):
+    """Put the page number in the DOCX footer as a real ``PAGE`` field.
+
+    The legacy ReportLab PDF drew its own page number. Now that the PDF is a
+    conversion of the canonical DOCX, the page number must live in the DOCX too,
+    otherwise the two files would still differ on every page.
+    """
+    from docx.oxml import OxmlElement
+
+    section = document.sections[0]
+    footer = section.footer
+    footer.is_linked_to_previous = False
+    paragraph = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
+    for existing in list(paragraph.runs):
+        existing._element.getparent().remove(existing._element)
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    run = paragraph.add_run()
+    _set_run_font(run, _font_family_name(_font_path()), 9)
+    begin = OxmlElement("w:fldChar")
+    begin.set(qn("w:fldCharType"), "begin")
+    instruction = OxmlElement("w:instrText")
+    instruction.set(qn("xml:space"), "preserve")
+    instruction.text = " PAGE "
+    separate = OxmlElement("w:fldChar")
+    separate.set(qn("w:fldCharType"), "separate")
+    result = OxmlElement("w:t")
+    result.text = "1"
+    end = OxmlElement("w:fldChar")
+    end.set(qn("w:fldCharType"), "end")
+    for element in (begin, instruction, separate, result, end):
+        run._element.append(element)
+    return paragraph
+
+
 def _setup_docx(document: Document, paper: str):
     # Legal is the default pleading format. Letter remains available by
     # explicitly passing paper="letter".
@@ -299,6 +439,8 @@ def _setup_docx(document: Document, paper: str):
     section.bottom_margin = Inches(1)
     section.header_distance = Inches(0.5)
     section.footer_distance = Inches(0.5)
+
+    _add_docx_page_number_footer(document)
 
 
 def _add_docx_para(
@@ -325,19 +467,9 @@ def _add_docx_para(
 
     text = str(text)
     # Word can perform font fallback, but explicit run-level fallback is more
-    # reliable across Android viewers, LibreOffice and Microsoft Word.
-    primary = _font_path()
-    latin = _latin_font_path()
-    symbol = _symbol_font_path()
-    from fontTools.ttLib import TTFont as _FTFont
-    coverages = {}
-    for key, path in (("primary", primary), ("latin", latin), ("symbol", symbol)):
-        ft = _FTFont(path, lazy=True)
-        cmap = set()
-        for table in ft["cmap"].tables:
-            cmap.update(table.cmap.keys())
-        coverages[key] = cmap
-        ft.close()
+    # reliable across Android viewers, LibreOffice and Microsoft Word. Font
+    # metrics are cached across calls (a legal draft has many paragraphs).
+    primary, latin, symbol, coverages = _docx_font_plan()
 
     runs = []
     current_font = None
@@ -345,13 +477,13 @@ def _add_docx_para(
     for ch in text:
         cp = ord(ch)
         if cp in coverages["primary"]:
-            font_name = "Noto Sans Devanagari"
+            font_name = primary
         elif cp in coverages["latin"]:
-            font_name = "Noto Sans"
+            font_name = latin
         elif cp in coverages["symbol"]:
-            font_name = "DejaVu Sans"
+            font_name = symbol
         elif unicodedata.category(ch) in {"Cf", "Mn", "Me"}:
-            font_name = current_font or "Noto Sans Devanagari"
+            font_name = current_font or primary
         else:
             continue
         if font_name != current_font and buf:
@@ -602,7 +734,13 @@ class NumberedCanvas(Canvas):
         self.drawCentredString(4.25 * inch, 0.45 * inch, f"{self._pageNumber}")
 
 
-def render_pdf(draft: dict[str, Any], output_path: str | Path, paper: str = "legal"):
+def render_pdf_reportlab(draft: dict[str, Any], output_path: str | Path, paper: str = "legal"):
+    """Legacy PDF layout, produced independently of the DOCX by ReportLab.
+
+    Retained only as a fallback for hosts without LibreOffice and for the
+    historical regression tests. Prefer :func:`render_pdf`, which converts the
+    canonical DOCX instead.
+    """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     font, bold_font, latin_font, symbol_font = _register_pdf_fonts()
@@ -637,17 +775,93 @@ def render_pdf(draft: dict[str, Any], output_path: str | Path, paper: str = "leg
     return output_path
 
 
+def pdf_engine() -> str:
+    """Return the configured PDF engine: ``canonical`` (default) or ``reportlab``."""
+    engine = (os.getenv("LEGAL_PDF_ENGINE", "canonical") or "canonical").strip().lower()
+    return engine if engine in {"canonical", "reportlab"} else "canonical"
+
+
+def _canonical_pdf_required() -> bool:
+    return (os.getenv("LEGAL_PDF_REQUIRE_CANONICAL", "") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def canonical_pdf_available() -> bool:
+    """True when the PDF can be produced from the canonical DOCX."""
+    return pdf_engine() == "canonical" and docx_to_pdf.converter_available()
+
+
+def _write_pdf(
+    draft: dict[str, Any],
+    pdf_path: str | Path,
+    paper: str,
+    docx_path: str | Path | None = None,
+) -> Path:
+    """Write the PDF, preferring a conversion of the canonical DOCX."""
+    pdf_path = Path(pdf_path)
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if pdf_engine() == "reportlab":
+        log.info("LEGAL_PDF_ENGINE=reportlab: using the legacy independent PDF layout.")
+        return render_pdf_reportlab(draft, pdf_path, paper=paper)
+
+    if not docx_to_pdf.converter_available():
+        message = (
+            "LibreOffice (soffice) is not installed, so the PDF cannot be converted from "
+            "the canonical DOCX."
+        )
+        if _canonical_pdf_required():
+            raise docx_to_pdf.PdfConverterUnavailable(message)
+        log.warning(
+            "%s Falling back to the legacy ReportLab layout. That layout is produced "
+            "independently of the DOCX, so pagination may differ and Devanagari text "
+            "extraction is not reliable. Install LibreOffice, or set SOFFICE_BIN to a "
+            "LibreOffice binary, to restore DOCX/PDF parity.",
+            message,
+        )
+        return render_pdf_reportlab(draft, pdf_path, paper=paper)
+
+    try:
+        if docx_path is not None and Path(docx_path).is_file():
+            return docx_to_pdf.convert(docx_path, pdf_path)
+        # No canonical DOCX was supplied, so build one solely for conversion.
+        with tempfile.TemporaryDirectory(prefix="legal-canonical-") as tmp:
+            staged = Path(tmp) / "canonical.docx"
+            render_docx(draft, staged, paper=paper)
+            return docx_to_pdf.convert(staged, pdf_path)
+    except docx_to_pdf.PdfConversionError:
+        log.exception("Canonical DOCX->PDF conversion failed")
+        if _canonical_pdf_required():
+            raise
+        log.warning("Falling back to the legacy ReportLab PDF layout for this document.")
+        return render_pdf_reportlab(draft, pdf_path, paper=paper)
+
+
+def render_pdf(draft: dict[str, Any], output_path: str | Path, paper: str = "legal"):
+    """Render the PDF for ``draft``.
+
+    The PDF is produced from the canonical DOCX, so the interface is unchanged
+    while the layout source is now shared with :func:`render_docx`.
+    """
+    return _write_pdf(draft, output_path, paper)
+
+
 def render_both(
     draft: dict[str, Any],
     output_dir: str | Path,
     base_name: str = "Dava_Draft",
     paper: str = "legal",
 ) -> tuple[Path, Path]:
+    """Render the DOCX and the PDF, with the PDF converted from that DOCX."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     safe = re.sub(r"[^A-Za-z0-9_-]+", "_", base_name).strip("_") or "Dava_Draft"
     docx_path = output_dir / f"{safe}.docx"
     pdf_path = output_dir / f"{safe}.pdf"
     render_docx(draft, docx_path, paper=paper)
-    render_pdf(draft, pdf_path, paper=paper)
+    _write_pdf(draft, pdf_path, paper=paper, docx_path=docx_path)
     return docx_path, pdf_path

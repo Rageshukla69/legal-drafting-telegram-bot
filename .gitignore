@@ -5,3 +5,6 @@ __pycache__/
 data/*.sqlite3
 *.log
 .DS_Store
+
+# Generated render/parity artifacts (see tests/render_parity_report.py)
+tests/output/

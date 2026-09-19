@@ -1,0 +1,15 @@
+# System packages installed at build time by the `heroku-community/apt`
+# buildpack (classic buildpack, Cedar generation). See DOCX_PDF_PARITY.md.
+#
+# LibreOffice is what converts the canonical DOCX into the PDF, so both files
+# are produced by the same layout engine.
+
+# Writer plus the shared core; the PDF export filter lives in writer.
+libreoffice-writer
+libreoffice-core
+
+# The repository bundles Noto Sans Devanagari and DejaVu Sans and exposes them
+# to fontconfig through a private HOME, so no font package is strictly
+# required. fonts-dejavu-core is a small safety net for Latin text.
+
+fonts-dejavu-core

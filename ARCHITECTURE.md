@@ -18,9 +18,14 @@ Next:
   ↓
   validation
   ↓
-  deterministic DOCX renderer
+  canonical DOCX renderer (python-docx)
+  ↓
+  LibreOffice headless  →  PDF (converted from that DOCX)
   ↓
   Telegram document reply
+
+See DOCX_PDF_PARITY.md for why the PDF is a conversion of the DOCX rather than
+a second, independent layout.
 
 Later:
   voice → speech-to-text

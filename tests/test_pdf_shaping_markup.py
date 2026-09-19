@@ -13,5 +13,10 @@ def test_latin_identifiers_use_latin_font_without_breaking_hindi():
     font, _bold, latin, symbols = _register_pdf_fonts()
     text = "गाटा सं. 1092 A/B/C/D"
     markup = _pdf_inline_font_markup(text, font, latin, symbols)
-    assert '<font name="VakilLatin">1092' in markup
-    assert 'A/B/C/D</font>' in markup
+    # The Latin identifier is routed to the Latin font. ASCII punctuation is
+    # deliberately kept in the Latin run too (see _pdf_inline_font_markup), so
+    # the run may start at the "." of "सं." rather than at the digit.
+    assert '<font name="VakilLatin">' in markup
+    assert "1092 A/B/C/D</font>" in markup
+    # The Devanagari run itself must stay un-split.
+    assert markup.startswith("गाटा सं")
