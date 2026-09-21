@@ -25,6 +25,26 @@ Verify with `heroku config`. Heroku Config Vars are exposed to the dyno as envir
 
 ## Deploy
 
+PDF files are converted from the canonical DOCX with headless LibreOffice.
+Add the apt buildpack **before** the Python buildpack so `soffice` is on the dyno:
+
+```bash
+heroku buildpacks:add --index 1 heroku-community/apt
+```
+
+The committed `Aptfile` installs `libreoffice-writer` and `libreoffice-core`.
+Bundled Devanagari fonts in `app/drafting_engine/assets/fonts/` are staged into
+a private fontconfig dir for each conversion. If `soffice` is not on `PATH`
+after deploy:
+
+```bash
+heroku config:set SOFFICE_BIN=/app/.apt/usr/bin/soffice
+heroku config:set LEGAL_PDF_REQUIRE_CANONICAL=1
+```
+
+`LEGAL_PDF_REQUIRE_CANONICAL=1` fails instead of falling back to ReportLab
+(which paginates independently of the DOCX).
+
 ```bash
 git add .
 git commit -m "upgrade legal drafting bot to seven document workflows"
