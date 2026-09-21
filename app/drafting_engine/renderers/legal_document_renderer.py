@@ -633,10 +633,17 @@ def _escape_xml(text: str) -> str:
 
 def _pdf_story(draft: dict[str, Any], font: str, bold_font: str, latin_font: str, symbol_font: str):
     styles = getSampleStyleSheet()
-    body = ParagraphStyle("VakilBody", parent=styles["BodyText"], fontName=font, fontSize=14, leading=21, alignment=TA_JUSTIFY, shaping=1, firstLineIndent=0.5 * inch, spaceAfter=12)
-    center16 = ParagraphStyle("VakilCenter16", parent=body, fontName=bold_font, fontSize=16, leading=22, alignment=TA_CENTER, shaping=1, firstLineIndent=0, spaceAfter=8)
+    # ReportLab's HarfBuzz shaping (shaping=1) remaps Devanagari conjuncts and
+    # half-forms onto Private Use Area codepoints and then subsets the TTF by
+    # those PUA slots. The ligature glyphs are not in the cmap, so the subset
+    # emits .notdef — visual empty boxes for words such as एक, जूनियर, श्रीमान.
+    # The canonical PDF is LibreOffice conversion of the DOCX (real shaping).
+    # This fallback must stay on Unicode cmap glyphs (shaping=0) so Hindi is
+    # visible even when soffice is missing.
+    body = ParagraphStyle("VakilBody", parent=styles["BodyText"], fontName=font, fontSize=14, leading=21, alignment=TA_JUSTIFY, shaping=0, firstLineIndent=0.5 * inch, spaceAfter=12)
+    center16 = ParagraphStyle("VakilCenter16", parent=body, fontName=bold_font, fontSize=16, leading=22, alignment=TA_CENTER, shaping=0, firstLineIndent=0, spaceAfter=8)
     left = ParagraphStyle("VakilLeft", parent=body, alignment=TA_LEFT, firstLineIndent=0, spaceAfter=3)
-    center = ParagraphStyle("VakilCenter", parent=body, fontName=bold_font, alignment=TA_CENTER, firstLineIndent=0, spaceAfter=3, shaping=1)
+    center = ParagraphStyle("VakilCenter", parent=body, fontName=bold_font, alignment=TA_CENTER, firstLineIndent=0, spaceAfter=3, shaping=0)
     right = ParagraphStyle("VakilRight", parent=body, alignment=TA_RIGHT, firstLineIndent=0, spaceAfter=4)
     noindent = ParagraphStyle("VakilNoIndent", parent=body, firstLineIndent=0, spaceAfter=10)
     story = []
