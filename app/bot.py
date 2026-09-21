@@ -8,7 +8,7 @@ from app.case_store import CaseStore
 from app.access_control import AccessController
 from app.drafting_engine.conversation_state import CaseState, DISPLAY_NAMES, missing_fields, next_questions
 from app.drafting_engine.multi_draft_orchestrator import MultiDraftOrchestrator
-from app.drafting_engine.renderers.legal_document_renderer import render_both
+from app.drafting_engine.renderers.legal_document_renderer import render_both, pdf_pipeline_status
 from app.drafting_engine.azure_speech import transcribe_voice
 from app.drafting_engine.gemini_client import GeminiError
 from app.drafting_engine.draft_editor import DraftEditor
@@ -23,6 +23,22 @@ TYPE_ICONS={"dava_plaint":"📜","written_statement":"📝","application":"📄"
 
 def case_id_for(user_id:int)->str: return f"tg-{user_id}-current"
 def get_state(uid:int): return store.get(case_id_for(uid))
+
+PDF_FALLBACK_NOTE=("\n⚠️ यह PDF fallback engine से बनी है (server पर LibreOffice उपलब्ध नहीं), "
+                   "इसलिए page layout DOCX से थोड़ा अलग हो सकता है। DOCX ही canonical दस्तावेज़ है।")
+def pdf_caption(base:str,report:dict|None)->str:
+    """PDF caption; flags a PDF that is not the LibreOffice conversion of the DOCX."""
+    if report and report.get("engine") and not report.get("canonical"):
+        log.warning("PDF delivered from fallback engine: %s",report.get("warning"))
+        return base+PDF_FALLBACK_NOTE
+    return base
+
+def log_pdf_pipeline_status():
+    """One startup line so the dyno log shows how PDFs will be produced."""
+    try: status=pdf_pipeline_status()
+    except Exception: log.exception("PDF pipeline status check failed"); return
+    if status["canonical"]: log.info("PDF pipeline: canonical DOCX -> LibreOffice (%s)",status["soffice"])
+    else: log.warning("PDF pipeline: ReportLab fallback will be used — %s",status["reason"])
 
 def dashboard():
     rows=[]
@@ -404,9 +420,10 @@ async def generate_for(update,uid,state,edit=False):
         state.set_draft(draft)
         with tempfile.TemporaryDirectory() as tmp:
             label=DISPLAY_NAMES[state.document_type].split(" /")[0].replace(" ","_")
-            docx,pdf=render_both(draft,tmp,base_name=f"{label}_{uid}",paper=os.getenv("LEGAL_PAPER","legal"))
+            pdf_report={}
+            docx,pdf=render_both(draft,tmp,base_name=f"{label}_{uid}",paper=os.getenv("LEGAL_PAPER","legal"),report=pdf_report)
             with open(docx,"rb") as f: await target.reply_document(f,filename=docx.name,caption=f"📄 Editable DOCX — {DISPLAY_NAMES[state.document_type]}")
-            with open(pdf,"rb") as f: await target.reply_document(f,filename=pdf.name,caption=f"📑 PDF — {DISPLAY_NAMES[state.document_type]}")
+            with open(pdf,"rb") as f: await target.reply_document(f,filename=pdf.name,caption=pdf_caption(f"📑 PDF — {DISPLAY_NAMES[state.document_type]}",pdf_report))
         store.save(uid,state); await target.reply_text("✅ Draft तैयार है। आप ✏️ Edit Draft दबाकर text/voice instruction से targeted बदलाव कर सकते हैं। बाकी सामग्री जस की तस रहेगी।",reply_markup=case_actions(state))
     except Exception as exc:
         log.exception("generation failed")
@@ -494,9 +511,10 @@ async def apply_edit(update, context):
     try:
         with tempfile.TemporaryDirectory() as tmp:
             label=DISPLAY_NAMES[state.document_type].split(" /")[0].replace(" ","_")
-            docx,pdf=render_both(candidate,tmp,base_name=f"{label}_{uid}_v{state.draft_version}",paper=os.getenv("LEGAL_PAPER","legal"))
+            pdf_report={}
+            docx,pdf=render_both(candidate,tmp,base_name=f"{label}_{uid}_v{state.draft_version}",paper=os.getenv("LEGAL_PAPER","legal"),report=pdf_report)
             with open(docx,"rb") as f: await q.message.reply_document(f,filename=docx.name,caption=f"📄 Updated editable DOCX — v{state.draft_version}")
-            with open(pdf,"rb") as f: await q.message.reply_document(f,filename=pdf.name,caption=f"📑 Updated PDF — v{state.draft_version}")
+            with open(pdf,"rb") as f: await q.message.reply_document(f,filename=pdf.name,caption=pdf_caption(f"📑 Updated PDF — v{state.draft_version}",pdf_report))
         await q.message.reply_text("✅ Edit applied. बाकी structured content को नहीं बदला गया। फिर edit करना हो तो ✏️ Edit Draft दबाएँ।",reply_markup=case_actions(state))
     except Exception:
         log.exception("render after edit failed"); await q.message.reply_text("❌ Change save हुआ लेकिन updated document render नहीं हो सका। /summary से draft फिर खोलें।")
@@ -579,5 +597,7 @@ def build_application():
     app.add_handler(CallbackQueryHandler(button)); app.add_handler(MessageHandler(filters.VOICE,voice_message)); app.add_handler(MessageHandler(filters.PHOTO, image_document_message)); app.add_handler(MessageHandler(filters.Document.ALL, image_document_message)); app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,text_message))
     return app
 
-def main(): build_application().run_polling(allowed_updates=Update.ALL_TYPES)
+def main():
+    log_pdf_pipeline_status()
+    build_application().run_polling(allowed_updates=Update.ALL_TYPES)
 if __name__=="__main__": main()

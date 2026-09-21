@@ -20,6 +20,17 @@ on the host (or when ``LEGAL_PDF_ENGINE=reportlab`` is set explicitly), because
 it can paginate differently from the DOCX and its text layer loses Devanagari
 conjuncts to private-use codepoints. Set ``LEGAL_PDF_REQUIRE_CANONICAL=1`` to
 fail loudly instead of falling back.
+
+When the fallback *is* used it must still draw Hindi correctly. It therefore
+
+* routes every character to the same font the DOCX uses for it
+  (:func:`_font_runs`), so glyph metrics match the canonical document, and
+* shapes each font run separately through :mod:`reportlab_shaping`, which
+  fixes the ReportLab defect that turned ``(एक)`` into ``(□□)``.
+
+:func:`render_both` reports which engine produced the PDF through its optional
+``report`` argument so the bot can tell the advocate when a PDF is not the
+canonical DOCX conversion.
 """
 
 from __future__ import annotations
@@ -56,9 +67,14 @@ from reportlab.platypus import (
 from reportlab.pdfgen.canvas import Canvas
 
 from . import docx_to_pdf
+from . import reportlab_shaping
 
 
 log = logging.getLogger(__name__)
+
+# Engine names recorded in the ``report`` dict of render_both()/render_pdf().
+PDF_ENGINE_LIBREOFFICE = "libreoffice"
+PDF_ENGINE_REPORTLAB = "reportlab"
 
 HINDI_WORDS = {
     1: "एक", 2: "दो", 3: "तीन", 4: "चार", 5: "पाँच",
@@ -273,80 +289,90 @@ def _is_devanagari(cp: int) -> bool:
     )
 
 
-def _pdf_inline_font_markup(text: str, primary: str, fallback: str, symbols: str) -> str:
-    """Create safe PDF font runs without breaking Hindi shaping.
+# Font slots shared by the DOCX and the fallback PDF. The DOCX names real font
+# families; the PDF maps the same slots onto its registered ReportLab fonts.
+FONT_SLOT_PRIMARY = "primary"
+FONT_SLOT_LATIN = "latin"
+FONT_SLOT_SYMBOL = "symbol"
 
-    The previous implementation selected a font independently for every
-    character. That is dangerous for Indic scripts because a Devanagari word
-    must remain a continuous shaping run. This implementation keeps contiguous
-    Hindi text together and switches to the Latin font only for actual Latin
-    letters/digits. Combining marks and zero-width joiners stay with the
-    surrounding Hindi run.
 
-    The resulting markup is still Unicode text; no transliteration or content
-    rewriting occurs here.
+def _font_runs(text: str) -> list[tuple[str, str]]:
+    """Split ``text`` into ``(slot, chunk)`` runs, one font per run.
+
+    This is the *same* decision procedure the DOCX renderer applies in
+    :func:`_add_docx_para`, evaluated against the same bundled font files:
+
+    * a character covered by Noto Sans Devanagari stays in the primary slot
+      (this includes ASCII digits and punctuation such as ``1``, ``(``, ``,``,
+      ``:``, so ``1 (एक) :`` is a single run, exactly as in the DOCX);
+    * otherwise the Latin face, otherwise the symbol face;
+    * format characters and combining marks (ZWJ/ZWNJ, nukta, candrabindu …)
+      never start a new run — they must stay in the run of their base letter or
+      the shaper cannot form the cluster;
+    * a character no bundled font can draw is dropped rather than rendered as
+      a tofu box.
+
+    Keeping the PDF fallback on the same routing as the DOCX means the same
+    glyphs, and therefore the same advance widths, are used for the same
+    characters, which keeps line wrapping as close to the canonical document as
+    an independent layout engine allows.
     """
-    primary_cov = _pdf_font_coverage(primary)
-    fallback_cov = _pdf_font_coverage(fallback)
-    symbol_cov = _pdf_font_coverage(symbols)
-
-    def choose(ch: str, current: str | None) -> str | None:
-        cp = ord(ch)
-        cat = unicodedata.category(ch)
-
-        # Keep Indic combining marks and join controls in the current run so
-        # HarfBuzz/ReportLab can shape the base + mark sequence together.
-        if cat in {"Mn", "Mc", "Me", "Cf"}:
-            return current or primary
-
-        if _is_devanagari(cp):
-            return primary if cp in primary_cov else None
-
-        # ASCII letters, digits and punctuation are intentionally kept in the
-        # Latin run. This covers case numbers, ABCD, dates, amounts, etc.
-        if cp < 128:
-            if ch.isspace():
-                return current or primary
-            return fallback if cp in fallback_cov else None
-
-        # Other Unicode whitespace should not force a font switch.
-        if cat.startswith("Z"):
-            return current or primary
-
-        if cp in primary_cov:
-            return primary
-        if cp in fallback_cov:
-            return fallback
-        if cp in symbol_cov:
-            return symbols
-        return None
-
-    out: list[str] = []
+    _primary, _latin, _symbol, coverages = _docx_font_plan()
+    runs: list[tuple[str, str]] = []
     current: str | None = None
     buf: list[str] = []
+    for ch in str(text):
+        cp = ord(ch)
+        if cp in coverages["primary"]:
+            slot = FONT_SLOT_PRIMARY
+        elif cp in coverages["latin"]:
+            slot = FONT_SLOT_LATIN
+        elif cp in coverages["symbol"]:
+            slot = FONT_SLOT_SYMBOL
+        elif unicodedata.category(ch) in {"Cf", "Mn", "Me"}:
+            slot = current or FONT_SLOT_PRIMARY
+        else:
+            continue
+        if slot != current and buf:
+            runs.append((current or FONT_SLOT_PRIMARY, "".join(buf)))
+            buf = []
+        current = slot
+        buf.append(ch)
+    if buf:
+        runs.append((current or FONT_SLOT_PRIMARY, "".join(buf)))
+    return runs
 
-    def flush() -> None:
-        nonlocal current, buf
-        if not buf:
-            return
-        escaped = _escape_xml("".join(buf))
-        if current == primary:
+
+def _pdf_inline_font_markup(text: str, primary: str, fallback: str, symbols: str) -> str:
+    """Create ReportLab inline-font markup that mirrors the DOCX font runs.
+
+    ``primary`` runs carry no tag so they inherit the paragraph style's font
+    (regular or bold Devanagari); Latin and symbol runs are wrapped in
+    ``<font name=...>``.
+
+    Devanagari is never split character by character: a Hindi word is one run,
+    and ASCII punctuation or digits adjacent to it stay in the same run because
+    Noto Sans Devanagari covers them. A word can still legitimately contain a
+    font switch (``Section-धारा``, ``₹10,00,000`` in a symbol-less draft), which
+    is exactly the case ReportLab's own shaper mishandled; the corrected shaper
+    in :mod:`reportlab_shaping` shapes each run with its own font, so such
+    words render correctly too.
+
+    The result is still Unicode text; no transliteration or content rewriting
+    occurs here.
+    """
+    names = {
+        FONT_SLOT_PRIMARY: primary,
+        FONT_SLOT_LATIN: fallback,
+        FONT_SLOT_SYMBOL: symbols,
+    }
+    out: list[str] = []
+    for slot, chunk in _font_runs(text):
+        escaped = _escape_xml(chunk)
+        if slot == FONT_SLOT_PRIMARY:
             out.append(escaped)
         else:
-            out.append(f'<font name="{current}">{escaped}</font>')
-        buf = []
-
-    for ch in str(text):
-        chosen = choose(ch, current)
-        if chosen is None:
-            # An unsupported character must never be silently converted into a
-            # tofu glyph. Drop it only when no bundled font can represent it.
-            continue
-        if chosen != current:
-            flush()
-            current = chosen
-        buf.append(ch)
-    flush()
+            out.append(f'<font name="{names[slot]}">{escaped}</font>')
     return "".join(out)
 
 
@@ -740,10 +766,20 @@ def render_pdf_reportlab(draft: dict[str, Any], output_path: str | Path, paper: 
     Retained only as a fallback for hosts without LibreOffice and for the
     historical regression tests. Prefer :func:`render_pdf`, which converts the
     canonical DOCX instead.
+
+    Devanagari is shaped with HarfBuzz through the corrected per-font shaper in
+    :mod:`reportlab_shaping`; without it ReportLab draws ``(एक)`` as ``(□□)``.
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     font, bold_font, latin_font, symbol_font = _register_pdf_fonts()
+    # Refuse to draw unshaped Devanagari: install the fixed shaper (raises a
+    # clear error when uharfbuzz is missing or ReportLab changed internally).
+    reportlab_shaping.install()
+    if not pdfmetrics.getFont(font).shapable:
+        raise reportlab_shaping.ShapingUnavailable(
+            f"ReportLab font {font!r} is not shapable; Devanagari would render unshaped."
+        )
 
     paper = str(paper or "legal").strip().lower()
     if paper not in {"legal", "letter"}:
@@ -795,21 +831,78 @@ def canonical_pdf_available() -> bool:
     return pdf_engine() == "canonical" and docx_to_pdf.converter_available()
 
 
+def pdf_pipeline_status() -> dict[str, Any]:
+    """Describe how PDFs will be produced on this host (for logs/diagnostics).
+
+    Nothing here renders a document; it only reports the configuration so an
+    operator can see *before* the first draft whether the PDF will be the
+    canonical LibreOffice conversion of the DOCX or the ReportLab fallback.
+    """
+    soffice = docx_to_pdf.find_soffice()
+    engine_setting = pdf_engine()
+    fonts = {
+        "devanagari_regular": _font_path(),
+        "devanagari_bold": _font_bold_path(),
+        "latin": _latin_font_path(),
+        "symbol": _symbol_font_path(),
+    }
+    if engine_setting == "reportlab":
+        expected = PDF_ENGINE_REPORTLAB
+        reason = "LEGAL_PDF_ENGINE=reportlab forces the legacy independent layout."
+    elif soffice is None:
+        expected = PDF_ENGINE_REPORTLAB
+        reason = (
+            "LibreOffice (soffice) was not found, so the PDF cannot be converted from the "
+            "canonical DOCX. On Heroku add the heroku-community/apt buildpack (Aptfile "
+            "installs libreoffice-writer) or set SOFFICE_BIN."
+        )
+    else:
+        expected = PDF_ENGINE_LIBREOFFICE
+        reason = "PDF is converted from the canonical DOCX by LibreOffice."
+    return {
+        "engine_setting": engine_setting,
+        "expected_engine": expected,
+        "canonical": expected == PDF_ENGINE_LIBREOFFICE,
+        "require_canonical": _canonical_pdf_required(),
+        "soffice": soffice,
+        "fonts": fonts,
+        "uharfbuzz": reportlab_shaping.uharfbuzz is not None,
+        "reason": reason,
+    }
+
+
+def _fallback_report(report: dict[str, Any], reason: str) -> None:
+    report["engine"] = PDF_ENGINE_REPORTLAB
+    report["canonical"] = False
+    report["warning"] = reason
+
+
 def _write_pdf(
     draft: dict[str, Any],
     pdf_path: str | Path,
     paper: str,
     docx_path: str | Path | None = None,
+    report: dict[str, Any] | None = None,
 ) -> Path:
-    """Write the PDF, preferring a conversion of the canonical DOCX."""
+    """Write the PDF, preferring a conversion of the canonical DOCX.
+
+    ``report`` (optional dict) is filled with ``engine`` (``"libreoffice"`` or
+    ``"reportlab"``), ``canonical`` (bool) and ``warning`` (str or None) so the
+    caller can tell the user when the PDF is not the canonical conversion.
+    """
     pdf_path = Path(pdf_path)
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    if report is None:
+        report = {}
+    report.update({"engine": None, "canonical": False, "warning": None, "soffice": None})
 
     if pdf_engine() == "reportlab":
         log.info("LEGAL_PDF_ENGINE=reportlab: using the legacy independent PDF layout.")
+        _fallback_report(report, "LEGAL_PDF_ENGINE=reportlab forces the legacy PDF layout.")
         return render_pdf_reportlab(draft, pdf_path, paper=paper)
 
-    if not docx_to_pdf.converter_available():
+    soffice = docx_to_pdf.find_soffice()
+    if soffice is None:
         message = (
             "LibreOffice (soffice) is not installed, so the PDF cannot be converted from "
             "the canonical DOCX."
@@ -823,31 +916,45 @@ def _write_pdf(
             "LibreOffice binary, to restore DOCX/PDF parity.",
             message,
         )
+        _fallback_report(report, message)
         return render_pdf_reportlab(draft, pdf_path, paper=paper)
 
     try:
         if docx_path is not None and Path(docx_path).is_file():
-            return docx_to_pdf.convert(docx_path, pdf_path)
-        # No canonical DOCX was supplied, so build one solely for conversion.
-        with tempfile.TemporaryDirectory(prefix="legal-canonical-") as tmp:
-            staged = Path(tmp) / "canonical.docx"
-            render_docx(draft, staged, paper=paper)
-            return docx_to_pdf.convert(staged, pdf_path)
-    except docx_to_pdf.PdfConversionError:
+            result = docx_to_pdf.convert(docx_path, pdf_path)
+        else:
+            # No canonical DOCX was supplied, so build one solely for conversion.
+            with tempfile.TemporaryDirectory(prefix="legal-canonical-") as tmp:
+                staged = Path(tmp) / "canonical.docx"
+                render_docx(draft, staged, paper=paper)
+                result = docx_to_pdf.convert(staged, pdf_path)
+    except docx_to_pdf.PdfConversionError as exc:
         log.exception("Canonical DOCX->PDF conversion failed")
         if _canonical_pdf_required():
             raise
         log.warning("Falling back to the legacy ReportLab PDF layout for this document.")
+        _fallback_report(
+            report,
+            f"LibreOffice conversion of the canonical DOCX failed ({exc}); the legacy layout was used.",
+        )
         return render_pdf_reportlab(draft, pdf_path, paper=paper)
 
+    report.update({"engine": PDF_ENGINE_LIBREOFFICE, "canonical": True, "soffice": soffice})
+    return result
 
-def render_pdf(draft: dict[str, Any], output_path: str | Path, paper: str = "legal"):
+
+def render_pdf(
+    draft: dict[str, Any],
+    output_path: str | Path,
+    paper: str = "legal",
+    report: dict[str, Any] | None = None,
+):
     """Render the PDF for ``draft``.
 
     The PDF is produced from the canonical DOCX, so the interface is unchanged
     while the layout source is now shared with :func:`render_docx`.
     """
-    return _write_pdf(draft, output_path, paper)
+    return _write_pdf(draft, output_path, paper, report=report)
 
 
 def render_both(
@@ -855,13 +962,18 @@ def render_both(
     output_dir: str | Path,
     base_name: str = "Dava_Draft",
     paper: str = "legal",
+    report: dict[str, Any] | None = None,
 ) -> tuple[Path, Path]:
-    """Render the DOCX and the PDF, with the PDF converted from that DOCX."""
+    """Render the DOCX and the PDF, with the PDF converted from that DOCX.
+
+    Pass a dict as ``report`` to learn which engine produced the PDF (see
+    :func:`_write_pdf`).
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     safe = re.sub(r"[^A-Za-z0-9_-]+", "_", base_name).strip("_") or "Dava_Draft"
     docx_path = output_dir / f"{safe}.docx"
     pdf_path = output_dir / f"{safe}.pdf"
     render_docx(draft, docx_path, paper=paper)
-    _write_pdf(draft, pdf_path, paper=paper, docx_path=docx_path)
+    _write_pdf(draft, pdf_path, paper=paper, docx_path=docx_path, report=report)
     return docx_path, pdf_path

@@ -9,6 +9,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  pull-requests: write   # result summaries are posted on the PR (see "Report" steps)
+
 jobs:
   tests:
     name: Python ${{ matrix.python-version }}
@@ -42,12 +46,20 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Byte-compile the application
-        run: python -m compileall -q app tests
+        run: python -m compileall -q app tests scripts
 
       - name: Verify the PDF converter is usable
         # Fails fast instead of silently skipping the parity tests.
         run: |
           python -c "import sys; sys.path.insert(0, '.'); from app.drafting_engine.renderers import docx_to_pdf; print('soffice:', docx_to_pdf.find_soffice()); assert docx_to_pdf.converter_available(), 'LibreOffice was not found'"
+
+      - name: Devanagari PDF font test (canonical LibreOffice + ReportLab fallback)
+        # Renders the Hindi test words through the production renderer with
+        # both engines and verifies, glyph by glyph, that no empty box is drawn
+        # and that every word is the exact glyph sequence HarfBuzz selects from
+        # the bundled Noto Sans Devanagari. PNGs of the pages are uploaded.
+        run: |
+          python scripts/pdf_devanagari_font_test.py --require-libreoffice --github-annotations --out tests/output/font_test
 
       - name: Run test suite
         # The two ignored files fail independently of these changes and are
@@ -56,16 +68,116 @@ jobs:
         # script that asserts against its own input, and test_multi_document_case
         # imports app.bot, which requires real configuration (OWNER_TELEGRAM_ID).
         run: |
-          python -m pytest tests -q \
+          python -m pytest tests -q -rfEs \
             --ignore=tests/phase7_2_smoke_test.py \
-            --ignore=tests/test_multi_document_case.py
+            --ignore=tests/test_multi_document_case.py 2>&1 | tee tests/output/pytest.log
+          exit ${PIPESTATUS[0]}
 
-      - name: Upload DOCX/PDF parity artifacts
+      - name: Report results on the pull request
+        # Job logs are not always reachable from every environment; a compact
+        # summary on the PR makes the verdict and the key numbers visible.
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          {
+            echo "### Python ${{ matrix.python-version }} — ${JOB_STATUS}"
+            echo
+            echo "<details><summary>Devanagari PDF font test</summary>"
+            echo
+            echo '```'
+            grep -E "RESULT:|verdict|soffice_version|notdef_glyphs|words_missing|embedded_fonts" -A0 tests/output/font_test/report.json 2>/dev/null | head -40 || true
+            echo '```'
+            echo "</details>"
+            echo
+            echo "<details><summary>pytest tail</summary>"
+            echo
+            echo '```'
+            tail -n 40 tests/output/pytest.log 2>/dev/null || echo "(no pytest log)"
+            echo '```'
+            echo "</details>"
+          } > /tmp/comment.md
+          gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --body-file /tmp/comment.md || echo "could not post PR comment"
+
+      - name: Upload DOCX/PDF parity and font-test artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: parity-artifacts-python-${{ matrix.python-version }}
           path: |
             tests/output/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  heroku-dyno:
+    # Faithful simulation of the production PDF pipeline on Heroku: the real
+    # heroku-community/apt buildpack unpacks the Aptfile inside the official
+    # build image, then the relocated LibreOffice converts the Hindi test DOCX
+    # inside the official *run* image (which lacks the build image's extra
+    # libraries), and the PDFs are verified glyph by glyph. This is the only
+    # place the "does soffice actually start on a dyno" question is answered
+    # before a deploy. See scripts/heroku_dyno_simulation.sh.
+    name: Heroku-${{ matrix.stack }} dyno simulation
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: ["24", "22"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Pull Heroku stack images
+        run: |
+          docker pull --quiet heroku/heroku:${{ matrix.stack }}-build
+          docker pull --quiet heroku/heroku:${{ matrix.stack }}
+
+      - name: Build with the apt buildpack, convert on the run image, verify glyphs
+        run: |
+          mkdir -p tests/output/heroku-sim-${{ matrix.stack }}
+          bash scripts/heroku_dyno_simulation.sh ${{ matrix.stack }} 2>&1 | tee tests/output/heroku-sim-${{ matrix.stack }}/simulation.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Report results on the pull request
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          DIR=tests/output/heroku-sim-${{ matrix.stack }}
+          {
+            echo "### Heroku-${{ matrix.stack }} dyno simulation — ${JOB_STATUS}"
+            echo
+            echo '```'
+            grep -E "==>|apt payload|packages|soffice|LibreOffice|not found|RESULT|!!|error|Error" "$DIR/simulation.log" 2>/dev/null | grep -v "^::" | head -60 || echo "(no simulation log)"
+            echo '```'
+            echo
+            echo "<details><summary>conversion log (run image)</summary>"
+            echo
+            echo '```'
+            tail -n 60 "$DIR/conversion-heroku-${{ matrix.stack }}.log" 2>/dev/null || echo "(no conversion log)"
+            echo '```'
+            echo "</details>"
+          } > /tmp/comment.md
+          gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --body-file /tmp/comment.md || echo "could not post PR comment"
+
+      - name: Upload dyno simulation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: heroku-${{ matrix.stack }}-dyno-simulation
+          path: tests/output/heroku-sim-${{ matrix.stack }}/
           if-no-files-found: ignore
           retention-days: 7
