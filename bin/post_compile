@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Heroku (classic Python buildpack) hook, executed at the end of every build.
+#
+# Verifies on the slug being built that the PDF pipeline is complete:
+#   * LibreOffice from the heroku-community/apt buildpack starts and converts
+#     the Hindi test DOCX (the canonical PDF path), and
+#   * the ReportLab fallback shapes Devanagari.
+#
+# The build is NOT failed when LibreOffice is missing (the bot still delivers a
+# correct fallback PDF and flags it in the Telegram caption) unless
+# LEGAL_PDF_REQUIRE_CANONICAL=1 is set as a config var, in which case a slug
+# that cannot produce the canonical PDF is rejected here rather than at the
+# first draft.
+set -uo pipefail
+
+echo "-----> Checking the PDF pipeline (scripts/check_pdf_pipeline.py)"
+
+# During the build the app lives in $PWD (/tmp/build_*), not /app, so point the
+# converter at the apt buildpack's relocated LibreOffice explicitly.
+if [ -x "$PWD/.apt/usr/bin/soffice" ]; then
+  export SOFFICE_BIN="$PWD/.apt/usr/bin/soffice"
+fi
+
+if timeout 240 python scripts/check_pdf_pipeline.py 2>&1 | sed 's/^/       /'; then
+  exit 0
+fi
+
+echo " !     The PDF pipeline check reported problems (see above)."
+case "${LEGAL_PDF_REQUIRE_CANONICAL:-}" in
+  1|true|TRUE|yes|YES|on|ON)
+    echo " !     LEGAL_PDF_REQUIRE_CANONICAL is set: failing the build."
+    exit 1
+    ;;
+esac
+echo " !     Continuing: PDFs will use the ReportLab fallback until LibreOffice is available"
+echo " !     (add the heroku-community/apt buildpack before heroku/python; see HEROKU_AZURE_SETUP.md)."
+exit 0
