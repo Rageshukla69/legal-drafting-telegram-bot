@@ -9,7 +9,7 @@ from app.access_control import AccessController
 from app.drafting_engine.conversation_state import CaseState, DISPLAY_NAMES, missing_fields, next_questions
 from app.drafting_engine.multi_draft_orchestrator import MultiDraftOrchestrator
 from app.drafting_engine.renderers.legal_document_renderer import render_both
-from app.drafting_engine.azure_speech import transcribe_voice
+from app.drafting_engine.azure_speech import AzureSpeechError, transcribe_voice
 from app.drafting_engine.gemini_client import GeminiError
 from app.drafting_engine.draft_editor import DraftEditor
 from app.drafting_engine.document_intelligence import analyze_document_bytes, DocumentIntelligenceError
@@ -203,7 +203,11 @@ async def intake_text(update,context,text=None, *, suppress_questions=False, ann
         await update.message.reply_text(f"⏳ {DISPLAY_NAMES[state.document_type]} के लिए जानकारी अर्थ के आधार पर समझी जा रही है…")
     try:
         result=await asyncio.to_thread(orchestrator.extract_and_collect,state,text); store.save(update.effective_user.id,state)
-    except Exception as exc:
+    except GeminiError as exc:
+        log.exception("Intake failed: Gemini")
+        msg = "⏳ Gemini service अभी व्यस्त है। थोड़ी देर बाद फिर कोशिश करें।" if exc.retryable else "❌ Gemini intake failed. कृपया admin से GEMINI settings verify कराएं।"
+        await update.message.reply_text(msg); return
+    except Exception:
         log.exception("Intake failed"); await update.message.reply_text("❌ जानकारी process नहीं हो सकी। कृपया दोबारा भेजें।"); return
     if suppress_questions:
         return result
@@ -277,6 +281,10 @@ async def voice_message(update,context):
                 await start_additional_document(update,context,requested_type)
                 return
         await intake_text(update,context,transcript)
+    except AzureSpeechError as exc:
+        log.exception("voice transcription failed")
+        msg = "⏳ Azure transcription service अभी व्यस्त है। थोड़ी देर बाद फिर कोशिश करें।" if exc.retryable else "❌ Azure transcription failed. Voice note process नहीं हो सका।"
+        await update.message.reply_text(msg)
     except Exception: log.exception("voice failed"); await update.message.reply_text("❌ Voice note process नहीं हो सका।")
 
 async def image_document_message(update, context):
@@ -408,10 +416,13 @@ async def generate_for(update,uid,state,edit=False):
             with open(docx,"rb") as f: await target.reply_document(f,filename=docx.name,caption=f"📄 Editable DOCX — {DISPLAY_NAMES[state.document_type]}")
             with open(pdf,"rb") as f: await target.reply_document(f,filename=pdf.name,caption=f"📑 PDF — {DISPLAY_NAMES[state.document_type]}")
         store.save(uid,state); await target.reply_text("✅ Draft तैयार है। आप ✏️ Edit Draft दबाकर text/voice instruction से targeted बदलाव कर सकते हैं। बाकी सामग्री जस की तस रहेगी।",reply_markup=case_actions(state))
+    except GeminiError as exc:
+        log.exception("generation failed: Gemini")
+        msg = "⏳ Gemini drafting service अभी व्यस्त है। थोड़ी देर बाद फिर कोशिश करें।" if exc.retryable else "❌ Gemini drafting failed. कृपया admin से GEMINI configuration verify कराएं।"
+        await target.reply_text(msg)
     except Exception as exc:
         log.exception("generation failed")
-        msg="⏳ AI service अभी व्यस्त है। थोड़ी देर बाद फिर कोशिश करें।" if isinstance(exc,GeminiError) and exc.retryable else f"❌ Draft तैयार नहीं हो सका: {str(exc)[:500]}"
-        await target.reply_text(msg)
+        await target.reply_text(f"❌ Draft तैयार नहीं हो सका: {str(exc)[:500]}")
 
 async def enter_edit_mode(update, context):
     if not update.message or not update.effective_user: return
@@ -477,6 +488,10 @@ async def edit_voice_message(update, context):
         transcript=await asyncio.to_thread(transcribe_voice,buf.getvalue(),"telegram_edit.ogg")
         await update.message.reply_text("📝 Transcript:\n\n"+transcript[:3500])
         await process_edit_instruction(update,context,transcript)
+    except AzureSpeechError as exc:
+        log.exception("voice edit transcription failed")
+        msg = "⏳ Azure transcription service अभी व्यस्त है। थोड़ी देर बाद फिर कोशिश करें।" if exc.retryable else "❌ Azure transcription failed. Voice edit process नहीं हो सका।"
+        await update.message.reply_text(msg)
     except Exception:
         log.exception("voice edit failed"); await update.message.reply_text("❌ Voice edit process नहीं हो सका।")
 

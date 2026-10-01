@@ -13,6 +13,8 @@ heroku config:set GEMINI_MODEL="gemini-3.8-flash"
 heroku config:set GEMINI_FALLBACK_MODEL="gemini-2.5-flash"
 heroku config:set AZURE_SPEECH_KEY="..."
 heroku config:set AZURE_SPEECH_REGION="..."
+# Optional (if you use a custom domain endpoint instead of REGION-based endpoint)
+# heroku config:set AZURE_SPEECH_ENDPOINT="https://<region>.api.cognitive.microsoft.com"
 heroku config:set COSMOS_ENDPOINT="https://YOUR-ACCOUNT.documents.azure.com:443/"
 heroku config:set COSMOS_KEY="YOUR_PRIMARY_KEY"
 heroku config:set COSMOS_DATABASE="legal_drafting_bot"
