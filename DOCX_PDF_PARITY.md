@@ -170,6 +170,7 @@ visible).
 
 ```bash
 pip install -r requirements-dev.txt
+python scripts/pdf_runtime_diagnostic.py
 python -m pytest tests/test_docx_pdf_parity.py -q   # parity + Unicode regression
 python tests/render_parity_report.py --legacy       # human-readable report
 ```

@@ -8,7 +8,8 @@ from app.case_store import CaseStore
 from app.access_control import AccessController
 from app.drafting_engine.conversation_state import CaseState, DISPLAY_NAMES, missing_fields, next_questions
 from app.drafting_engine.multi_draft_orchestrator import MultiDraftOrchestrator
-from app.drafting_engine.renderers.legal_document_renderer import render_both
+from app.drafting_engine.renderers.legal_document_renderer import canonical_pdf_available, pdf_engine, render_both
+from app.drafting_engine.renderers.docx_to_pdf import find_soffice
 from app.drafting_engine.azure_speech import AzureSpeechError, transcribe_voice
 from app.drafting_engine.gemini_client import GeminiError
 from app.drafting_engine.draft_editor import DraftEditor
@@ -589,6 +590,13 @@ async def button(update,context):
 def build_application():
     token=os.getenv("TELEGRAM_BOT_TOKEN")
     if not token: raise RuntimeError("TELEGRAM_BOT_TOKEN is not set.")
+    log.info(
+        "PDF runtime diagnostic: engine=%s canonical_available=%s soffice=%s require_canonical=%s",
+        pdf_engine(),
+        canonical_pdf_available(),
+        find_soffice(),
+        (os.getenv("LEGAL_PDF_REQUIRE_CANONICAL", "") or "").strip().lower() in {"1", "true", "yes", "on"},
+    )
     app=Application.builder().token(token).build()
     app.add_handler(CommandHandler("start",start)); app.add_handler(CommandHandler("newcase",newcase)); app.add_handler(CommandHandler("cancel",cancel)); app.add_handler(CommandHandler("summary",summary)); app.add_handler(CommandHandler("edit",edit_command)); app.add_handler(CommandHandler("adddocument",add_document_command)); app.add_handler(CommandHandler("myid",myid)); app.add_handler(CommandHandler("authorize",authorize)); app.add_handler(CommandHandler("unauthorize",unauthorize)); app.add_handler(CommandHandler("authorized",authorized))
     app.add_handler(CallbackQueryHandler(button)); app.add_handler(MessageHandler(filters.VOICE,voice_message)); app.add_handler(MessageHandler(filters.PHOTO, image_document_message)); app.add_handler(MessageHandler(filters.Document.ALL, image_document_message)); app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,text_message))
