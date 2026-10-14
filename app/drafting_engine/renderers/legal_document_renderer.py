@@ -1,25 +1,22 @@
+```python
 """Deterministic DOCX and PDF renderer for structured legal drafts.
 
 The renderer is deliberately separate from the LLM: the model supplies only
 structured content, while this module controls paper size, margins, fonts,
-alignment, numbering, spacing, and output files.
+font thickness (both Latin `<w:b/>` and Complex Script `<w:bCs/>`), font sizes
+(both `<w:sz/>` and `<w:szCs/>`), alignment, numbering, spacing, and output files.
 
 Canonical pipeline
 ------------------
 The DOCX is the single layout source::
 
-    Dava JSON -> python-docx (canonical DOCX) -> LibreOffice -> PDF
+    Structured Draft JSON -> KrutiDev/Unicode Sanitizer -> python-docx (canonical DOCX) -> LibreOffice -> PDF
 
-so the PDF is a faithful conversion of the document the advocate can edit and
-sign. Only one layout engine decides line wrapping, paragraph heights, page
-breaks, and Devanagari glyph runs, which is what keeps the two files in step.
-
-The former independent ReportLab PDF layout is retained as
-:func:`render_pdf_reportlab`. It is used only when LibreOffice is not available
-on the host (or when ``LEGAL_PDF_ENGINE=reportlab`` is set explicitly), because
-it can paginate differently from the DOCX and its text layer loses Devanagari
-conjuncts to private-use codepoints. Set ``LEGAL_PDF_REQUIRE_CANONICAL=1`` to
-fail loudly instead of falling back.
+When running in an environment where LibreOffice is not installed and the
+ReportLab fallback is used, `_pdf_inline_font_markup` shapes tokens at the
+whitespace-delimited word level so HarfBuzz (`shaping=1`) NEVER switches fonts
+mid-token (preventing `.notdef` tofu boxes `□` inside `(एक)` / `(बावन)` and
+preventing Greek glyph substitution on commas, hyphens, colons, and parentheses).
 """
 
 from __future__ import annotations
@@ -34,10 +31,10 @@ from typing import Any
 import unicodedata
 
 from docx import Document
-from docx.enum.section import WD_SECTION
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Inches, Pt
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.shared import Inches, Pt
 
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import LETTER, legal
@@ -45,18 +42,18 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfgen.canvas import Canvas
 from reportlab.platypus import (
     BaseDocTemplate,
     Frame,
+    PageBreak,
     PageTemplate,
     Paragraph,
-    Spacer,
-    PageBreak,
 )
-from reportlab.pdfgen.canvas import Canvas
 
+from ..krutidev_converter import sanitize_draft_unicode
+from ..legal_number_formatter import format_draft_numbers, hindi_number as _full_hindi_number
 from . import docx_to_pdf
-
 
 log = logging.getLogger(__name__)
 
@@ -70,7 +67,12 @@ HINDI_WORDS = {
 
 
 def hindi_number(n: int) -> str:
-    return HINDI_WORDS.get(n, str(n))
+    if n in HINDI_WORDS:
+        return HINDI_WORDS[n]
+    try:
+        return _full_hindi_number(int(n))
+    except Exception:
+        return str(n)
 
 
 def numbered(text: str, n: int) -> str:
@@ -79,7 +81,7 @@ def numbered(text: str, n: int) -> str:
         return ""
     # The model is forbidden from numbering. As a defensive measure, remove
     # one accidental leading numeric/Hindi-letter prefix before rendering.
-    text = re.sub(r"^\s*\d+\s*(?:\([^)]*\))?\s*[:.)-]?\s*", "", text)
+    text = re.sub(r"^\s*\d+\s*(?:[-–—]?\s*\([^)]*\))?\s*[:.)-]+\s*", "", text)
     return f"{n} ({hindi_number(n)}) : {text}"
 
 
@@ -88,57 +90,128 @@ def normalize_between_label(value: str) -> str:
     return "बनाम"
 
 
+_BANAM_CLEAN_RE = re.compile(r"^[\s\-–—:|।]*बनाम[\s\-–—:|।]*$")
+_LEADING_PARTY_NUM_RE = re.compile(r"^\s*0*(\d+)\s*[.)\-:]\s*")
+_ROLE_SUFFIX_RE = re.compile(
+    r"(\s*(?:[-–—|।]+\s*)?(?:प्रतिवादीगण|प्रतिवादिनीगण|प्रतिवादिनी|प्रतिवादी|विपक्षीगण|विपक्षी|वादीगण|वादिनी|वादी|प्रार्थीगण|प्रार्थिनी|प्रार्थी)\s*)$"
+)
+
+
+def _sort_numbered_party_lines(lines: list[str]) -> list[str]:
+    """Ensure numbered party lines (e.g. '1. शिवमोहन सिंह', '2. श्रीमती रमाकांती') stay in 1, 2, 3 order
+    and keep any collective role suffix ('--- प्रतिवादीगण') attached to the final line of the block."""
+    if len(lines) <= 1:
+        return lines
+    numbered_items: list[tuple[int, int, str]] = []
+    for idx, line in enumerate(lines):
+        m = _LEADING_PARTY_NUM_RE.match(line)
+        if m:
+            numbered_items.append((int(m.group(1)), idx, line))
+    if len(numbered_items) < 2:
+        return lines
+    nums = [n for n, _, _ in numbered_items]
+    if nums == sorted(nums):
+        return lines
+
+    # Extract any collective trailing suffix (like '--- प्रतिवादीगण') so it stays on the last line after sorting
+    extracted_suffix = ""
+    cleaned_lines = list(lines)
+    for idx, line in enumerate(cleaned_lines):
+        sm = _ROLE_SUFFIX_RE.search(line)
+        if sm and idx < len(cleaned_lines) - 1:
+            extracted_suffix = sm.group(1)
+            cleaned_lines[idx] = line[: sm.start()].rstrip(" ,|-–—")
+            break
+
+    sorted_pairs = sorted(
+        [
+            ((_LEADING_PARTY_NUM_RE.match(l).group(1) if _LEADING_PARTY_NUM_RE.match(l) else "9999"), i, l)
+            for i, l in enumerate(cleaned_lines)
+        ],
+        key=lambda x: (int(x[0]), x[1]),
+    )
+    result = [l for _, _, l in sorted_pairs]
+    if extracted_suffix and result and not _ROLE_SUFFIX_RE.search(result[-1]):
+        result[-1] = f"{result[-1]} {extracted_suffix.strip()}"
+    return result
+
+
 def split_party_blocks(parties: list[str]) -> tuple[list[str], list[str], list[str]]:
-    """Return plaintiff entries, the deterministic separator, and defendant entries.
+    """Return plaintiff entries, defendant entries, and any trailing other lines.
 
-    Primary rule:
-      * entries explicitly labelled वादी/plaintiff go to the plaintiff block
-      * entries explicitly labelled प्रतिवादी/defendant go to the defendant block
-
-    Safe deterministic fallback:
-      * when there are exactly two unlabelled party entries, preserve their order
-        and treat the first as plaintiff and the second as defendant. This keeps
-        the common Dava party order visually correct instead of putting "बनाम"
-        after both parties.
-
-    We never use the model's ``between_label`` for the actual separator; the
-    renderer always writes the legal convention "बनाम".
-
-    The defendant labels are tested first on purpose: "प्रतिवादी" contains the
-    substring "वादी", so testing the plaintiff labels first classified labelled
-    defendants as plaintiffs and dropped the "बनाम" separator entirely.
+    Guarantees:
+    - Standalone 'बनाम' entries are stripped and never duplicated.
+    - All defendant lines (even when only the last defendant line has '--- प्रतिवादीगण')
+      are grouped together in `defendant` in ascending 1, 2, 3 order.
     """
-    plaintiff, defendant, other = [], [], []
+    defendant_labels = (
+        "प्रतिवादीगण", "प्रतिवादिनीगण", "प्रतिवादिनी", "प्रतिवादी",
+        "विपक्षीगण", "विपक्षी", "संभावित वादीगण", "उत्तरदाता",
+        "defendant", "defendants", "respondent", "opposite party",
+    )
+    plaintiff_labels = (
+        "वादीगण", "वादिनी", "वादी", "प्रार्थीगण", "प्रार्थिनी", "प्रार्थी",
+        "केवियटकर्तागण", "केवियटकर्ता", "कैवियटकर्तागण", "कैवियटकर्ता",
+        "नोटिसदाता", "आवेदक", "आवेदिका",
+        "plaintiff", "plaintiffs", "applicant", "petitioner",
+    )
 
-    # First, handle entries that may contain multiple party lines.
-    expanded: list[str] = []
-    for raw in parties:
-        value = str(raw).strip()
-        if not value:
+    flat_lines: list[str] = []
+    for raw in parties or []:
+        for line in re.split(r"\r?\n|\\r?\\n", str(raw)):
+            s = line.strip()
+            if s:
+                flat_lines.append(s)
+
+    plaintiff: list[str] = []
+    defendant: list[str] = []
+    other: list[str] = []
+
+    seen_banam = False
+    pending: list[str] = []
+
+    for line in flat_lines:
+        if _BANAM_CLEAN_RE.match(line):
+            if pending and not plaintiff and not seen_banam:
+                plaintiff.extend(pending)
+                pending = []
+            seen_banam = True
             continue
-        lines = [line.strip() for line in re.split(r"\\r?\\n", value) if line.strip()]
-        expanded.extend(lines or [value])
 
-    defendant_labels = ("प्रतिवादीगण", "प्रतिवादी", "defendant", "defendants")
-    plaintiff_labels = ("वादीगण", "वादी", "plaintiff", "plaintiffs")
+        low = line.casefold()
+        has_def = any(lbl in low for lbl in defendant_labels)
+        has_pl = any(lbl in low for lbl in plaintiff_labels)
 
-    for party in expanded:
-        low = party.casefold()
-        if any(label in low for label in defendant_labels):
-            defendant.append(party)
-        elif any(label in low for label in plaintiff_labels):
-            plaintiff.append(party)
+        if has_def and not has_pl:
+            if seen_banam or plaintiff:
+                defendant.extend(pending + [line])
+            else:
+                defendant.extend([line])
+            pending = []
+        elif has_pl and not has_def:
+            if not seen_banam and not defendant:
+                plaintiff.extend(pending + [line])
+                pending = []
+            else:
+                plaintiff.append(line)
         else:
-            other.append(party)
+            pending.append(line)
 
-    # If the model supplied exactly two unlabelled parties, use the normal
-    # Dava ordering rather than rendering both together and placing "बनाम"
-    # afterward.
-    if not plaintiff and not defendant and len(other) == 2:
+    if pending:
+        if seen_banam or plaintiff:
+            defendant.extend(pending)
+        elif defendant:
+            defendant.extend(pending)
+        else:
+            other.extend(pending)
+
+    if not plaintiff and not defendant and len(other) >= 2:
         plaintiff = [other[0]]
-        defendant = [other[1]]
+        defendant = other[1:]
         other = []
 
+    plaintiff = _sort_numbered_party_lines(plaintiff)
+    defendant = _sort_numbered_party_lines(defendant)
     return plaintiff, defendant, other
 
 
@@ -172,13 +245,11 @@ def _font_bold_path() -> str:
             return p
     return _font_path()
 
+
 def _latin_font_path() -> str:
     bundled = _bundled_font("NotoSans-Regular.ttf")
     if bundled:
         return str(bundled)
-    # ``assets/fonts/DejaVuSans.ttf`` is the Latin/symbol face the repository
-    # already expected to ship; prefer the bundled copy so the renderer never
-    # depends on the font packages of the host.
     bundled_dejavu = _bundled_font("DejaVuSans.ttf")
     if bundled_dejavu:
         return str(bundled_dejavu)
@@ -190,6 +261,21 @@ def _latin_font_path() -> str:
         if Path(p).exists():
             return p
     raise RuntimeError("Unicode Latin fallback font not found.")
+
+
+def _latin_bold_font_path() -> str:
+    bundled = _bundled_font("DejaVuSans-Bold.ttf")
+    if bundled:
+        return str(bundled)
+    for p in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ):
+        if Path(p).exists():
+            return p
+    return _latin_font_path()
+
 
 def _symbol_font_path() -> str:
     bundled = _bundled_font("DejaVuSans.ttf")
@@ -203,12 +289,7 @@ def _symbol_font_path() -> str:
 
 @functools.lru_cache(maxsize=None)
 def _font_coverage(path: str) -> frozenset[int]:
-    """Return the set of Unicode codepoints a font file can actually render.
-
-    Parsing a font is comparatively expensive, and this used to happen three
-    times per paragraph. The result is immutable and cached for the life of the
-    process.
-    """
+    """Return the set of Unicode codepoints a font file can actually render."""
     from fontTools.ttLib import TTFont as _FTFont
 
     font = _FTFont(path, lazy=True)
@@ -223,12 +304,7 @@ def _font_coverage(path: str) -> frozenset[int]:
 
 @functools.lru_cache(maxsize=None)
 def _font_family_name(path: str) -> str:
-    """Return the real family name declared inside a font file.
-
-    The DOCX must name the font that is actually going to be on the machine
-    performing layout; naming a family we do not ship makes Word/LibreOffice
-    silently substitute and then the DOCX and PDF drift apart again.
-    """
+    """Return the real family name declared inside a font file."""
     from fontTools.ttLib import TTFont as _FTFont
 
     font = _FTFont(path, lazy=True)
@@ -243,18 +319,23 @@ def _font_family_name(path: str) -> str:
         font.close()
     return Path(path).stem
 
+
 def _register_pdf_fonts() -> tuple[str, str, str, str]:
     regular = "VakilDeva"
     bold = "VakilDevaBold"
     latin = "VakilLatin"
+    latin_bold = "VakilLatinBold"
     symbols = "VakilSymbols"
-    if regular not in pdfmetrics.getRegisteredFontNames():
+    registered = pdfmetrics.getRegisteredFontNames()
+    if regular not in registered:
         pdfmetrics.registerFont(TTFont(regular, _font_path()))
-    if bold not in pdfmetrics.getRegisteredFontNames():
+    if bold not in registered:
         pdfmetrics.registerFont(TTFont(bold, _font_bold_path()))
-    if latin not in pdfmetrics.getRegisteredFontNames():
+    if latin not in registered:
         pdfmetrics.registerFont(TTFont(latin, _latin_font_path()))
-    if symbols not in pdfmetrics.getRegisteredFontNames():
+    if latin_bold not in registered:
+        pdfmetrics.registerFont(TTFont(latin_bold, _latin_bold_font_path()))
+    if symbols not in registered:
         pdfmetrics.registerFont(TTFont(symbols, _symbol_font_path()))
     return regular, bold, latin, symbols
 
@@ -274,95 +355,163 @@ def _is_devanagari(cp: int) -> bool:
 
 
 def _pdf_inline_font_markup(text: str, primary: str, fallback: str, symbols: str) -> str:
-    """Create safe PDF font runs without breaking Hindi shaping.
+    """Create HarfBuzz-safe PDF font runs without ever switching fonts inside a word token.
 
-    The previous implementation selected a font independently for every
-    character. That is dangerous for Indic scripts because a Devanagari word
-    must remain a continuous shaping run. This implementation keeps contiguous
-    Hindi text together and switches to the Latin font only for actual Latin
-    letters/digits. Combining marks and zero-width joiners stay with the
-    surrounding Hindi run.
+    CRITICAL FOR REPORTLAB + UHARFBUZZ (`shaping=1`):
+    Switching `<font>` tags inside a non-whitespace token (such as `(` in `VakilLatin`
+    followed by `एक` in `VakilDeva` in `(एक)`, or `भसौरा` in `VakilDeva` followed by
+    `,` in `VakilLatin` in `भसौरा,`) causes ReportLab's HarfBuzz shaper to shape the
+    entire non-whitespace cluster with the first font's cmap and draw the second run
+    with those glyph IDs in the second font — producing `.notdef` boxes (`□`) for
+    parenthesized Hindi words and Greek symbols (`·`, `Έ`, `΄`, `ΗΈ`, `Ό`) for punctuation!
 
-    The resulting markup is still Unicode text; no transliteration or content
-    rewriting occurs here.
+    Because `NotoSansDevanagari` natively covers all ASCII digits `0-9` and all ASCII
+    punctuation `( ) , . : ; - / ! ? ' " % + = [ ] { } | ~`, any whitespace-delimited
+    token containing Devanagari is kept 100% in `primary` (`VakilDeva`/`VakilDevaBold`).
     """
     primary_cov = _pdf_font_coverage(primary)
     fallback_cov = _pdf_font_coverage(fallback)
     symbol_cov = _pdf_font_coverage(symbols)
 
-    def choose(ch: str, current: str | None) -> str | None:
-        cp = ord(ch)
-        cat = unicodedata.category(ch)
+    s = str(text or "")
+    if not s:
+        return ""
 
-        # Keep Indic combining marks and join controls in the current run so
-        # HarfBuzz/ReportLab can shape the base + mark sequence together.
-        if cat in {"Mn", "Mc", "Me", "Cf"}:
-            return current or primary
+    # Separate any direct collision between Latin letters [A-Za-z] and Devanagari,
+    # or digits immediately attached to '(' + Devanagari (e.g. '02(रामकान्ती)' -> '02 (रामकान्ती)'),
+    # so a single non-whitespace token never contains both scripts.
+    s = re.sub(r"(?<=[0-9०-९])\((?=[\u0900-\u097F])", " (", s)
+    s = re.sub(r"(?<=[A-Za-z])(?=[\u0900-\u097F])", " ", s)
+    s = re.sub(r"(?<=[\u0900-\u097F])(?=[A-Za-z])", " ", s)
 
-        if _is_devanagari(cp):
-            return primary if cp in primary_cov else None
-
-        # ASCII letters, digits and punctuation are intentionally kept in the
-        # Latin run. This covers case numbers, ABCD, dates, amounts, etc.
-        if cp < 128:
-            if ch.isspace():
-                return current or primary
-            return fallback if cp in fallback_cov else None
-
-        # Other Unicode whitespace should not force a font switch.
-        if cat.startswith("Z"):
-            return current or primary
-
-        if cp in primary_cov:
-            return primary
-        if cp in fallback_cov:
-            return fallback
-        if cp in symbol_cov:
-            return symbols
-        return None
-
+    tokens = re.findall(r"\S+|\s+", s)
     out: list[str] = []
-    current: str | None = None
+    current_font: str | None = None
     buf: list[str] = []
 
     def flush() -> None:
-        nonlocal current, buf
+        nonlocal current_font, buf
         if not buf:
             return
         escaped = _escape_xml("".join(buf))
-        if current == primary:
+        if current_font == primary or current_font is None:
             out.append(escaped)
         else:
-            out.append(f'<font name="{current}">{escaped}</font>')
+            out.append(f'<font name="{current_font}">{escaped}</font>')
         buf = []
 
-    for ch in str(text):
-        chosen = choose(ch, current)
-        if chosen is None:
-            # An unsupported character must never be silently converted into a
-            # tofu glyph. Drop it only when no bundled font can represent it.
+    def choose_token_font(tok: str) -> str:
+        has_deva = any(_is_devanagari(ord(c)) for c in tok)
+        if has_deva:
+            return primary
+
+        has_ascii_alnum = any(c.isascii() and c.isalnum() for c in tok)
+        if has_ascii_alnum:
+            return fallback
+
+        needs_fallback = False
+        needs_symbol = False
+        all_in_primary = True
+        for c in tok:
+            cp = ord(c)
+            cat = unicodedata.category(c)
+            if cat in {"Mn", "Mc", "Me", "Cf"}:
+                continue
+            if cp not in primary_cov:
+                all_in_primary = False
+                if cp in fallback_cov:
+                    needs_fallback = True
+                elif cp in symbol_cov:
+                    needs_symbol = True
+
+        if needs_symbol and not needs_fallback:
+            return symbols
+        if needs_fallback or not all_in_primary:
+            return fallback
+        return primary
+
+    for tok in tokens:
+        if tok.isspace():
+            buf.append(tok)
             continue
-        if chosen != current:
-            flush()
-            current = chosen
-        buf.append(ch)
-    flush()
+
+        clean_chars = []
+        for ch in tok:
+            cp = ord(ch)
+            cat = unicodedata.category(ch)
+            if cat in {"Mn", "Mc", "Me", "Cf"} or cp in primary_cov or cp in fallback_cov or cp in symbol_cov:
+                clean_chars.append(ch)
+        if not clean_chars:
+            continue
+        clean_tok = "".join(clean_chars)
+
+        chosen = choose_token_font(clean_tok)
+        if current_font is not None and chosen != current_font:
+            # Keep boundary spaces in `primary` (outside `<font name="...">...</font>`)
+            if current_font == primary:
+                flush()
+                current_font = chosen
+            else:
+                trailing_ws = ""
+                if buf and buf[-1].isspace():
+                    trailing_ws = buf.pop()
+                flush()
+                current_font = chosen
+                if trailing_ws:
+                    if chosen == primary:
+                        buf.append(trailing_ws)
+                    else:
+                        out.append(_escape_xml(trailing_ws))
+        else:
+            current_font = chosen
+        buf.append(clean_tok)
+
+    if current_font is not None and current_font != primary and buf and buf[-1].isspace():
+        trailing_ws = buf.pop()
+        flush()
+        out.append(_escape_xml(trailing_ws))
+    else:
+        flush()
     return "".join(out)
 
 
 def _set_run_font(run, name: str, size: float, bold: bool = False):
+    """Set font family, size, and bold weight for both Latin and Complex Script (Devanagari)."""
     run.font.name = name
     run.font.size = Pt(size)
     run.bold = bold
-    # Force both ASCII and complex-script font slots.
+
     rpr = run._element.get_or_add_rPr()
     rfonts = rpr.rFonts
     if rfonts is None:
-        from docx.oxml import OxmlElement
         rfonts = OxmlElement("w:rFonts")
         rpr.append(rfonts)
     for attr in ("ascii", "hAnsi", "eastAsia", "cs"):
         rfonts.set(qn(f"w:{attr}"), name)
+
+    half_pts = str(int(round(size * 2)))
+    sz_el = rpr.find(qn("w:sz"))
+    if sz_el is None:
+        sz_el = OxmlElement("w:sz")
+        rpr.append(sz_el)
+    sz_el.set(qn("w:val"), half_pts)
+
+    sz_cs_el = rpr.find(qn("w:szCs"))
+    if sz_cs_el is None:
+        sz_cs_el = OxmlElement("w:szCs")
+        rpr.append(sz_cs_el)
+    sz_cs_el.set(qn("w:val"), half_pts)
+
+    b_cs_el = rpr.find(qn("w:bCs"))
+    if bold:
+        if b_cs_el is None:
+            b_cs_el = OxmlElement("w:bCs")
+            rpr.append(b_cs_el)
+        else:
+            b_cs_el.attrib.pop(qn("w:val"), None)
+    else:
+        if b_cs_el is not None:
+            rpr.remove(b_cs_el)
 
 
 def _docx_font_plan() -> tuple[str, str, str, dict[str, frozenset[int]]]:
@@ -384,14 +533,7 @@ def _docx_font_plan() -> tuple[str, str, str, dict[str, frozenset[int]]]:
 
 
 def _add_docx_page_number_footer(document: Document):
-    """Put the page number in the DOCX footer as a real ``PAGE`` field.
-
-    The legacy ReportLab PDF drew its own page number. Now that the PDF is a
-    conversion of the canonical DOCX, the page number must live in the DOCX too,
-    otherwise the two files would still differ on every page.
-    """
-    from docx.oxml import OxmlElement
-
+    """Put the page number in the DOCX footer as a real `PAGE` field."""
     section = document.sections[0]
     footer = section.footer
     footer.is_linked_to_previous = False
@@ -401,7 +543,7 @@ def _add_docx_page_number_footer(document: Document):
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     run = paragraph.add_run()
-    _set_run_font(run, _font_family_name(_font_path()), 9)
+    _set_run_font(run, _font_family_name(_font_path()), 9, bold=False)
     begin = OxmlElement("w:fldChar")
     begin.set(qn("w:fldCharType"), "begin")
     instruction = OxmlElement("w:instrText")
@@ -419,8 +561,6 @@ def _add_docx_page_number_footer(document: Document):
 
 
 def _setup_docx(document: Document, paper: str):
-    # Legal is the default pleading format. Letter remains available by
-    # explicitly passing paper="letter".
     paper = str(paper or "legal").strip().lower()
     if paper not in {"legal", "letter"}:
         paper = "legal"
@@ -439,6 +579,20 @@ def _setup_docx(document: Document, paper: str):
     section.bottom_margin = Inches(1)
     section.header_distance = Inches(0.5)
     section.footer_distance = Inches(0.5)
+
+    try:
+        primary_family = _font_family_name(_font_path())
+        normal_style = document.styles["Normal"]
+        normal_style.font.name = primary_family
+        normal_style.font.size = Pt(14)
+        rpr = normal_style._element.get_or_add_rPr()
+        sz_cs = rpr.find(qn("w:szCs"))
+        if sz_cs is None:
+            sz_cs = OxmlElement("w:szCs")
+            rpr.append(sz_cs)
+        sz_cs.set(qn("w:val"), "28")
+    except Exception:
+        pass
 
     _add_docx_page_number_footer(document)
 
@@ -466,9 +620,6 @@ def _add_docx_para(
         pf.left_indent = Inches(left_indent)
 
     text = str(text)
-    # Word can perform font fallback, but explicit run-level fallback is more
-    # reliable across Android viewers, LibreOffice and Microsoft Word. Font
-    # metrics are cached across calls (a legal draft has many paragraphs).
     primary, latin, symbol, coverages = _docx_font_plan()
 
     runs = []
@@ -476,14 +627,17 @@ def _add_docx_para(
     buf = []
     for ch in text:
         cp = ord(ch)
-        if cp in coverages["primary"]:
+        cat = unicodedata.category(ch)
+        if cat in {"Cf", "Mn", "Mc", "Me"}:
+            font_name = current_font or primary
+        elif ch.isspace() and current_font is not None:
+            font_name = current_font
+        elif cp in coverages["primary"]:
             font_name = primary
         elif cp in coverages["latin"]:
             font_name = latin
         elif cp in coverages["symbol"]:
             font_name = symbol
-        elif unicodedata.category(ch) in {"Cf", "Mn", "Me"}:
-            font_name = current_font or primary
         else:
             continue
         if font_name != current_font and buf:
@@ -500,7 +654,11 @@ def _add_docx_para(
     return p
 
 
-LAYOUT_SECTIONS = {"court_heading","case_heading","parties","title","opening_averment","pleadings","prayer","signature_block","verification"}
+LAYOUT_SECTIONS = {
+    "court_heading", "case_heading", "parties", "title",
+    "opening_averment", "pleadings", "prayer", "signature_block", "verification",
+}
+
 
 def _layout_break(draft: dict[str, Any], kind: str, section: str) -> bool:
     layout = draft.get("layout", {}) or {}
@@ -511,18 +669,14 @@ def _layout_break(draft: dict[str, Any], kind: str, section: str) -> bool:
         values = [values]
     return section in values
 
+
 def _docx_page_break_if_needed(doc: Document, draft: dict[str, Any], section: str, *, before: bool = True):
     if _layout_break(draft, "page_break_before" if before else "page_break_after", section):
         doc.add_page_break()
 
 
 def _ordered_pleading_items(draft: dict[str, Any]) -> list[str]:
-    """Return the single approved pleading sequence.
-
-    Phase 7.1 intentionally does not flatten separate cause/jurisdiction/etc.
-    arrays because doing so caused duplicated or restarted numbering. The AI
-    structural planner decides the order before drafting.
-    """
+    """Return the single approved pleading sequence."""
     return [str(x).strip() for x in (draft.get("pleadings", []) or []) if str(x).strip()]
 
 
@@ -533,13 +687,26 @@ def _title_text(draft: dict[str, Any]) -> str:
     return "वाद पत्र"
 
 
+def _prayer_lead_in(draft: dict[str, Any]) -> str:
+    title = _title_text(draft)
+    if any(k in title for k in ("प्रतिवाद", "जवाब", "लिखित कथन", "Written Statement")):
+        return "अतः प्रतिवादी माननीय न्यायालय से प्रार्थना करता है कि:-"
+    if any(k in title for k in ("प्रार्थनापत्र", "प्रार्थना पत्र", "आवेदन", "Application")):
+        return "अतः श्रीमानजी से प्रार्थना है कि:-"
+    return "अतः वादी माननीय न्यायालय से प्रार्थना करता है कि:-"
+
+
+def _format_prayer_clause(item: str, idx: int) -> str:
+    labels = ["(क)", "(ख)", "(ग)", "(घ)", "(ङ)", "(च)", "(छ)", "(ज)", "(झ)", "(ञ)"]
+    label = labels[idx] if idx < len(labels) else f"({idx + 1})"
+    cleaned = re.sub(r"^\s*(?:\([क-ज्ञ0-9a-zA-Z]+\)|[क-ज्ञअ-ह][.)\-:])\s*", "", str(item).strip())
+    return f"{label} {cleaned or item}"
+
+
 def _signature_lines(draft: dict[str, Any]) -> list[str]:
     lines = [str(x).strip() for x in draft.get("signature_block", []) or [] if str(x).strip()]
     if lines:
         return lines
-    # Fixed advocate profile for this project. It is presentation metadata,
-    # not a case fact, and therefore is inserted deterministically only when
-    # the draft does not already contain a signature block.
     plaintiff = ""
     for party in draft.get("parties", []) or []:
         if "वादी" in str(party):
@@ -550,7 +717,13 @@ def _signature_lines(draft: dict[str, Any]) -> list[str]:
     return ["वादी", "द्वारा अधिवक्ता-", "वी०डी० शुक्ला एडवोकेट", "बिधूना, औरैया"]
 
 
+def _prepare_draft(draft: dict[str, Any]) -> dict[str, Any]:
+    """Sanitize KrutiDev/abbreviations and normalize Hindi years before rendering."""
+    return sanitize_draft_unicode(draft or {})
+
+
 def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "legal"):
+    draft = _prepare_draft(draft)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc = Document()
@@ -578,7 +751,7 @@ def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "le
         for party in other:
             _add_docx_para(doc, party, align=WD_ALIGN_PARAGRAPH.LEFT, size=14, first_indent=False, after=4)
     else:
-        for party in parties:
+        for party in (plaintiff + defendant + other) or parties:
             _add_docx_para(doc, party, align=WD_ALIGN_PARAGRAPH.LEFT, size=14, first_indent=False, after=4)
 
     _docx_page_break_if_needed(doc, draft, "title")
@@ -597,12 +770,9 @@ def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "le
     if prayer:
         _docx_page_break_if_needed(doc, draft, "prayer")
         _add_docx_para(doc, "प्रार्थना", align=WD_ALIGN_PARAGRAPH.CENTER, size=16, bold=True, underline=True, first_indent=False, after=8)
-        _add_docx_para(doc, "अतः वादी माननीय न्यायालय से प्रार्थना करता है कि:-", align=WD_ALIGN_PARAGRAPH.JUSTIFY, size=14, first_indent=False, after=10)
+        _add_docx_para(doc, _prayer_lead_in(draft), align=WD_ALIGN_PARAGRAPH.JUSTIFY, size=14, first_indent=False, after=10)
         for idx, item in enumerate(prayer):
-            # Prayer items use Hindi-lettered clauses where practical.
-            labels = ["(क)", "(ख)", "(ग)", "(घ)", "(ङ)", "(च)"]
-            label = labels[idx] if idx < len(labels) else f"({idx + 1})"
-            _add_docx_para(doc, f"{label} {item}", align=WD_ALIGN_PARAGRAPH.JUSTIFY, size=14, first_indent=False, after=10)
+            _add_docx_para(doc, _format_prayer_clause(item, idx), align=WD_ALIGN_PARAGRAPH.JUSTIFY, size=14, first_indent=False, after=10)
 
     signatures = _signature_lines(draft)
     if signatures:
@@ -632,6 +802,8 @@ def _escape_xml(text: str) -> str:
 
 
 def _pdf_story(draft: dict[str, Any], font: str, bold_font: str, latin_font: str, symbol_font: str):
+    draft = _prepare_draft(draft)
+    latin_bold = "VakilLatinBold" if "VakilLatinBold" in pdfmetrics.getRegisteredFontNames() else latin_font
     styles = getSampleStyleSheet()
     body = ParagraphStyle("VakilBody", parent=styles["BodyText"], fontName=font, fontSize=14, leading=21, alignment=TA_JUSTIFY, shaping=1, firstLineIndent=0.5 * inch, spaceAfter=12)
     center16 = ParagraphStyle("VakilCenter16", parent=body, fontName=bold_font, fontSize=16, leading=22, alignment=TA_CENTER, shaping=1, firstLineIndent=0, spaceAfter=8)
@@ -647,11 +819,11 @@ def _pdf_story(draft: dict[str, Any], font: str, bold_font: str, latin_font: str
     if _layout_break(draft, "page_break_before", "court_heading"):
         story.append(PageBreak())
     if court:
-        story.append(Paragraph(_pdf_inline_font_markup(court, font, latin_font, symbol_font), center16))
+        story.append(Paragraph(_pdf_inline_font_markup(court, bold_font, latin_bold, symbol_font), center16))
     if case:
         if _layout_break(draft, "page_break_before", "case_heading"):
             story.append(PageBreak())
-        story.append(Paragraph(_pdf_inline_font_markup(case, font, latin_font, symbol_font), ParagraphStyle("Case", parent=center16, fontSize=14, leading=20, spaceAfter=10)))
+        story.append(Paragraph(_pdf_inline_font_markup(case, bold_font, latin_bold, symbol_font), ParagraphStyle("Case", parent=center16, fontSize=14, leading=20, spaceAfter=10)))
 
     if _layout_break(draft, "page_break_before", "parties"):
         story.append(PageBreak())
@@ -659,18 +831,18 @@ def _pdf_story(draft: dict[str, Any], font: str, bold_font: str, latin_font: str
     if plaintiff and defendant:
         for party in plaintiff:
             story.append(Paragraph(_pdf_inline_font_markup(party, font, latin_font, symbol_font), left))
-        story.append(Paragraph(_pdf_inline_font_markup("बनाम", font, latin_font, symbol_font), center))
+        story.append(Paragraph(_pdf_inline_font_markup("बनाम", bold_font, latin_bold, symbol_font), center))
         for party in defendant:
             story.append(Paragraph(_pdf_inline_font_markup(party, font, latin_font, symbol_font), left))
         for party in other:
             story.append(Paragraph(_pdf_inline_font_markup(party, font, latin_font, symbol_font), left))
     else:
-        for party in parties:
+        for party in (plaintiff + defendant + other) or parties:
             story.append(Paragraph(_pdf_inline_font_markup(party, font, latin_font, symbol_font), left))
 
     if _layout_break(draft, "page_break_before", "title"):
         story.append(PageBreak())
-    story.append(Paragraph(_pdf_inline_font_markup(_title_text(draft), font, latin_font, symbol_font), ParagraphStyle("Title", parent=center16, underline=True, spaceBefore=4, spaceAfter=10)))
+    story.append(Paragraph(_pdf_inline_font_markup(_title_text(draft), bold_font, latin_bold, symbol_font), ParagraphStyle("Title", parent=center16, underline=True, spaceBefore=4, spaceAfter=10)))
 
     opening = str(draft.get("opening_averment", "")).strip()
     if opening:
@@ -688,11 +860,9 @@ def _pdf_story(draft: dict[str, Any], font: str, bold_font: str, latin_font: str
         if _layout_break(draft, "page_break_before", "prayer"):
             story.append(PageBreak())
         story.append(Paragraph("प्रार्थना", ParagraphStyle("PrayerTitle", parent=center16, underline=True, spaceBefore=2, spaceAfter=8)))
-        story.append(Paragraph(_pdf_inline_font_markup("अतः वादी माननीय न्यायालय से प्रार्थना करता है कि:-", font, latin_font, symbol_font), noindent))
-        labels = ["(क)", "(ख)", "(ग)", "(घ)", "(ङ)", "(च)"]
+        story.append(Paragraph(_pdf_inline_font_markup(_prayer_lead_in(draft), font, latin_font, symbol_font), noindent))
         for idx, item in enumerate(prayer):
-            label = labels[idx] if idx < len(labels) else f"({idx + 1})"
-            story.append(Paragraph(_pdf_inline_font_markup(f"{label} {item}", font, latin_font, symbol_font), ParagraphStyle(f"Prayer{idx}", parent=body, firstLineIndent=0, spaceAfter=10)))
+            story.append(Paragraph(_pdf_inline_font_markup(_format_prayer_clause(item, idx), font, latin_font, symbol_font), ParagraphStyle(f"Prayer{idx}", parent=body, firstLineIndent=0, spaceAfter=10)))
 
     if _layout_break(draft, "page_break_before", "signature_block"):
         story.append(PageBreak())
@@ -735,12 +905,8 @@ class NumberedCanvas(Canvas):
 
 
 def render_pdf_reportlab(draft: dict[str, Any], output_path: str | Path, paper: str = "legal"):
-    """Legacy PDF layout, produced independently of the DOCX by ReportLab.
-
-    Retained only as a fallback for hosts without LibreOffice and for the
-    historical regression tests. Prefer :func:`render_pdf`, which converts the
-    canonical DOCX instead.
-    """
+    """Fallback PDF layout produced by ReportLab with HarfBuzz token-level font safety."""
+    draft = _prepare_draft(draft)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     font, bold_font, latin_font, symbol_font = _register_pdf_fonts()
@@ -776,7 +942,7 @@ def render_pdf_reportlab(draft: dict[str, Any], output_path: str | Path, paper: 
 
 
 def pdf_engine() -> str:
-    """Return the configured PDF engine: ``canonical`` (default) or ``reportlab``."""
+    """Return the configured PDF engine: `canonical` (default) or `reportlab`."""
     engine = (os.getenv("LEGAL_PDF_ENGINE", "canonical") or "canonical").strip().lower()
     return engine if engine in {"canonical", "reportlab"} else "canonical"
 
@@ -802,11 +968,12 @@ def _write_pdf(
     docx_path: str | Path | None = None,
 ) -> Path:
     """Write the PDF, preferring a conversion of the canonical DOCX."""
+    draft = _prepare_draft(draft)
     pdf_path = Path(pdf_path)
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
 
     if pdf_engine() == "reportlab":
-        log.info("LEGAL_PDF_ENGINE=reportlab: using the legacy independent PDF layout.")
+        log.info("LEGAL_PDF_ENGINE=reportlab: using the ReportLab PDF layout.")
         return render_pdf_reportlab(draft, pdf_path, paper=paper)
 
     if not docx_to_pdf.converter_available():
@@ -817,10 +984,8 @@ def _write_pdf(
         if _canonical_pdf_required():
             raise docx_to_pdf.PdfConverterUnavailable(message)
         log.warning(
-            "%s Falling back to the legacy ReportLab layout. That layout is produced "
-            "independently of the DOCX, so pagination may differ and Devanagari text "
-            "extraction is not reliable. Install LibreOffice, or set SOFFICE_BIN to a "
-            "LibreOffice binary, to restore DOCX/PDF parity.",
+            "%s Falling back to the ReportLab layout. Install LibreOffice, or set "
+            "SOFFICE_BIN to a LibreOffice binary, to use DOCX->PDF conversion.",
             message,
         )
         return render_pdf_reportlab(draft, pdf_path, paper=paper)
@@ -828,7 +993,6 @@ def _write_pdf(
     try:
         if docx_path is not None and Path(docx_path).is_file():
             return docx_to_pdf.convert(docx_path, pdf_path)
-        # No canonical DOCX was supplied, so build one solely for conversion.
         with tempfile.TemporaryDirectory(prefix="legal-canonical-") as tmp:
             staged = Path(tmp) / "canonical.docx"
             render_docx(draft, staged, paper=paper)
@@ -837,16 +1001,12 @@ def _write_pdf(
         log.exception("Canonical DOCX->PDF conversion failed")
         if _canonical_pdf_required():
             raise
-        log.warning("Falling back to the legacy ReportLab PDF layout for this document.")
+        log.warning("Falling back to the ReportLab PDF layout for this document.")
         return render_pdf_reportlab(draft, pdf_path, paper=paper)
 
 
 def render_pdf(draft: dict[str, Any], output_path: str | Path, paper: str = "legal"):
-    """Render the PDF for ``draft``.
-
-    The PDF is produced from the canonical DOCX, so the interface is unchanged
-    while the layout source is now shared with :func:`render_docx`.
-    """
+    """Render the PDF for `draft` from the canonical DOCX."""
     return _write_pdf(draft, output_path, paper)
 
 
@@ -865,3 +1025,4 @@ def render_both(
     render_docx(draft, docx_path, paper=paper)
     _write_pdf(draft, pdf_path, paper=paper, docx_path=docx_path)
     return docx_path, pdf_path
+```
