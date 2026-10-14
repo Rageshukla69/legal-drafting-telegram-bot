@@ -1,4 +1,3 @@
-```python
 """Azure AI Document Intelligence v4 REST integration with Microsoft Foundry (gpt-6.0-luna) & Gemini Vision OCR fallback."""
 from __future__ import annotations
 import base64, io, logging, os, time
@@ -245,4 +244,3 @@ def analyze_document_bytes(
         text = "\n".join(chunks).strip()
     pages = analyze.get("pages") or []
     return OCRResult(text=decode_krutidev_hybrid(text), page_count=len(pages) or 1, model_id=model)
-```
