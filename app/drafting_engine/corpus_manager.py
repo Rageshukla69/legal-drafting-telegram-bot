@@ -2,13 +2,12 @@
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 import re
-import shutil
 import zipfile
 from pathlib import Path
-from urllib.request import Request, urlopen
+
+from .krutidev_converter import decode_krutidev_hybrid
 
 CATEGORIES = {
     "01_Vaad_Patra_Dava": "dava",
@@ -24,16 +23,24 @@ CATEGORIES = {
 def _read_docx(path: Path) -> str:
     from docx import Document
     doc = Document(str(path))
-    return "\n".join(p.text.strip() for p in doc.paragraphs if p.text.strip())
+    raw = "\n".join(p.text.strip() for p in doc.paragraphs if p.text.strip())
+    return decode_krutidev_hybrid(raw)
 
 
 def _read_pdf(path: Path) -> str:
     try:
         import fitz
+        doc = fitz.open(str(path))
+        raw = "\n".join(page.get_text("text") for page in doc)
+        return decode_krutidev_hybrid(raw)
     except ImportError:
-        return ""
-    doc = fitz.open(str(path))
-    return "\n".join(page.get_text("text") for page in doc)
+        try:
+            import pypdf
+            reader = pypdf.PdfReader(str(path))
+            raw = "\n".join((p.extract_text() or "") for p in reader.pages)
+            return decode_krutidev_hybrid(raw)
+        except Exception:
+            return ""
 
 
 def extract_text(path: Path) -> str:
@@ -55,7 +62,7 @@ def structural_signals(text: str) -> dict:
             or "शपथपत्र" in line or "आवेदन" in line or "बनाम" == line
         ):
             headings.append(line)
-    numbered = re.findall(r"(?m)^\s*(\d+)(?:\s*\([^\n)]*\))?\s*[:.)-]?\s*", joined)
+    numbered = re.findall(r"(?m)^\s*(\d+)(?:\s*[-–—]?\s*\([^\n)]*\))?\s*[:.)-]?\s*", joined)
     return {
         "line_count": len(lines),
         "numbered_paragraph_count": len(numbered),
@@ -65,7 +72,7 @@ def structural_signals(text: str) -> dict:
         "contains_banam": any(x == "बनाम" for x in lines),
         "contains_prayer": "प्रार्थना" in joined,
         "contains_verification": "सत्यापन" in joined or "सत्यापित" in joined,
-        "contains_advocate": "अधिवक्ता" in joined,
+        "contains_advocate": "अधिवक्ता" in joined or "एडवोकेट" in joined or "एड0" in joined,
     }
 
 
@@ -108,7 +115,7 @@ def build_index(corpus_root: Path) -> dict:
                 "structure": structural_signals(text),
             })
     return {
-        "schema_version": "phase8.0",
+        "schema_version": "phase8.1-clean-unicode",
         "source_rule": "category folders are ground-truth document types",
         "documents": documents,
     }
