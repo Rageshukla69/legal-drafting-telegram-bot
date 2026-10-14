@@ -1,4 +1,3 @@
-```python
 """Deterministic DOCX and PDF renderer for structured legal drafts.
 
 The renderer is deliberately separate from the LLM: the model supplies only
