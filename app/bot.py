@@ -1,9 +1,21 @@
-"""Professional Telegram UI for all seven legal draft types."""
+"""Professional Telegram UI for all seven legal draft types — supports voice, text, and image/PDF typist workflows."""
 from __future__ import annotations
 import asyncio, logging, os, re, tempfile
 from io import BytesIO
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+try:
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+    from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+except ImportError:  # pragma: no cover - allows importing helper functions in minimal test environments
+    class InlineKeyboardButton:
+        def __init__(self, text, callback_data=None):
+            self.text = text
+            self.callback_data = callback_data
+    class InlineKeyboardMarkup:
+        def __init__(self, inline_keyboard):
+            self.inline_keyboard = inline_keyboard
+    class Update:
+        ALL_TYPES = None
+    Application = CallbackQueryHandler = CommandHandler = ContextTypes = MessageHandler = filters = None
 from app.case_store import CaseStore
 from app.access_control import AccessController
 from app.drafting_engine.conversation_state import CaseState, DISPLAY_NAMES, missing_fields, next_questions
@@ -13,94 +25,156 @@ from app.drafting_engine.azure_speech import transcribe_voice
 from app.drafting_engine.gemini_client import GeminiError
 from app.drafting_engine.draft_editor import DraftEditor
 from app.drafting_engine.document_intelligence import analyze_document_bytes, DocumentIntelligenceError
+from app.drafting_engine.krutidev_converter import decode_krutidev_hybrid
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
-log=logging.getLogger("legal-bot")
-store=CaseStore(); access=AccessController(store); orchestrator=MultiDraftOrchestrator(); editor=DraftEditor()
+log = logging.getLogger("legal-bot")
+store = CaseStore()
+access = AccessController(store, allow_unset=True)
+orchestrator = MultiDraftOrchestrator()
+editor = DraftEditor()
 
-TYPE_ORDER=["dava_plaint","written_statement","application","evidence_pw_affidavit","affidavit","legal_notice","other_civil"]
-TYPE_ICONS={"dava_plaint":"📜","written_statement":"📝","application":"📄","evidence_pw_affidavit":"⚖️","affidavit":"📋","legal_notice":"📬","other_civil":"📑"}
+TYPE_ORDER = ["dava_plaint", "written_statement", "application", "evidence_pw_affidavit", "affidavit", "legal_notice", "other_civil"]
+TYPE_ICONS = {"dava_plaint": "📜", "written_statement": "📝", "application": "📄", "evidence_pw_affidavit": "⚖️", "affidavit": "📋", "legal_notice": "📬", "other_civil": "📑"}
 
-def case_id_for(user_id:int)->str: return f"tg-{user_id}-current"
-def get_state(uid:int): return store.get(case_id_for(uid))
+
+def case_id_for(user_id: int) -> str:
+    return f"tg-{user_id}-current"
+
+
+def get_state(uid: int):
+    return store.get(case_id_for(uid))
+
 
 def dashboard():
-    rows=[]
-    for i in range(0,len(TYPE_ORDER),2):
-        row=[]
-        for t in TYPE_ORDER[i:i+2]: row.append(InlineKeyboardButton(f"{TYPE_ICONS[t]} {DISPLAY_NAMES[t].split(' / ')[0]}",callback_data=f"type:{t}"))
+    rows = []
+    for i in range(0, len(TYPE_ORDER), 2):
+        row = []
+        for t in TYPE_ORDER[i:i + 2]:
+            row.append(InlineKeyboardButton(f"{TYPE_ICONS[t]} {DISPLAY_NAMES[t].split(' / ')[0]}", callback_data=f"type:{t}"))
         rows.append(row)
     return InlineKeyboardMarkup(rows)
 
+
 def case_actions(state):
-    rows=[[InlineKeyboardButton("✨ Generate Draft",callback_data="generate"),InlineKeyboardButton("👁 Review",callback_data="review")]]
+    rows = [[InlineKeyboardButton("✨ Generate Draft", callback_data="generate"), InlineKeyboardButton("👁 Review", callback_data="review")]]
     if state.draft:
-        rows.append([InlineKeyboardButton("➕ Add Another Document",callback_data="add_document"), InlineKeyboardButton("✏️ Edit Draft",callback_data="edit_mode")])
+        rows.append([InlineKeyboardButton("➕ Add Another Document", callback_data="add_document"), InlineKeyboardButton("✏️ Edit Draft", callback_data="edit_mode")])
     if len(state.documents) > 1:
-        rows.append([InlineKeyboardButton("📚 Case Documents",callback_data="case_documents")])
+        rows.append([InlineKeyboardButton("📚 Case Documents", callback_data="case_documents")])
     elif state.documents:
-        rows.append([InlineKeyboardButton("➕ Add Another Document",callback_data="add_document")])
-    rows.append([InlineKeyboardButton("🗑 Cancel",callback_data="cancel")])
+        rows.append([InlineKeyboardButton("➕ Add Another Document", callback_data="add_document")])
+    rows.append([InlineKeyboardButton("🗑 Cancel", callback_data="cancel")])
     return InlineKeyboardMarkup(rows)
+
 
 def document_menu():
-    rows=[]
-    for i in range(0,len(TYPE_ORDER),2):
-        rows.append([InlineKeyboardButton(f"{TYPE_ICONS[t]} {DISPLAY_NAMES[t].split(' / ')[0]}",callback_data=f"addtype:{t}") for t in TYPE_ORDER[i:i+2]])
-    rows.append([InlineKeyboardButton("↩️ Keep Current Document",callback_data="review")])
+    rows = []
+    for i in range(0, len(TYPE_ORDER), 2):
+        rows.append([InlineKeyboardButton(f"{TYPE_ICONS[t]} {DISPLAY_NAMES[t].split(' / ')[0]}", callback_data=f"addtype:{t}") for t in TYPE_ORDER[i:i + 2]])
+    rows.append([InlineKeyboardButton("↩️ Keep Current Document", callback_data="review")])
     return InlineKeyboardMarkup(rows)
 
+
 def existing_documents_menu(state):
-    rows=[]
+    rows = []
     for item in state.documents[-20:][::-1]:
-        did=str(item.get("document_id", ""))
-        typ=str(item.get("document_type", ""))
-        if not did or typ not in DISPLAY_NAMES: continue
-        marker="✅ " if did == state.active_document_id else ""
-        rows.append([InlineKeyboardButton(f"{marker}{DISPLAY_NAMES[typ]}",callback_data=f"doc:{did}")])
-    rows.append([InlineKeyboardButton("➕ Add Another Document",callback_data="add_document")])
+        did = str(item.get("document_id", ""))
+        typ = str(item.get("document_type", ""))
+        if not did or typ not in DISPLAY_NAMES:
+            continue
+        marker = "✅ " if did == state.active_document_id else ""
+        rows.append([InlineKeyboardButton(f"{marker}{DISPLAY_NAMES[typ]}", callback_data=f"doc:{did}")])
+    rows.append([InlineKeyboardButton("➕ Add Another Document", callback_data="add_document")])
     return InlineKeyboardMarkup(rows)
+
+
+_TYPE_KEYWORDS = {
+    "written_statement": ("written statement", "लिखित कथन", "जवाब दावा", "जवाब-दावा", "प्रतिवादपत्र", "प्रतिवाद पत्र", "लिखित बयान"),
+    "application": ("application", "प्रार्थना पत्र", "प्रार्थना-पत्र", "प्रार्थनापत्र", "आवेदन", "कमीशन", "6ग", "संशोधन"),
+    "evidence_pw_affidavit": ("evidence affidavit", "pw affidavit", "साक्ष्य शपथपत्र", "साक्ष्य का शपथपत्र", "बयान चीफ", "पी डब्लू", "डी डब्लू", "pw-1", "dw-1"),
+    "affidavit": ("affidavit", "शपथपत्र", "हलफनामा", "शपथ पत्र"),
+    "legal_notice": ("legal notice", "कानूनी नोटिस", "विधिक नोटिस", "रजिस्टर्ड नोटिस"),
+    "other_civil": ("other civil", "अन्य सिविल", "सिविल ड्राफ्ट", "कैवियट", "केवियट", "caveat", "तलाशपता"),
+    "dava_plaint": ("dava", "दावा", "वाद पत्र", "वाद-पत्र", "वादपत्र", "plaint", "plaintiff suit", "स्थायी निषेधाज्ञा"),
+}
+
+
+def infer_document_type(text: str, default: str = "dava_plaint") -> str:
+    """Infer document type from natural-language Hindi/English dictation or OCR text."""
+    low = re.sub(r"\s+", " ", str(text or "").strip().casefold())
+    if not low:
+        return default
+    for typ, markers in _TYPE_KEYWORDS.items():
+        if any(m in low for m in markers):
+            return typ
+    return default
+
 
 def detect_additional_document_type(text: str):
     """Detect an explicit request to create another document while a draft exists."""
-    low=re.sub(r"\s+", " ", str(text or "").strip().casefold())
-    if not low: return None
-    create_markers=("बना", "बनाओ", "बना दो", "तैयार", "तैयार कर", "ड्राफ्ट", "create", "generate", "draft", "make", "prepare", "चाहिए")
-    if not any(x in low for x in create_markers): return None
-    mapping={
-        "written_statement": ("written statement", "लिखित कथन", "जवाब दावा", "जवाब-दावा", "लिखित बयान"),
-        "application": ("application", "प्रार्थना पत्र", "प्रार्थना-पत्र", "आवेदन"),
-        "evidence_pw_affidavit": ("evidence affidavit", "pw affidavit", "साक्ष्य शपथपत्र", "साक्ष्य का शपथपत्र"),
-        "affidavit": ("affidavit", "शपथपत्र", "हलफनामा", "शपथ पत्र"),
-        "legal_notice": ("legal notice", "legal notice", "कानूनी नोटिस", "विधिक नोटिस"),
-        "other_civil": ("other civil", "अन्य सिविल", "सिविल ड्राफ्ट"),
-        "dava_plaint": ("dava", "दावा", "वाद पत्र", "वाद-पत्र", "plaint", "plaintiff suit"),
-    }
-    for typ, markers in mapping.items():
-        if any(m in low for m in markers): return typ
+    low = re.sub(r"\s+", " ", str(text or "").strip().casefold())
+    if not low:
+        return None
+    create_markers = ("बना", "बनाओ", "बना दो", "तैयार", "तैयार कर", "ड्राफ्ट", "create", "generate", "draft", "make", "prepare", "चाहिए")
+    if not any(x in low for x in create_markers):
+        return None
+    for typ, markers in _TYPE_KEYWORDS.items():
+        if any(m in low for m in markers):
+            return typ
     return None
 
+
+def detect_edit_intent(text: str) -> bool:
+    """Detect when a user message/voice note is a correction instruction for an already-generated draft."""
+    low = re.sub(r"\s+", " ", str(text or "").strip().casefold())
+    if not low:
+        return False
+    edit_markers = (
+        "बदल", "बदलो", "कर दो", "करो", "हटा", "हटाओ", "जोड़", "जोड़ो", "संशोधन", "सुधार",
+        "की जगह", "के स्थान पर", "पैराग्राफ", "धारा", "प्रार्थना में", "सत्यापन में", "शीर्षक में",
+        "दूसरे पेज", "अगले पेज", "नए पेज", "replace", "change", "edit", "delete", "remove",
+        "insert", "add", "correct", "update", "next page", "page 2",
+    )
+    return any(m in low for m in edit_markers)
+
+
 def edit_actions():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("✅ Apply Change",callback_data="edit_apply"),InlineKeyboardButton("❌ Discard",callback_data="edit_discard")]])
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Apply Change", callback_data="edit_apply"), InlineKeyboardButton("❌ Discard", callback_data="edit_discard")]
+    ])
+
 
 def progress(state):
-    missing=missing_fields(state.facts,state.document_type)
-    total=len(missing_fields({},state.document_type)); done=max(0,total-len(missing)); pct=int(done/total*100) if total else 100
-    filled="█"*max(1,pct//10); empty="░"*(10-len(filled))
+    missing = missing_fields(state.facts, state.document_type)
+    total = len(missing_fields({}, state.document_type))
+    done = max(0, total - len(missing))
+    pct = int(done / total * 100) if total else 100
+    filled = "█" * max(1, pct // 10)
+    empty = "░" * (10 - len(filled))
     return f"{filled}{empty} {pct}%"
 
+
 def questions_text(state):
-    qs=next_questions(state.facts,state.document_type)
-    if not qs: return "सारी आवश्यक जानकारी मिल गई है।"
-    return "अभी इन जानकारी की आवश्यकता है:\n\n"+"\n".join(f"• {label}" for _,label in qs)+"\n\nआप एक message में एक या कई उत्तर भेज सकते हैं।"
+    qs = next_questions(state.facts, state.document_type)
+    if not qs:
+        return "सारी आवश्यक जानकारी मिल गई है।"
+    return "अभी इन जानकारी की आवश्यकता है:\n\n" + "\n".join(f"• {label}" for _, label in qs) + "\n\nआप बोलकर (Voice Note), लिखकर या फोटो भेजकर एक साथ उत्तर दे सकते हैं।"
+
 
 def summary_text(state):
-    facts=state.facts
+    facts = state.facts
+
     def val(k):
-        v=facts.get(k,"—"); return "\n".join(f"• {x}" for x in v) if isinstance(v,list) else str(v)
-    return (f"⚖️ *{DISPLAY_NAMES[state.document_type]}*\n\n*Progress:* {progress(state)}\n\n"
-            f"*न्यायालय:* {val('court_name')}\n*पक्षकार:* {val('parties') or val('plaintiffs')}\n"
-            f"*मुख्य तथ्य:* {val('facts')}\n*राहत/मांग:* {val('reliefs') if facts.get('reliefs') else val('demands')}\n")
+        v = facts.get(k, "—")
+        return "\n".join(f"• {x}" for x in v) if isinstance(v, list) else str(v)
+
+    return (
+        f"⚖️ *{DISPLAY_NAMES[state.document_type]}*\n\n*Progress:* {progress(state)}\n\n"
+        f"*न्यायालय:* {val('court_name')}\n*पक्षकार:* {val('parties') or val('plaintiffs')}\n"
+        f"*मुख्य तथ्य:* {val('facts')}\n*राहत/मांग:* {val('reliefs') if facts.get('reliefs') else val('demands')}\n"
+    )
+
 
 async def deny(update):
     if update.message:
@@ -111,6 +185,7 @@ async def deny(update):
             parse_mode="Markdown",
         )
 
+
 async def require_access(update) -> bool:
     user = update.effective_user
     if not user or not access.is_authorized(user.id):
@@ -118,10 +193,12 @@ async def require_access(update) -> bool:
         return False
     return True
 
+
 async def myid(update, context):
     if not update.message or not update.effective_user:
         return
     await update.message.reply_text(f"🆔 आपका Telegram User ID है: `{update.effective_user.id}`", parse_mode="Markdown")
+
 
 async def authorize(update, context):
     if not update.message or not update.effective_user:
@@ -138,6 +215,7 @@ async def authorize(update, context):
         return
     access.authorize(target, update.effective_user.id)
     await update.message.reply_text(f"✅ User `{target}` को authorize कर दिया गया है।", parse_mode="Markdown")
+
 
 async def unauthorize(update, context):
     if not update.message or not update.effective_user:
@@ -158,6 +236,7 @@ async def unauthorize(update, context):
         parse_mode="Markdown",
     )
 
+
 async def authorized(update, context):
     if not update.message or not update.effective_user:
         return
@@ -165,137 +244,194 @@ async def authorized(update, context):
         await deny(update)
         return
     users = access.authorized_users()
-    lines = [f"👑 Owner: `{access.owner_id}`", "", "*Authorized users:*" ]
+    lines = [f"👑 Owner: `{access.owner_id}`", "", "*Authorized users:*"]
     lines.extend(f"• `{u['user_id']}`" for u in users)
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-async def start(update,context):
-    if not update.message:return
-    if not await require_access(update): return
-    await update.message.reply_text("⚖️ *LEGAL DRAFTING WORKSPACE*\n\nसात प्रकार के legal drafts तैयार करें। नीचे document type चुनें।",parse_mode="Markdown",reply_markup=dashboard())
 
-async def newcase(update,context):
-    if not update.message or not update.effective_user:return
-    if not await require_access(update): return
-    await update.message.reply_text("⚖️ *नया Legal Draft*\n\nपहले document type चुनें:",parse_mode="Markdown",reply_markup=dashboard())
+async def start(update, context):
+    if not update.message:
+        return
+    if not await require_access(update):
+        return
+    await update.message.reply_text(
+        "⚖️ *LEGAL DRAFTING WORKSPACE*\n\n"
+        "सात प्रकार के legal drafts तैयार करें। नीचे document type चुनें, या सीधे Voice Note / Photo / Text भेजकर केस बोलना शुरू करें (जैसे टाइपिस्ट को बोलकर लिखवाते हैं)।",
+        parse_mode="Markdown",
+        reply_markup=dashboard(),
+    )
 
-async def cancel(update,context):
-    if not update.message or not update.effective_user:return
-    if not await require_access(update): return
-    store.delete(case_id_for(update.effective_user.id)); await update.message.reply_text("✅ Current draft session बंद कर दी गई है। /newcase से नया draft शुरू करें।")
 
-async def summary(update,context):
-    if not update.message or not update.effective_user:return
-    if not await require_access(update): return
-    state=get_state(update.effective_user.id)
-    if not state: await update.message.reply_text("कोई active draft नहीं है। /newcase दबाएँ।"); return
-    await update.message.reply_text(summary_text(state),parse_mode="Markdown",reply_markup=case_actions(state))
+async def newcase(update, context):
+    if not update.message or not update.effective_user:
+        return
+    if not await require_access(update):
+        return
+    await update.message.reply_text("⚖️ *नया Legal Draft*\n\nपहले document type चुनें (या सीधे बोलकर/लिखकर भेजें):", parse_mode="Markdown", reply_markup=dashboard())
 
-async def intake_text(update,context,text=None, *, suppress_questions=False, announce=True):
-    if not update.effective_user:return
-    if not access.is_authorized(update.effective_user.id):
-        await deny(update); return
-    text=(text or update.message.text).strip(); state=get_state(update.effective_user.id)
+
+async def cancel(update, context):
+    if not update.message or not update.effective_user:
+        return
+    if not await require_access(update):
+        return
+    store.delete(case_id_for(update.effective_user.id))
+    await update.message.reply_text("✅ Current draft session बंद कर दी गई है। /newcase से नया draft शुरू करें।")
+
+
+async def summary(update, context):
+    if not update.message or not update.effective_user:
+        return
+    if not await require_access(update):
+        return
+    state = get_state(update.effective_user.id)
     if not state:
-        await update.message.reply_text("पहले /newcase दबाकर document type चुनें।",reply_markup=dashboard()); return
-    state.record("user",text)
+        await update.message.reply_text("कोई active draft नहीं है। /newcase दबाएँ।")
+        return
+    await update.message.reply_text(summary_text(state), parse_mode="Markdown", reply_markup=case_actions(state))
+
+
+async def intake_text(update, context, text=None, *, suppress_questions=False, announce=True):
+    if not update.effective_user:
+        return
+    if not access.is_authorized(update.effective_user.id):
+        await deny(update)
+        return
+    uid = update.effective_user.id
+    text = decode_krutidev_hybrid((text or update.message.text or "").strip())
+    state = get_state(uid)
+    if not state:
+        # Auto-create CaseState when the advocate starts dictating or typing directly without clicking /newcase first
+        inferred_type = infer_document_type(text, default="dava_plaint")
+        state = CaseState(case_id_for(uid), document_type=inferred_type)
+        store.save(uid, state)
+    state.record("user", text)
     if announce:
-        await update.message.reply_text(f"⏳ {DISPLAY_NAMES[state.document_type]} के लिए जानकारी अर्थ के आधार पर समझी जा रही है…")
+        await update.message.reply_text(f"⏳ {DISPLAY_NAMES[state.document_type]} के लिए जानकारी समझी जा रही है…")
     try:
-        result=await asyncio.to_thread(orchestrator.extract_and_collect,state,text); store.save(update.effective_user.id,state)
-    except Exception as exc:
-        log.exception("Intake failed"); await update.message.reply_text("❌ जानकारी process नहीं हो सकी। कृपया दोबारा भेजें।"); return
+        result = await asyncio.to_thread(orchestrator.extract_and_collect, state, text)
+        store.save(uid, state)
+    except Exception:
+        log.exception("Intake failed")
+        await update.message.reply_text("❌ जानकारी process नहीं हो सकी। कृपया दोबारा भेजें।")
+        return
     if suppress_questions:
         return result
-    if result["status"]=="needs_information":
-        await update.message.reply_text(f"{questions_text(state)}\n\nProgress: {progress(state)}",reply_markup=case_actions(state)); return result
-    await update.message.reply_text(f"✅ आवश्यक जानकारी मिल गई।\n\n{summary_text(state)}",parse_mode="Markdown",reply_markup=case_actions(state)); return result
+    if result["status"] == "needs_information":
+        await update.message.reply_text(f"{questions_text(state)}\n\nProgress: {progress(state)}", reply_markup=case_actions(state))
+        return result
+    await update.message.reply_text(f"✅ आवश्यक जानकारी मिल गई।\n\n{summary_text(state)}", parse_mode="Markdown", reply_markup=case_actions(state))
+    return result
+
 
 async def start_additional_document(update, context, document_type: str):
-    uid=update.effective_user.id
-    state=get_state(uid)
+    uid = update.effective_user.id
+    state = get_state(uid)
     if not state or not state.facts:
-        await update.message.reply_text("पहले एक case तैयार करें, फिर उसमें दूसरा document जोड़ें।",reply_markup=dashboard())
+        await update.message.reply_text("पहले एक case तैयार करें, फिर उसमें दूसरा document जोड़ें।", reply_markup=dashboard())
         return
     if state.document_type == document_type and state.draft:
-        await update.message.reply_text("यह document type अभी active है। अलग document बनाने के लिए कोई दूसरा type चुनें।",reply_markup=document_menu())
+        await update.message.reply_text("यह document type अभी active है। अलग document बनाने के लिए कोई दूसरा type चुनें।", reply_markup=document_menu())
         return
     state.begin_new_document(document_type)
     try:
-        await asyncio.to_thread(orchestrator.refresh_intake,state)
-        store.save(uid,state)
+        await asyncio.to_thread(orchestrator.refresh_intake, state)
+        store.save(uid, state)
     except Exception:
         log.exception("additional document intake reconciliation failed")
-    missing=missing_fields(state.facts,document_type)
+    missing = missing_fields(state.facts, document_type)
     if missing:
-        msg=(f"➕ *{DISPLAY_NAMES[document_type]}*\n\n"
-             "यह document इसी existing case के facts से बनाया जाएगा।\n\n"
-             f"{questions_text(state)}")
-        await update.message.reply_text(msg,parse_mode="Markdown",reply_markup=case_actions(state))
+        msg = (
+            f"➕ *{DISPLAY_NAMES[document_type]}*\n\n"
+            "यह document इसी existing case के facts से बनाया जाएगा।\n\n"
+            f"{questions_text(state)}"
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=case_actions(state))
         return
     await update.message.reply_text(f"➕ {DISPLAY_NAMES[document_type]} इसी case की जानकारी से तैयार किया जा रहा है…")
-    await generate_for(update,uid,state,edit=False)
+    await generate_for(update, uid, state, edit=False)
+
 
 async def add_document_command(update, context):
-    if not await require_access(update): return
-    state=get_state(update.effective_user.id)
-    if not state or not state.facts:
-        await update.message.reply_text("पहले /newcase से एक case तैयार करें।",reply_markup=dashboard()); return
-    await update.message.reply_text("➕ इसी case में अगला document type चुनें:",reply_markup=document_menu())
-
-async def text_message(update,context):
-    if not update.effective_user: return
-    state=get_state(update.effective_user.id)
-    if state and state.edit_mode and state.draft:
-        await edit_text_message(update,context)
+    if not await require_access(update):
         return
-    # After a document is generated, an explicit natural-language request such as
-    # “इस दावे का affidavit बना दो” starts a second document in the same case.
-    if state and state.draft:
-        requested_type=detect_additional_document_type(update.message.text or "")
-        if requested_type:
-            await start_additional_document(update,context,requested_type)
-            return
-    await intake_text(update,context)
+    state = get_state(update.effective_user.id)
+    if not state or not state.facts:
+        await update.message.reply_text("पहले /newcase से एक case तैयार करें।", reply_markup=dashboard())
+        return
+    await update.message.reply_text("➕ इसी case में अगला document type चुनें:", reply_markup=document_menu())
 
-async def voice_message(update,context):
-    if not update.message or not update.message.voice or not update.effective_user:return
-    if not await require_access(update): return
-    state=get_state(update.effective_user.id)
+
+async def text_message(update, context):
+    if not update.effective_user:
+        return
+    uid = update.effective_user.id
+    raw_text = update.message.text or ""
+    state = get_state(uid)
     if state and state.edit_mode and state.draft:
-        await edit_voice_message(update,context); return
-    if not state: await update.message.reply_text("पहले /newcase से document type चुनें।",reply_markup=dashboard()); return
-    await update.message.reply_text("🎙️ Voice note मिला। Transcript तैयार किया जा रहा है…")
-    try:
-        f=await context.bot.get_file(update.message.voice.file_id); buf=BytesIO(); await f.download_to_memory(out=buf)
-        transcript=await asyncio.to_thread(transcribe_voice,buf.getvalue(),"telegram_voice.ogg")
-        await update.message.reply_text("📝 Transcript तैयार है। अब legal instruction समझा जा रहा है…")
-        state=get_state(update.effective_user.id)
-        if state and state.draft:
-            requested_type=detect_additional_document_type(transcript)
-            if requested_type:
-                await start_additional_document(update,context,requested_type)
-                return
-        await intake_text(update,context,transcript)
-    except Exception: log.exception("voice failed"); await update.message.reply_text("❌ Voice note process नहीं हो सका।")
+        await edit_text_message(update, context)
+        return
+    if state and state.draft:
+        requested_type = detect_additional_document_type(raw_text)
+        if requested_type:
+            await start_additional_document(update, context, requested_type)
+            return
+        # If a draft already exists and the lawyer sends a correction instruction, route directly to DraftEditor
+        if detect_edit_intent(raw_text):
+            state.edit_mode = True
+            store.save(uid, state)
+            await process_edit_instruction(update, context, raw_text)
+            return
+    await intake_text(update, context)
 
-async def image_document_message(update, context):
-    """OCR a Telegram photo/image/PDF with Azure Document Intelligence, then
-    feed the extracted text into the existing conservative Gemini intake path.
-    Voice remains on the existing Azure Speech path and is not changed here.
-    """
-    if not update.message or not update.effective_user:
+
+async def voice_message(update, context):
+    if not update.message or not update.message.voice or not update.effective_user:
         return
     if not await require_access(update):
         return
     uid = update.effective_user.id
     state = get_state(uid)
-    if not state:
-        await update.message.reply_text(
-            "पहले /newcase दबाकर document type चुनें। फिर legal document की photo/image भेजें।",
-            reply_markup=dashboard(),
-        )
+    if state and state.edit_mode and state.draft:
+        await edit_voice_message(update, context)
         return
+    await update.message.reply_text("🎙️ Voice note मिला। Transcript तैयार किया जा रहा है…")
+    try:
+        f = await context.bot.get_file(update.message.voice.file_id)
+        buf = BytesIO()
+        await f.download_to_memory(out=buf)
+        transcript = await asyncio.to_thread(transcribe_voice, buf.getvalue(), "telegram_voice.ogg")
+        await update.message.reply_text(f"📝 *Transcript:*\n{transcript[:3500]}", parse_mode="Markdown")
+        state = get_state(uid)
+        if state and state.draft:
+            requested_type = detect_additional_document_type(transcript)
+            if requested_type:
+                await start_additional_document(update, context, requested_type)
+                return
+            if detect_edit_intent(transcript):
+                state.edit_mode = True
+                store.save(uid, state)
+                await process_edit_instruction(update, context, transcript)
+                return
+        await intake_text(update, context, transcript)
+    except Exception:
+        log.exception("voice failed")
+        await update.message.reply_text("❌ Voice note process नहीं हो सका।")
+
+
+async def image_document_message(update, context):
+    """OCR a Telegram photo/image/PDF and feed extracted text + caption into semantic intake."""
+    if not update.message or not update.effective_user:
+        return
+    if not await require_access(update):
+        return
+    uid = update.effective_user.id
+    caption = (update.message.caption or "").strip()
+    state = get_state(uid)
+    if not state:
+        inferred = infer_document_type(caption, default="dava_plaint")
+        state = CaseState(case_id_for(uid), document_type=inferred)
+        store.save(uid, state)
 
     file_bytes = None
     content_type = None
@@ -343,16 +479,25 @@ async def image_document_message(update, context):
             return
 
         await update.message.reply_text(
-            "📸 Document मिला। Azure Document Intelligence के `prebuilt-layout` model से OCR और document structure निकाली जा रही है…"
+            "📸 Document मिला। OCR और document structure निकाली जा रही है…"
         )
         extracted = await asyncio.to_thread(
             analyze_document_bytes, file_bytes, content_type, filename
         )
         text = extracted.text.strip()
+        if caption:
+            text = f"{caption}\n\n{text}".strip()
         if not text:
             await update.message.reply_text(
                 "⚠️ Document से readable text नहीं मिला। कृपया साफ़/सीधी photo या बेहतर scan भेजें।"
             )
+            return
+
+        # If a draft already exists and the user sent a screenshot/image with an edit instruction in the caption
+        if state.draft and (state.edit_mode or (caption and detect_edit_intent(caption))):
+            state.edit_mode = True
+            store.save(uid, state)
+            await process_edit_instruction(update, context, caption or text)
             return
 
         page_count = extracted.page_count
@@ -368,20 +513,15 @@ async def image_document_message(update, context):
                 f"✅ OCR पूरा हुआ — {page_count} pages, {len(text)} characters.\n"
                 f"📚 Large document है, इसलिए Gemini intake को {len(chunks)} safe chunks में process किया जाएगा।"
             )
-        # Reuse the same Gemini intake path used by typed/voice input. Large
-        # OCR results are chunked so a long scanned file cannot overwhelm one
-        # Gemini request; CaseState merges facts across all chunks.
-        # Feed all OCR chunks into the same persistent CaseState. Do not ask for
-        # missing fields between chunks; the document may describe a field on a later page.
         for index, chunk in enumerate(chunks, 1):
             if len(chunks) > 1 and index in {1, len(chunks)}:
                 await update.message.reply_text(f"🧠 OCR semantic extraction {index}/{len(chunks)}…")
             await intake_text(update, context, chunk, suppress_questions=True, announce=False)
-        state=get_state(uid)
-        if state and not missing_fields(state.facts,state.document_type):
-            await update.message.reply_text(f"✅ पूरे document से आवश्यक case facts समझ लिए गए।\n\n{summary_text(state)}",parse_mode="Markdown",reply_markup=case_actions(state))
+        state = get_state(uid)
+        if state and not missing_fields(state.facts, state.document_type):
+            await update.message.reply_text(f"✅ पूरे document से आवश्यक case facts समझ लिए गए।\n\n{summary_text(state)}", parse_mode="Markdown", reply_markup=case_actions(state))
         else:
-            await update.message.reply_text(f"📋 OCR/semantic extraction पूरा हुआ। अभी केवल वास्तव में न मिली जानकारी पूछी जाएगी:\n\n{questions_text(state)}\n\nProgress: {progress(state)}",reply_markup=case_actions(state))
+            await update.message.reply_text(f"📋 OCR/semantic extraction पूरा हुआ। अभी केवल वास्तव में न मिली जानकारी पूछी जाएगी:\n\n{questions_text(state)}\n\nProgress: {progress(state)}", reply_markup=case_actions(state))
     except DocumentIntelligenceError as exc:
         log.exception("Document Intelligence failed")
         await update.message.reply_text(
@@ -393,191 +533,297 @@ async def image_document_message(update, context):
             "❌ Image/document process नहीं हो सका। कृपया साफ़ image/PDF दोबारा भेजें।"
         )
 
-async def generate_for(update,uid,state,edit=False):
-    target=update.callback_query.message if update.callback_query else update.message
-    if edit: await update.callback_query.edit_message_text(f"⚖️ *{DISPLAY_NAMES[state.document_type]}*\n\n⏳ Draft तैयार किया जा रहा है…\n\n1/4 Case verified\n2/4 Advocate examples selected\n3/4 Drafting & validation\n4/4 DOCX/PDF rendering",parse_mode="Markdown")
-    else: await target.reply_text("⏳ Draft तैयार किया जा रहा है…")
+
+async def generate_for(update, uid, state, edit=False):
+    target = update.callback_query.message if update.callback_query else update.message
+    if edit:
+        await update.callback_query.edit_message_text(
+            f"⚖️ *{DISPLAY_NAMES[state.document_type]}*\n\n⏳ Draft तैयार किया जा रहा है…\n\n"
+            "1/4 Case verified\n2/4 Advocate 306-corpus examples selected\n3/4 Drafting & validation\n4/4 Canonical DOCX & PDF rendering",
+            parse_mode="Markdown",
+        )
+    else:
+        await target.reply_text("⏳ Draft तैयार किया जा रहा है…")
     try:
-        draft=await asyncio.to_thread(orchestrator.draft_live,state)
-        # Persist the structured draft in CaseState before rendering so the
-        # post-draft editor can operate on the exact generated draft.
+        draft = await asyncio.to_thread(orchestrator.draft_live, state)
         state.set_draft(draft)
         with tempfile.TemporaryDirectory() as tmp:
-            label=DISPLAY_NAMES[state.document_type].split(" /")[0].replace(" ","_")
-            docx,pdf=render_both(draft,tmp,base_name=f"{label}_{uid}",paper=os.getenv("LEGAL_PAPER","legal"))
-            with open(docx,"rb") as f: await target.reply_document(f,filename=docx.name,caption=f"📄 Editable DOCX — {DISPLAY_NAMES[state.document_type]}")
-            with open(pdf,"rb") as f: await target.reply_document(f,filename=pdf.name,caption=f"📑 PDF — {DISPLAY_NAMES[state.document_type]}")
-        store.save(uid,state); await target.reply_text("✅ Draft तैयार है। आप ✏️ Edit Draft दबाकर text/voice instruction से targeted बदलाव कर सकते हैं। बाकी सामग्री जस की तस रहेगी।",reply_markup=case_actions(state))
+            label = DISPLAY_NAMES[state.document_type].split(" /")[0].replace(" ", "_")
+            docx, pdf = render_both(draft, tmp, base_name=f"{label}_{uid}", paper=os.getenv("LEGAL_PAPER", "legal"))
+            with open(docx, "rb") as f:
+                await target.reply_document(f, filename=docx.name, caption=f"📄 Editable DOCX — {DISPLAY_NAMES[state.document_type]}")
+            with open(pdf, "rb") as f:
+                await target.reply_document(f, filename=pdf.name, caption=f"📑 PDF — {DISPLAY_NAMES[state.document_type]}")
+        store.save(uid, state)
+        await target.reply_text(
+            "✅ Draft तैयार है। आप सीधे बोलकर (Voice Note), लिखकर या ✏️ Edit Draft दबाकर कोई भी संशोधन/बदलाव करवा सकते हैं।",
+            reply_markup=case_actions(state),
+        )
     except Exception as exc:
         log.exception("generation failed")
-        msg="⏳ AI service अभी व्यस्त है। थोड़ी देर बाद फिर कोशिश करें।" if isinstance(exc,GeminiError) and exc.retryable else f"❌ Draft तैयार नहीं हो सका: {str(exc)[:500]}"
+        msg = "⏳ AI service अभी व्यस्त है। थोड़ी देर बाद फिर कोशिश करें।" if isinstance(exc, GeminiError) and exc.retryable else f"❌ Draft तैयार नहीं हो सका: {str(exc)[:500]}"
         await target.reply_text(msg)
 
+
 async def enter_edit_mode(update, context):
-    if not update.message or not update.effective_user: return
-    if not await require_access(update): return
-    state=get_state(update.effective_user.id)
+    if not update.message or not update.effective_user:
+        return
+    if not await require_access(update):
+        return
+    state = get_state(update.effective_user.id)
     if not state or not state.draft:
         await update.message.reply_text("अभी कोई generated draft उपलब्ध नहीं है। पहले draft generate करें।")
         return
-    state.edit_mode=True; state.pending_edit={}; store.save(update.effective_user.id,state)
+    state.edit_mode = True
+    state.pending_edit = {}
+    store.save(update.effective_user.id, state)
     await update.message.reply_text(
         "✏️ *DRAFT EDIT MODE*\n\n"
-        "अपना exact बदलाव Hindi/English में लिखें या voice note भेजें।\n\n"
+        "अपना बदलाव Hindi/English में लिखें या Voice Note भेजें (जैसे टाइपिस्ट को संशोधन बताते हैं)।\n\n"
         "उदाहरण:\n"
         "• `पैराग्राफ 3 में 15.06.2026 की जगह 20.06.2026 कर दो।`\n"
-        "• `पैराग्राफ 5 की यह लाइन हटा दो: ...`\n"
+        "• `पूरे ड्राफ्ट में गाटा संख्या 214 की जगह 215 कर दो।`\n"
         "• `पैराग्राफ 4 के बाद यह वाक्य जोड़ दो: ...`\n"
-        "• `प्रार्थना को दूसरे पेज पर ले जाओ।`\n"
-        "• `सत्यापन नए पेज से शुरू करो।`\n\n"
-        "AI केवल एक targeted change प्रस्तावित करेगा। Text edit के अलावा page-layout बदलाव भी preview के बाद apply होंगे।",
+        "• `प्रार्थना को दूसरे पेज पर ले जाओ।`\n\n"
+        "AI केवल वही बदलाव करेगा और बाकी ड्राफ्ट जस का तस रहेगा।",
         parse_mode="Markdown",
     )
+
 
 async def edit_command(update, context):
     await enter_edit_mode(update, context)
 
+
 async def process_edit_instruction(update, context, instruction: str):
-    uid=update.effective_user.id
-    if not access.is_authorized(uid): await deny(update); return
-    state=get_state(uid)
+    uid = update.effective_user.id
+    if not access.is_authorized(uid):
+        await deny(update)
+        return
+    state = get_state(uid)
     if not state or not state.draft:
-        await update.message.reply_text("कोई generated draft उपलब्ध नहीं है। पहले draft generate करें।"); return
-    if not state.edit_mode:
-        await update.message.reply_text("Draft edit करने के लिए पहले /summary में जाकर ✏️ Edit Draft दबाएँ।"); return
-    instruction=instruction.strip()
-    if not instruction: return
-    await update.message.reply_text("🔎 आपके edit instruction का exact target खोजा जा रहा है…")
+        await update.message.reply_text("कोई generated draft उपलब्ध नहीं है। पहले draft generate करें।")
+        return
+    instruction = decode_krutidev_hybrid(instruction.strip())
+    if not instruction:
+        return
+    state.edit_mode = True
+    await update.message.reply_text("🔎 आपके संशोधन निर्देश का exact target खोजा जा रहा है…")
     try:
-        edit=await asyncio.to_thread(editor.parse,state.draft,instruction)
-        if not edit.get("old_text") and edit.get("operation") in {"replace","delete","insert_before","insert_after"}:
-            await update.message.reply_text("⚠️ यह बदलाव पर्याप्त स्पष्ट नहीं है। कृपया paragraph/section और बदलने वाला exact text बताएं।")
+        edit = await asyncio.to_thread(editor.parse, state.draft, instruction)
+        if not edit.get("old_text") and edit.get("operation") in {"replace", "replace_all", "delete"}:
+            await update.message.reply_text("⚠️ यह बदलाव पर्याप्त स्पष्ट नहीं है। कृपया पैराग्राफ/सेक्शन और बदलने वाला शब्द स्पष्ट बताएं।")
             return
-        candidate, _ = await asyncio.to_thread(editor.apply,state.draft,edit)
-        state.pending_edit={"edit":edit,"candidate":candidate,"instruction":instruction}
-        store.save(uid,state)
-        preview=editor.describe(edit)
-        await update.message.reply_text("🔎 Proposed change\n\n"+preview+"\n\nकेवल यही targeted change लागू होगा; बाकी structured draft बदला नहीं जाएगा।",reply_markup=edit_actions())
+        candidate, _ = await asyncio.to_thread(editor.apply, state.draft, edit)
+        state.pending_edit = {"edit": edit, "candidate": candidate, "instruction": instruction}
+        store.save(uid, state)
+        preview = editor.describe(edit)
+        await update.message.reply_text(
+            "🔎 Proposed change\n\n" + preview + "\n\nकेवल यही targeted change लागू होगा; बाकी structured draft बदला नहीं जाएगा।",
+            reply_markup=edit_actions(),
+        )
     except Exception as exc:
         log.exception("edit parse/apply failed")
         await update.message.reply_text(f"⚠️ बदलाव apply करने योग्य exact target नहीं मिला। कोई बदलाव नहीं किया गया।\n\n{str(exc)[:400]}")
 
+
 async def edit_text_message(update, context):
-    await process_edit_instruction(update,context,update.message.text)
+    await process_edit_instruction(update, context, update.message.text)
+
 
 async def edit_voice_message(update, context):
-    if not update.message or not update.message.voice or not update.effective_user:return
-    if not await require_access(update): return
-    state=get_state(update.effective_user.id)
-    if not state or not state.draft or not state.edit_mode:
-        await update.message.reply_text("पहले generated draft में ✏️ Edit Draft mode शुरू करें।"); return
+    if not update.message or not update.message.voice or not update.effective_user:
+        return
+    if not await require_access(update):
+        return
+    state = get_state(update.effective_user.id)
+    if not state or not state.draft:
+        await update.message.reply_text("पहले एक draft तैयार करें।")
+        return
     await update.message.reply_text("🎙️ Voice edit मिला। Transcript तैयार किया जा रहा है…")
     try:
-        f=await context.bot.get_file(update.message.voice.file_id); buf=BytesIO(); await f.download_to_memory(out=buf)
-        transcript=await asyncio.to_thread(transcribe_voice,buf.getvalue(),"telegram_edit.ogg")
-        await update.message.reply_text("📝 Transcript:\n\n"+transcript[:3500])
-        await process_edit_instruction(update,context,transcript)
+        f = await context.bot.get_file(update.message.voice.file_id)
+        buf = BytesIO()
+        await f.download_to_memory(out=buf)
+        transcript = await asyncio.to_thread(transcribe_voice, buf.getvalue(), "telegram_edit.ogg")
+        await update.message.reply_text("📝 Transcript:\n\n" + transcript[:3500])
+        await process_edit_instruction(update, context, transcript)
     except Exception:
-        log.exception("voice edit failed"); await update.message.reply_text("❌ Voice edit process नहीं हो सका।")
+        log.exception("voice edit failed")
+        await update.message.reply_text("❌ Voice edit process नहीं हो सका।")
+
 
 async def apply_edit(update, context):
-    q=update.callback_query; uid=q.from_user.id
-    if not access.is_authorized(uid): await q.edit_message_text("🔒 यह bot private है।"); return
-    state=get_state(uid)
-    pending=state.pending_edit if state else {}
-    candidate=pending.get("candidate") if pending else None
+    q = update.callback_query
+    uid = q.from_user.id
+    if not access.is_authorized(uid):
+        await q.edit_message_text("🔒 यह bot private है।")
+        return
+    state = get_state(uid)
+    pending = state.pending_edit if state else {}
+    candidate = pending.get("candidate") if pending else None
     if not state or not candidate:
-        await q.edit_message_text("⚠️ यह edit अब उपलब्ध नहीं है।"); return
+        await q.edit_message_text("⚠️ यह edit अब उपलब्ध नहीं है।")
+        return
     state.set_draft(candidate)
-    store.save(uid,state)
+    store.save(uid, state)
     await q.edit_message_text("⏳ Change applied. DOCX/PDF को फिर से render किया जा रहा है…")
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            label=DISPLAY_NAMES[state.document_type].split(" /")[0].replace(" ","_")
-            docx,pdf=render_both(candidate,tmp,base_name=f"{label}_{uid}_v{state.draft_version}",paper=os.getenv("LEGAL_PAPER","legal"))
-            with open(docx,"rb") as f: await q.message.reply_document(f,filename=docx.name,caption=f"📄 Updated editable DOCX — v{state.draft_version}")
-            with open(pdf,"rb") as f: await q.message.reply_document(f,filename=pdf.name,caption=f"📑 Updated PDF — v{state.draft_version}")
-        await q.message.reply_text("✅ Edit applied. बाकी structured content को नहीं बदला गया। फिर edit करना हो तो ✏️ Edit Draft दबाएँ।",reply_markup=case_actions(state))
+            label = DISPLAY_NAMES[state.document_type].split(" /")[0].replace(" ", "_")
+            docx, pdf = render_both(candidate, tmp, base_name=f"{label}_{uid}_v{state.draft_version}", paper=os.getenv("LEGAL_PAPER", "legal"))
+            with open(docx, "rb") as f:
+                await q.message.reply_document(f, filename=docx.name, caption=f"📄 Updated editable DOCX — v{state.draft_version}")
+            with open(pdf, "rb") as f:
+                await q.message.reply_document(f, filename=pdf.name, caption=f"📑 Updated PDF — v{state.draft_version}")
+        await q.message.reply_text(
+            "✅ Edit applied. बाकी structured content को नहीं बदला गया। और बदलाव करना हो तो सीधे लिखें या Voice Note भेजें।",
+            reply_markup=case_actions(state),
+        )
     except Exception:
-        log.exception("render after edit failed"); await q.message.reply_text("❌ Change save हुआ लेकिन updated document render नहीं हो सका। /summary से draft फिर खोलें।")
+        log.exception("render after edit failed")
+        await q.message.reply_text("❌ Change save हुआ लेकिन updated document render नहीं हो सका। /summary से draft फिर खोलें।")
 
-async def button(update,context):
-    q=update.callback_query; await q.answer()
+
+async def button(update, context):
+    q = update.callback_query
+    await q.answer()
     if not access.is_authorized(q.from_user.id):
         await q.edit_message_text("🔒 यह bot private है। आप authorized नहीं हैं। /myid से अपना User ID देखें।")
         return
-    uid=q.from_user.id; cid=case_id_for(uid)
-    if q.data=="case_documents":
-        state=store.get(cid)
+    uid = q.from_user.id
+    cid = case_id_for(uid)
+    if q.data == "case_documents":
+        state = store.get(cid)
         if not state or not state.documents:
-            await q.edit_message_text("इस case में अभी कोई generated document नहीं है।"); return
-        await q.edit_message_text("📚 इस case के generated documents:",reply_markup=existing_documents_menu(state)); return
+            await q.edit_message_text("इस case में अभी कोई generated document नहीं है।")
+            return
+        await q.edit_message_text("📚 इस case के generated documents:", reply_markup=existing_documents_menu(state))
+        return
     if q.data.startswith("doc:"):
-        state=store.get(cid)
-        did=q.data.split(":",1)[1]
-        item=next((x for x in (state.documents if state else []) if x.get("document_id")==did),None)
+        state = store.get(cid)
+        did = q.data.split(":", 1)[1]
+        item = next((x for x in (state.documents if state else []) if x.get("document_id") == did), None)
         if not state or not item:
-            await q.edit_message_text("⚠️ यह document अब उपलब्ध नहीं है।"); return
-        state.document_type=str(item.get("document_type"))
-        state.active_document_id=did
-        state.draft=item.get("draft") or {}
-        state.draft_version=int(item.get("version",1) or 1)
-        state.draft_versions=[{"version":state.draft_version,"draft":state.draft}]
-        state.edit_mode=False; state.pending_edit={}; state.status="drafted"
-        store.save(uid,state)
-        await q.edit_message_text(f"📄 *{DISPLAY_NAMES[state.document_type]}* selected.\n\nअब इसे review/edit कर सकते हैं या इसी case में दूसरा document जोड़ सकते हैं।",parse_mode="Markdown",reply_markup=case_actions(state)); return
-    if q.data=="add_document":
-        await q.edit_message_text("➕ इसी case में अगला document type चुनें:",reply_markup=document_menu()); return
+            await q.edit_message_text("⚠️ यह document अब उपलब्ध नहीं है।")
+            return
+        state.document_type = str(item.get("document_type"))
+        state.active_document_id = did
+        state.draft = item.get("draft") or {}
+        state.draft_version = int(item.get("version", 1) or 1)
+        state.draft_versions = [{"version": state.draft_version, "draft": state.draft}]
+        state.edit_mode = False
+        state.pending_edit = {}
+        state.status = "drafted"
+        store.save(uid, state)
+        await q.edit_message_text(
+            f"📄 *{DISPLAY_NAMES[state.document_type]}* selected.\n\nअब इसे review/edit कर सकते हैं या इसी case में दूसरा document जोड़ सकते हैं।",
+            parse_mode="Markdown",
+            reply_markup=case_actions(state),
+        )
+        return
+    if q.data == "add_document":
+        await q.edit_message_text("➕ इसी case में अगला document type चुनें:", reply_markup=document_menu())
+        return
     if q.data.startswith("addtype:"):
-        t=q.data.split(":",1)[1]
-        # Callback has no update.message, so perform the same transition inline.
-        state=store.get(cid)
+        t = q.data.split(":", 1)[1]
+        state = store.get(cid)
         if not state or not state.facts:
-            await q.edit_message_text("पहले एक case तैयार करें।",reply_markup=dashboard()); return
+            await q.edit_message_text("पहले एक case तैयार करें।", reply_markup=dashboard())
+            return
         if state.document_type == t and state.draft:
-            await q.edit_message_text("यह document अभी active है। कोई दूसरा type चुनें।",reply_markup=document_menu()); return
+            await q.edit_message_text("यह document अभी active है। कोई दूसरा type चुनें।", reply_markup=document_menu())
+            return
         state.begin_new_document(t)
         try:
-            await asyncio.to_thread(orchestrator.refresh_intake,state); store.save(uid,state)
-        except Exception: log.exception("additional document callback reconciliation failed")
-        if missing_fields(state.facts,t):
-            await q.edit_message_text(f"➕ *{DISPLAY_NAMES[t]}*\n\n{questions_text(state)}",parse_mode="Markdown",reply_markup=case_actions(state)); return
-        await q.edit_message_text(f"➕ *{DISPLAY_NAMES[t]}* इसी case के facts से तैयार किया जा रहा है…",parse_mode="Markdown")
-        await generate_for(update,uid,state,edit=True); return
+            await asyncio.to_thread(orchestrator.refresh_intake, state)
+            store.save(uid, state)
+        except Exception:
+            log.exception("additional document callback reconciliation failed")
+        if missing_fields(state.facts, t):
+            await q.edit_message_text(f"➕ *{DISPLAY_NAMES[t]}*\n\n{questions_text(state)}", parse_mode="Markdown", reply_markup=case_actions(state))
+            return
+        await q.edit_message_text(f"➕ *{DISPLAY_NAMES[t]}* इसी case के facts से तैयार किया जा रहा है…", parse_mode="Markdown")
+        await generate_for(update, uid, state, edit=True)
+        return
     if q.data.startswith("type:"):
-        t=q.data.split(":",1)[1]; state=CaseState(cid,document_type=t); store.save(uid,state)
-        await q.edit_message_text(f"⚖️ *{DISPLAY_NAMES[t]}*\n\nProgress: {progress(state)}\n\n{questions_text(state)}\n\nआप Hindi/English text या voice note भेज सकते हैं।",parse_mode="Markdown",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel",callback_data="cancel")]])); return
-    state=store.get(cid)
-    if q.data=="cancel": store.delete(cid); await q.edit_message_text("✅ Draft session cancelled."); return
-    if not state: await q.edit_message_text("कोई active draft नहीं है। /newcase से शुरू करें।"); return
-    if q.data=="review": await q.edit_message_text(summary_text(state),parse_mode="Markdown",reply_markup=case_actions(state)); return
-    if q.data=="edit_mode":
-        state.edit_mode=True; state.pending_edit={}; store.save(uid,state)
-        await q.edit_message_text("✏️ *DRAFT EDIT MODE*\n\nअब अपना बदलाव text में लिखें या voice note भेजें।\n\nउदाहरण: `पैराग्राफ 3 में 15.06.2026 की जगह 20.06.2026 कर दो।`\n\nहर instruction पर पहले preview मिलेगा, फिर आप Apply/Discard चुनेंगे।",parse_mode="Markdown"); return
-    if q.data=="edit_apply": await apply_edit(update,context); return
-    if q.data=="edit_discard":
-        state.pending_edit={}; store.save(uid,state); await q.edit_message_text("❌ Proposed change discarded. Original draft unchanged.",reply_markup=case_actions(state)); return
-    if q.data=="generate":
-        # Re-audit the accumulated user evidence immediately before generation.
-        # This repairs older/incomplete intake state and prevents the bot from
-        # asking for a field that the user already supplied in an earlier message.
+        t = q.data.split(":", 1)[1]
+        state = CaseState(cid, document_type=t)
+        store.save(uid, state)
+        await q.edit_message_text(
+            f"⚖️ *{DISPLAY_NAMES[t]}*\n\nProgress: {progress(state)}\n\n{questions_text(state)}\n\nआप Hindi/English text, Voice Note या दस्तावेज़ की Photo/PDF भेज सकते हैं।",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]]),
+        )
+        return
+    state = store.get(cid)
+    if q.data == "cancel":
+        store.delete(cid)
+        await q.edit_message_text("✅ Draft session cancelled.")
+        return
+    if not state:
+        await q.edit_message_text("कोई active draft नहीं है। /newcase से शुरू करें।")
+        return
+    if q.data == "review":
+        await q.edit_message_text(summary_text(state), parse_mode="Markdown", reply_markup=case_actions(state))
+        return
+    if q.data == "edit_mode":
+        state.edit_mode = True
+        state.pending_edit = {}
+        store.save(uid, state)
+        await q.edit_message_text(
+            "✏️ *DRAFT EDIT MODE*\n\nअब अपना बदलाव text में लिखें या Voice Note भेजें।\n\n"
+            "उदाहरण: `पैराग्राफ 3 में 15.06.2026 की जगह 20.06.2026 कर दो।`\n\n"
+            "हर instruction पर पहले preview मिलेगा, फिर आप Apply/Discard चुनेंगे।",
+            parse_mode="Markdown",
+        )
+        return
+    if q.data == "edit_apply":
+        await apply_edit(update, context)
+        return
+    if q.data == "edit_discard":
+        state.pending_edit = {}
+        store.save(uid, state)
+        await q.edit_message_text("❌ Proposed change discarded. Original draft unchanged.", reply_markup=case_actions(state))
+        return
+    if q.data == "generate":
         try:
             await q.edit_message_text("🧠 पूरे case की जानकारी दोबारा verify की जा रही है…")
             await asyncio.to_thread(orchestrator.refresh_intake, state)
             store.save(uid, state)
         except Exception:
             log.exception("pre-generation intake reconciliation failed")
-        if missing_fields(state.facts,state.document_type):
-            await q.edit_message_text(questions_text(state)); return
-        await generate_for(update,uid,state,edit=True)
+        if missing_fields(state.facts, state.document_type):
+            await q.edit_message_text(questions_text(state), reply_markup=case_actions(state))
+            return
+        await generate_for(update, uid, state, edit=True)
+
 
 def build_application():
-    token=os.getenv("TELEGRAM_BOT_TOKEN")
-    if not token: raise RuntimeError("TELEGRAM_BOT_TOKEN is not set.")
-    app=Application.builder().token(token).build()
-    app.add_handler(CommandHandler("start",start)); app.add_handler(CommandHandler("newcase",newcase)); app.add_handler(CommandHandler("cancel",cancel)); app.add_handler(CommandHandler("summary",summary)); app.add_handler(CommandHandler("edit",edit_command)); app.add_handler(CommandHandler("adddocument",add_document_command)); app.add_handler(CommandHandler("myid",myid)); app.add_handler(CommandHandler("authorize",authorize)); app.add_handler(CommandHandler("unauthorize",unauthorize)); app.add_handler(CommandHandler("authorized",authorized))
-    app.add_handler(CallbackQueryHandler(button)); app.add_handler(MessageHandler(filters.VOICE,voice_message)); app.add_handler(MessageHandler(filters.PHOTO, image_document_message)); app.add_handler(MessageHandler(filters.Document.ALL, image_document_message)); app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,text_message))
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is not set.")
+    app = Application.builder().token(token).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("newcase", newcase))
+    app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(CommandHandler("summary", summary))
+    app.add_handler(CommandHandler("edit", edit_command))
+    app.add_handler(CommandHandler("adddocument", add_document_command))
+    app.add_handler(CommandHandler("myid", myid))
+    app.add_handler(CommandHandler("authorize", authorize))
+    app.add_handler(CommandHandler("unauthorize", unauthorize))
+    app.add_handler(CommandHandler("authorized", authorized))
+    app.add_handler(CallbackQueryHandler(button))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, voice_message))
+    app.add_handler(MessageHandler(filters.PHOTO, image_document_message))
+    app.add_handler(MessageHandler(filters.Document.ALL, image_document_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
     return app
 
-def main(): build_application().run_polling(allowed_updates=Update.ALL_TYPES)
-if __name__=="__main__": main()
+
+def main():
+    build_application().run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
