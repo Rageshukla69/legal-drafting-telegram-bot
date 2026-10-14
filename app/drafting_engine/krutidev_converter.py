@@ -1,3 +1,4 @@
+```python
 """Deterministic KrutiDev-010 remnant & hybrid text cleaner for UP court Hindi drafts.
 
 The 306 reference files in `legal_corpus/` and `corpus_index.json` were originally
@@ -9,6 +10,9 @@ KrutiDev character codes (`h`, `w`, `s`, `k`, `q`, `a`, `Z`, `z`, `¼`, `½`, `&
 This module deterministically converts any hybrid/remnant KrutiDev text into
 clean, canonical Unicode Devanagari Hindi while preserving legitimate English
 words, punctuation (`:`, `,`, `/`), case numbers, dates, phone numbers, and IDs.
+It also normalizes UP court Hindi abbreviations (`स्व0` -> `स्व०`, `म0नं0` -> `म०नं०`,
+`मो0नं0` -> `मो०नं०`, `मि0` -> `मि०`, `सं0` -> `सं०`) and fixes erroneous `बीस सौ ...`
+year phrases to `दो हजार ...`.
 """
 from __future__ import annotations
 
@@ -25,6 +29,24 @@ _HYBRID_SIGNAL_RE = re.compile(
     r"|(?:\b(?:vौर|काs|सs|नs|मs|हs|हाs|जाs|दks|,क|यहकि\]|श्रh|जwनियर|डिवhजन|बिधwना|mपराsDत)\b)"
 )
 
+# Matches ASCII '0' or degree sign '°' used as an abbreviation circle immediately after
+# a Devanagari letter/matra (e.g. स्व0 -> स्व०, म0नं0 -> म०नं०, मो0नं0 -> मो०नं०, सं0 -> सं०, मि0 -> मि०)
+_HINDI_ABBREV_ZERO_RE = re.compile(r"(?<=[\u0901-\u0939\u093C-\u094D\u0958-\u095F])[0°](?![0-9०-९])")
+
+
+def normalize_hindi_abbreviations(text: str) -> str:
+    """Replace ASCII '0' or '°' attached to Hindi abbreviations with '०' (\\u0966), fix 'बीस सौ' years, and clean spacing."""
+    if not text:
+        return ""
+    s = _HINDI_ABBREV_ZERO_RE.sub("०", str(text))
+    # Ensure a space between a number and an opening parenthesis containing Devanagari: e.g. '02(रामकान्ती)' -> '02 (रामकान्ती)'
+    s = re.sub(r"(?<=[0-9०-९])\((?=[\u0900-\u097F])", " (", s)
+    # Fix any 'बीस सौ बारह' / 'बीस सौ छब्बीस' year wording to 'दो हजार बारह' / 'दो हजार छब्बीस'
+    s = re.sub(r"\bबीस\s+सौ(?=\s+[\u0900-\u097F])", "दो हजार", s)
+    # Remove redundant word expansion in verification clause 'धारा 1 (एक) लगायत' -> 'धारा 1 लगायत'
+    s = re.sub(r"(धारा\s+\d+)\s*\([^)]{1,30}\)(?=\s*लगायत)", r"\1", s)
+    return s
+
 
 def has_krutidev_remnants(text: str) -> bool:
     """Return True if `text` contains hybrid KrutiDev-010 encoding remnants."""
@@ -34,17 +56,12 @@ def has_krutidev_remnants(text: str) -> bool:
 
 
 def decode_krutidev_hybrid(text: str, *, force: bool = False) -> str:
-    """Convert hybrid KrutiDev-010 + Unicode text into clean Unicode Devanagari.
-
-    When `force=False`, pure Unicode/English strings (such as already-clean
-    drafts containing `वादी: सीताराम`, `वादी/Plaintiff`, or `Section 6 CPC`)
-    are returned 100% untouched.
-    """
+    """Convert hybrid KrutiDev-010 + Unicode text into clean Unicode Devanagari."""
     if not text:
         return ""
     s = str(text)
     if not force and not has_krutidev_remnants(s):
-        return s
+        return normalize_hindi_abbreviations(s)
 
     # Protect legitimate standalone ASCII words (3+ letters with no Devanagari in the token)
     protected: dict[str, str] = {}
@@ -249,11 +266,11 @@ def decode_krutidev_hybrid(text: str, *, force: bool = False) -> str:
     for key, val in protected.items():
         s = s.replace(key, val)
 
-    return s
+    return normalize_hindi_abbreviations(s)
 
 
 def sanitize_draft_unicode(draft: Any) -> Any:
-    """Recursively clean any residual KrutiDev artifacts inside a structured draft."""
+    """Recursively clean any residual KrutiDev artifacts and normalize Hindi abbreviations inside a structured draft."""
     if isinstance(draft, str):
         return decode_krutidev_hybrid(draft, force=False)
     if isinstance(draft, list):
@@ -261,3 +278,4 @@ def sanitize_draft_unicode(draft: Any) -> Any:
     if isinstance(draft, dict):
         return {k: sanitize_draft_unicode(v) for k, v in draft.items()}
     return draft
+```
