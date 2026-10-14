@@ -1,4 +1,3 @@
-```python
 """Deterministic KrutiDev-010 remnant & hybrid text cleaner for UP court Hindi drafts.
 
 The 306 reference files in `legal_corpus/` and `corpus_index.json` were originally
@@ -278,4 +277,3 @@ def sanitize_draft_unicode(draft: Any) -> Any:
     if isinstance(draft, dict):
         return {k: sanitize_draft_unicode(v) for k, v in draft.items()}
     return draft
-```
