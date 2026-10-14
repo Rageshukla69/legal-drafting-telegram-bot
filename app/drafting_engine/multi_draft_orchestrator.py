@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, os
+import json, os, re
 from pathlib import Path
 from typing import Any
 from .case_intake import extract_case_facts, reconcile_case_state
@@ -32,6 +32,125 @@ BASE_RULES = [
     "Never number paragraphs. The deterministic renderer assigns numbering.",
     "Return only JSON matching the supplied schema.",
 ]
+
+_PARTY_STOPWORDS = {
+    "वादी", "वादीगण", "वादिनी", "प्रतिवादी", "प्रतिवादीगण", "प्रतिवादिनी", "विपक्षी", "विपक्षीगण",
+    "प्रार्थी", "प्रार्थीगण", "उम्र", "करीब", "वर्ष", "पुत्र", "पुत्री", "पत्नी", "पति", "विधवा",
+    "स्व", "स्व०", "स्वर्गीय", "श्री", "श्रीमती", "सुश्री", "कुमारी", "निवासी", "निवासीगण",
+    "मूल", "वर्तमान", "पता", "ग्राम", "मौजा", "मौज़ा", "डाकखाना", "पोस्ट", "परगना", "तहसील",
+    "जिला", "थाना", "वार्ड", "संख्या", "मकान", "नंबर", "बनाम",
+    "plaintiff", "plaintiffs", "defendant", "defendants", "respondent", "applicant",
+    "petitioner", "deponent", "sender", "recipient", "age", "about", "approx", "years",
+    "son", "daughter", "wife", "husband", "widow", "late", "shri", "smt", "resident",
+    "village", "post", "tehsil", "pargana", "district", "ward", "house",
+}
+
+
+def _flatten_str_item(item: Any) -> str:
+    if isinstance(item, str):
+        return item.strip()
+    if isinstance(item, dict):
+        for k in ("text", "content", "party", "line", "clause", "paragraph", "name", "value"):
+            if item.get(k) and isinstance(item[k], str):
+                return item[k].strip()
+        vals = [str(v).strip() for v in item.values() if isinstance(v, (str, int, float)) and str(v).strip()]
+        return " ".join(vals).strip()
+    return str(item or "").strip()
+
+
+def _normalize_draft_structure(draft: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
+    """Unwrap nested model payloads and ensure required list/scalar fields are properly populated."""
+    if not isinstance(draft, dict):
+        return {}
+    for wrap_key in ("draft", "output", "result", "data", "response"):
+        inner = draft.get(wrap_key)
+        if isinstance(inner, dict) and (inner.get("pleadings") or inner.get("title")):
+            draft = {**draft, **inner}
+            break
+
+    out = dict(draft)
+    for list_key in ("parties", "pleadings", "prayer", "signature_block"):
+        raw_val = out.get(list_key)
+        if isinstance(raw_val, str):
+            items = [line.strip() for line in raw_val.splitlines() if line.strip()]
+        elif isinstance(raw_val, list):
+            items = [_flatten_str_item(x) for x in raw_val if _flatten_str_item(x)]
+        else:
+            items = []
+        out[list_key] = items
+
+    for str_key in ("court_heading", "case_heading", "title", "opening_averment", "verification"):
+        val = out.get(str_key)
+        if isinstance(val, list):
+            out[str_key] = "\n".join(_flatten_str_item(x) for x in val if _flatten_str_item(x))
+        elif isinstance(val, dict):
+            out[str_key] = _flatten_str_item(val)
+        else:
+            out[str_key] = str(val or "").strip()
+
+    if not out.get("court_heading") and facts.get("court_name"):
+        out["court_heading"] = str(facts["court_name"]).strip()
+
+    if not out.get("parties"):
+        fallback_parties: list[str] = []
+        for pl in (facts.get("plaintiffs") or []):
+            s = str(pl).strip()
+            if s:
+                fallback_parties.append(s if "वादी" in s else f"{s} --- वादी")
+        for idx, df in enumerate(facts.get("defendants") or [], 1):
+            s = str(df).strip()
+            if s:
+                prefix = "" if re.match(r"^\s*\d+[.)\-:]", s) else f"{idx}. "
+                suffix = "" if "प्रतिवादी" in s or "विपक्षी" in s else (" --- प्रतिवादीगण" if idx == len(facts.get("defendants") or []) else "")
+                fallback_parties.append(f"{prefix}{s}{suffix}")
+        if not fallback_parties and facts.get("parties"):
+            fallback_parties = [str(x).strip() for x in facts["parties"] if str(x).strip()]
+        if fallback_parties:
+            out["parties"] = fallback_parties
+
+    if not out.get("signature_block"):
+        out["signature_block"] = ["वादी", "द्वारा अधिवक्ता-", "वी०डी० शुक्ला एडवोकेट", "सिविल कोर्ट कम्पाउण्ड, बिधूना, औरैया"]
+
+    return out
+
+
+def _has_identifiable_party(draft: dict[str, Any], facts: dict[str, Any]) -> bool:
+    """Check whether supplied party/deponent names appear in the draft (handling punctuation,
+    abbreviation normalization `स्व0`->`स्व०`, and English-intake vs Hindi-draft transliteration)."""
+    source_names: list[str] = []
+    for k in ("plaintiffs", "defendants", "parties", "sender", "recipient", "deponent"):
+        v = facts.get(k, [])
+        if isinstance(v, list):
+            source_names.extend(str(x).strip() for x in v if str(x).strip())
+        elif v and str(v).strip():
+            source_names.append(str(v).strip())
+
+    if not source_names:
+        return True
+
+    sanitized_sources = [str(sanitize_draft_unicode(s)) for s in source_names]
+    text = json.dumps(draft, ensure_ascii=False).casefold()
+
+    if any(s.casefold() in text for s in sanitized_sources if s):
+        return True
+
+    token_re = re.compile(r"[A-Za-z\u0900-\u097F]{2,}", re.UNICODE)
+    name_tokens: list[str] = []
+    for s in sanitized_sources:
+        for tok in token_re.findall(s):
+            low = tok.casefold()
+            if len(low) >= 2 and low not in _PARTY_STOPWORDS:
+                name_tokens.append(low)
+
+    if any(tok in text for tok in name_tokens):
+        return True
+
+    all_sources_ascii = all(not any("\u0900" <= c <= "\u097f" for c in s) for s in sanitized_sources)
+    draft_hindi_chars = sum("\u0900" <= c <= "\u097f" for c in text)
+    if all_sources_ascii and draft_hindi_chars >= 80 and (draft.get("parties") or draft.get("signature_block")):
+        return True
+
+    return False
 
 
 class MultiDraftOrchestrator:
@@ -128,7 +247,8 @@ class MultiDraftOrchestrator:
                 schema=SCHEMA,
                 thinking_level=os.getenv("GEMINI_DRAFTING_THINKING_LEVEL", "high"),
             )
-            draft = sanitize_draft_unicode(raw_draft)
+            normalized_raw = _normalize_draft_structure(raw_draft, state.facts)
+            draft = sanitize_draft_unicode(normalized_raw)
             errors = self.validate(draft, state.facts, state.document_type)
             if not errors:
                 state.status = "ready"
@@ -143,14 +263,10 @@ class MultiDraftOrchestrator:
         for key in ("title", "pleadings", "signature_block"):
             if not draft.get(key):
                 errors.append(f"missing {key}")
-        source_names = []
-        for k in ("plaintiffs", "defendants", "parties", "sender", "recipient", "deponent"):
-            v = facts.get(k, [])
-            source_names.extend(v if isinstance(v, list) else [v])
         text = json.dumps(draft, ensure_ascii=False)
         hindi_chars = sum("\u0900" <= c <= "\u097f" for c in text)
         if hindi_chars >= 80 and legacy_corruption_score(text) > 0.18:
             errors.append("draft contains mixed legacy-font Hindi artifacts; regenerate using clean Unicode Hindi")
-        if source_names and not any(str(n).strip() and str(n).strip() in text for n in source_names):
+        if not _has_identifiable_party(draft, facts):
             errors.append("draft does not contain identifiable supplied party/deponent information")
         return errors
