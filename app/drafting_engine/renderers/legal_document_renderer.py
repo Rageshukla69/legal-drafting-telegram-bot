@@ -1024,4 +1024,3 @@ def render_both(
     render_docx(draft, docx_path, paper=paper)
     _write_pdf(draft, pdf_path, paper=paper, docx_path=docx_path)
     return docx_path, pdf_path
-```
