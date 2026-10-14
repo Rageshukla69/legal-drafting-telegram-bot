@@ -1,44 +1,51 @@
-CLEAN STYLE ANCHOR — V.D. SHUKLA ADVOCATE CORPUS
+CLEAN STYLE ANCHOR — ADVOCATE V.D. SHUKLA (BIDHUNA, AURAIYA) 306-DOCUMENT CORPUS
 
-Use these clean, source-derived conventions as terminology/style anchors. Do not invent facts from them.
+Use these authentic conventions derived from the 306 court drafts of V.D. Shukla, Advocate (Civil Court Compound, Bidhuna, District Auraiya, U.P.) as terminology, formatting, and rhythm anchors. Never invent case-specific facts from them.
 
-Court heading:
-न्यायालय श्रीमान सिविल जज जूनियर डिवीजन बिधूना
+1. Court Headings (Centered, Bold):
+- न्यायालय श्रीमान सिविल जज जूनियर डिवीजन बिधूना
+- न्यायालय श्रीमान सिविल जज सीनियर डिवीजन औरैया
+- न्यायालय श्रीमान अपर सिविल जज जूनियर डिवीजन बिधूना
 
-Case heading pattern:
-वाद संख्या [number] ([Hindi words]) सन् [year] ([Hindi year words])
-[Party A] बनाम [Party B] आदि
+2. Case Heading Pattern:
+- मूल वाद संख्या ____________ सन् 2026 (दो हजार छब्बीस)
+- प्रकीर्ण वाद सं० ____________ सन् 2026 (दो हजार छब्बीस)
+- मूल वाद सं० [number] सन् [year] — [वादी का नाम] आदि बनाम [प्रतिवादी का नाम] आदि
 
-Common filing headings:
-प्रार्थनापत्र वास्ते संशोधन वादपत्र
-आपत्ति मिनजानिव प्रतिवादी सं. [number] व [number] बावत प्रार्थनापत्र वादी
-अंतर्गत धारा [number] म्याद अधिनियम
+3. Party Block Style (Dava / Caveat / Formal Filings):
+- 1- (एक) [पूरा नाम] उम्र करीब [आयु] ([शब्दों में]) वर्ष पुत्र/पत्नी [पिता/पति का नाम] निवासी ग्राम - [...], डाकखाना - [...], परगना - बिधूना, जिला - औरैया। मो०नं०- [...] — वादी / वादीगण
+- बनाम
+- 1- (एक) [पूरा नाम] उम्र करीब [आयु] ([शब्दों में]) वर्ष पुत्र/पत्नी [पिता/पति का नाम] निवासी ग्राम - [...], डाकखाना - [...], परगना - बिधूना, जिला - औरैया। — प्रतिवादी / प्रतिवादीगण
 
-Opening style:
-महोदय,
-निवेदन है कि ...
+4. Document Titles (Centered, Bold, Underlined):
+- Dava / Plaint: वादपत्र वास्ते स्थायी निषेधाज्ञा / वादपत्र वास्ते घोषणात्मक डिक्री एवं स्थायी निषेधाज्ञा / वादपत्र वास्ते मंसूखी बैनामा
+- Written Statement: प्रतिवादपत्र मिनजानिव प्रतिवादी / जवाब दावा मिनजानिव प्रतिवादी
+- Application: प्रार्थनापत्र बावत जारी करने कमीशन / प्रार्थनापत्र वास्ते अस्थायी निषेधाज्ञा (6ग) / प्रार्थनापत्र वास्ते संशोधन वादपत्र
+- Evidence Affidavit: एकपक्षीय साक्ष्य शपथपत्र (बयान चीफ) पी०डब्लू०-1 / साक्ष्य में शपथपत्र (बयान चीफ) डी०डब्लू०-1
+- General Affidavit: शपथपत्र मिनजानिव [शपथकर्ता का नाम]
+- Legal Notice: कानूनी नोटिस / रजिस्टर्ड कानूनी नोटिस
+- Caveat: कैवियट आवेदन अंतर्गत धारा 148क सी०पी०सी०
 
-Pleading rhythm:
-1. यहकि ...
-2. यहकि ...
-3. यहकि ...
+5. Opening Averments:
+- Dava: उपरोक्त वादी / वादीगण निम्नलिखित निवेदन करते हैं:-
+- Written Statement: प्रतिवादपत्र प्रतिवादी [नाम] की ओर से निम्नवत है:-
+- Application: श्रीमानजी, सादर निवेदन है कि ...
+- Affidavit / Evidence: शपथपत्र मिनजानिव [नाम, आयु, पिता/पति, पता] — शपथकर्ता उपरोक्त शपथपूर्वक निम्न बयान करता है:-
+- Legal Notice: अपने पक्षकार उपरोक्त के निर्देशानुसार आपको निम्न प्रकार सूचित व सचेत किया जाता है:-
 
-Prayer style:
-अतः श्रीमानजी से प्रार्थना है कि ... की कृपा करे।
+6. Pleading Rhythm & Numbering:
+- Every substantive paragraph begins with "यह कि" (e.g., "यह कि विवादित भूमि...", "यह कि वादी उक्त भूमि पर मालिक काबिज दखील संक्रमणीय भूमिधर है...").
+- Do NOT prepend paragraph numbers yourself; the Python renderer automatically prefixes "1 (एक) : ", "2 (दो) : ", etc.
+- Important numeric facts (age, area, Gata/Khasra number, money, dates) use dual numeric + Hindi word form: e.g., 71 (इकहत्तर) वर्ष, गाटा संख्या 214 (दो सौ चौदह), 10,000 (दस हजार) रुपये.
 
-Affidavit style:
-शपथकर्ता शपथपूर्वक निम्न बयान करता है-
+7. Prayer & Verification Style:
+- Prayer lead-in: अतः श्रीमानजी से प्रार्थना है कि:- / अतः वादी माननीय न्यायालय से प्रार्थना करता है कि:-
+- Verification (Dava/WS): मैं/हम [नाम] सत्यापित करता हूँ कि उपरोक्त वादपत्र/प्रतिवादपत्र की धारा 1 लगायत [N] का लेख मेरे निजी ज्ञान व विश्वास से सच व सही है, कोई भी तथ्य गलत व झूठ नहीं है और न ही कोई तथ्य छिपाया गया है। ईश्वर मेरी मदद करे। सत्यापन आज दिनांक [...] को बमुकाम कचहरी बिधूना / औरैया में किया गया।
+- Verification (Affidavit): शपथकर्ता सत्यापित करता है कि शपथपत्र की धारा 1 लगायत [N] का लेख मेरे निजी ज्ञान व विश्वास से सच व सही है, कोई तथ्य छिपाया नहीं गया है और न ही कोई तथ्य झूठ है। ईश्वर मेरी मदद करे।
 
-Verification style:
-शपथकर्ता सत्यापित करता है कि शपथपत्र की धारा ... का लेख मेरे निजी ज्ञान व विश्वास से सच व सही है ...
-
-Signature/presentation:
-दिनांक ...
-प्रार्थीगण / वादीगण
+8. Signature / Advocate Block:
+दिनांक : ____________
+वादी / प्रार्थी / प्रतिवादी / शपथकर्ता
 द्वारा अधिवक्ता-
-वी0डी0 शुक्ला एडवोकेट
-
-IMPORTANT:
-- These are style/terminology anchors only, not case facts.
-- Prefer clean Unicode Hindi legal terminology over any mixed legacy-font text.
-- Do not copy names, dates, property details, amounts, or other case-specific facts from this anchor.
+वी०डी० शुक्ला एडवोकेट
+सिविल कोर्ट कम्पाउण्ड, बिधूना, औरैया
