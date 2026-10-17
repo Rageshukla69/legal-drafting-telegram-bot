@@ -24,12 +24,13 @@ PROMPTS = ROOT.parents[1] / "prompts"
 SCHEMA = json.loads((ROOT / "draft_schema.json").read_text(encoding="utf-8"))
 
 BASE_RULES = [
-    "CASE_FACTS are the sole authority for case-specific facts.",
-    "Never invent names, dates, addresses, property identifiers, statutes, case law, ownership, title, possession, witnesses, valuation, court fee, limitation or jurisdiction.",
+    "CASE_FACTS are the sole authority for case-specific names, dates, plot/Gata numbers, boundaries, and events. Never copy old party names or unrelated past transactions from retrieved templates.",
+    "NEVER write thin, 1-sentence summaries. Every pleading paragraph must be written in rich, authoritative, multi-sentence court Hindi ('यह कि ...') matching the depth and professional legal articulation of the selected Master Template or Advocate B.D. Shukla's original court drafts.",
+    "MANDATORY LEGAL COMPLETENESS: For a Dava (Plaint), always include full paragraphs covering: (1) Ownership, Title & Revenue Record status, (2) Full Property Description, Chauhaddi/Boundaries & Site Plan reference, (3) Peaceful Possession & Usage, (4) Defendants' Lack of Right & Unlawful/Forceful Conduct ('जिसकी लाठी भैंस उसी की' वाला सूत्र अपनाकर और कानून के शासन को तोड़कर), (5) Specific Incident & Continuing Threat, (6) Repeated Requests & Defendants' Refusal (कहा-कहलवाया व समझाया किन्तु प्रतिवादीगण इंकारी हैं), (7) Formal Cause of Action ('वाद हेतुक' प्रथम बार दिनांक ... को उत्पन्न हुआ तथा निरन्तर जारी है), (8) Territorial & Pecuniary Jurisdiction (यह मान्य न्यायालय वाद की सुनवाई करने हेतु पूर्ण कार्य क्षेत्र/क्षेत्राधिकार रखती है), and (9) Valuation & Court Fee (न्याय शुल्क अधिनियम के प्राविधान के अनुसार उचित न्याय शुल्क पृथक से अदा की गई है).",
     "Preserve event status exactly: attempt is not completion; threat is not dispossession; allegation is not an established fact.",
     "If CASE_FACTS contains custom_add_points, include every requested point as a proper legal paragraph/clause.",
     "If CASE_FACTS contains custom_remove_points, omit those topics/clauses from the draft.",
-    "Never number paragraphs yourself. The deterministic renderer assigns continuous Hindi numbering.",
+    "Never number paragraphs yourself. The deterministic renderer assigns continuous numbering.",
     "Return only JSON matching the supplied schema.",
 ]
 
@@ -58,8 +59,58 @@ def _flatten_str_item(item: Any) -> str:
     return str(item or "").strip()
 
 
-def _normalize_draft_structure(draft: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
-    """Unwrap nested model payloads and ensure required list/scalar fields are properly populated."""
+def _format_cause_title_parties(parties: list[str]) -> list[str]:
+    from .renderers.legal_document_renderer import split_party_blocks
+    pl, df, other = split_party_blocks(parties)
+    if not pl and not df:
+        return parties
+    out: list[str] = []
+    role_re = r"\s*(?:[-–—.]+\s*)?(?:प्रतिवादीगण|प्रतिवादिनीगण|प्रतिवादिनी|प्रतिवादी|विपक्षीगण|विपक्षी|वादीगण|वादिनी|वादी|प्रार्थीगण|प्रार्थिनी|प्रार्थी)\s*$"
+    if pl:
+        cleaned_pl = [re.sub(role_re, "", p).strip() for p in pl if re.sub(role_re, "", p).strip()]
+        if len(cleaned_pl) > 1:
+            cleaned_pl = [p if re.match(r"^\s*\d+[.)\-:]", p) else f"{i}. {p}" for i, p in enumerate(cleaned_pl, 1)]
+            out.extend(cleaned_pl)
+            out.append(".................... वादीगण")
+        elif cleaned_pl:
+            out.extend(cleaned_pl)
+            out.append(".................... वादी")
+    if df:
+        cleaned_df = [re.sub(role_re, "", d).strip() for d in df if re.sub(role_re, "", d).strip()]
+        if len(cleaned_df) > 1:
+            cleaned_df = [d if re.match(r"^\s*\d+[.)\-:]", d) else f"{i}. {d}" for i, d in enumerate(cleaned_df, 1)]
+            out.extend(cleaned_df)
+            out.append(".................... प्रतिवादीगण")
+        elif cleaned_df:
+            out.extend(cleaned_df)
+            out.append(".................... प्रतिवादी")
+    out.extend(other)
+    return out
+
+
+def _extract_primary_party_name(facts: dict[str, Any]) -> str:
+    for key in ("plaintiffs", "deponent", "sender", "parties"):
+        val = facts.get(key)
+        if isinstance(val, list) and val:
+            raw = str(val[0]).strip()
+        elif isinstance(val, str) and val.strip():
+            raw = val.strip()
+        else:
+            continue
+        # Extract name before 'पुत्र' / 'पत्नी' / ',' / 'उम्र'
+        m = re.split(r"\s+(?:पुत्र|पत्नी|पुत्री|विधवा|उम्र|निवासी)\b|,", raw, maxsplit=1)
+        if m and m[0].strip():
+            return re.sub(r"^\s*\d+[.)\-:]\s*", "", m[0].strip())
+    return "वादी"
+
+
+def _normalize_draft_structure(
+    draft: dict[str, Any],
+    facts: dict[str, Any],
+    document_type: str = "dava_plaint",
+    style_mode: str = "template_mode",
+) -> dict[str, Any]:
+    """Unwrap nested model payloads and ensure complete court-grade headings, clauses, prayer, and verification."""
     if not isinstance(draft, dict):
         return {}
     for wrap_key in ("draft", "output", "result", "data", "response"):
@@ -91,28 +142,105 @@ def _normalize_draft_structure(draft: dict[str, Any], facts: dict[str, Any]) -> 
     if not out.get("court_heading") and facts.get("court_name"):
         out["court_heading"] = str(facts["court_name"]).strip()
 
+    # Fix case_heading: never allow a duplicate party summary ("... बनाम ...") in case_heading!
+    ch = out.get("case_heading", "").strip()
+    case_no = str(facts.get("case_number") or "............").strip()
+    case_yr = str(facts.get("case_year") or "2026").strip()
+    if document_type != "legal_notice":
+        if not ch or ("बनाम" in ch and not re.search(r"(?:मूल\s*वाद|वाद\s*(?:सं|नंबर|न०)|प्रकीर्ण\s*वाद|कैवियट\s*सं|अपील\s*सं)", ch)):
+            if style_mode == "template_mode":
+                out["case_heading"] = f"वाद नंबर {case_no} सन् {case_yr}"
+            else:
+                out["case_heading"] = f"मूल वाद संख्या {case_no} सन् {case_yr}"
+
     if not out.get("parties"):
         fallback_parties: list[str] = []
-        for pl in (facts.get("plaintiffs") or []):
+        for idx, pl in enumerate(facts.get("plaintiffs") or [], 1):
             s = str(pl).strip()
             if s:
-                fallback_parties.append(s if "वादी" in s else f"{s} --- वादी")
+                prefix = f"{idx}. " if len(facts.get("plaintiffs") or []) > 1 and not re.match(r"^\s*\d+[.)\-:]", s) else ""
+                suffix = "" if "वादी" in s else (" — वादीगण" if len(facts.get("plaintiffs") or []) > 1 else " — वादी")
+                fallback_parties.append(f"{prefix}{s}{suffix}")
         for idx, df in enumerate(facts.get("defendants") or [], 1):
             s = str(df).strip()
             if s:
-                prefix = "" if re.match(r"^\s*\d+[.)\-:]", s) else f"{idx}. "
-                suffix = "" if "प्रतिवादी" in s or "विपक्षी" in s else (" --- प्रतिवादीगण" if idx == len(facts.get("defendants") or []) else "")
+                prefix = f"{idx}. " if len(facts.get("defendants") or []) > 1 and not re.match(r"^\s*\d+[.)\-:]", s) else ""
+                suffix = "" if "प्रतिवादी" in s or "विपक्षी" in s else (" — प्रतिवादीगण" if len(facts.get("defendants") or []) > 1 else " — प्रतिवादी")
                 fallback_parties.append(f"{prefix}{s}{suffix}")
         if not fallback_parties and facts.get("parties"):
             fallback_parties = [str(x).strip() for x in facts["parties"] if str(x).strip()]
         if fallback_parties:
             out["parties"] = fallback_parties
+    if out.get("parties") and document_type != "legal_notice":
+        out["parties"] = _format_cause_title_parties(out["parties"])
 
-    adv_name = str(facts.get("advocate_name") or "वी०डी० शुक्ला एडवोकेट").strip()
-    court_complex = str(facts.get("court_complex") or "सिविल कोर्ट कम्पाउण्ड, बिधूना, औरैया").strip()
+    # Ensure mandatory Jurisdiction & Valuation/Court-Fee paragraphs in Dava Plaint
+    if document_type == "dava_plaint" and out.get("pleadings"):
+        pleadings = list(out["pleadings"])
+        joined_pleadings = "\n".join(pleadings)
+
+        has_jurisdiction = any(k in joined_pleadings for k in ("क्षेत्राधिकार", "कार्य क्षेत्र", "अधिकारिता", "वादश्रवण"))
+        if not has_jurisdiction:
+            prop_loc = str(facts.get("court_complex") or facts.get("place") or "न्यायालय के स्थानीय क्षेत्राधिकार").strip()
+            pleadings.append(
+                f"यह कि यह मान्य न्यायालय प्रस्तुत वाद की सुनवाई एवं निर्णय करने हेतु पूर्ण कार्य क्षेत्र व क्षेत्राधिकार रखती है क्योंकि वादग्रस्त सम्पत्ति {prop_loc} की सीमा के अंतर्गत स्थित है और प्रतिवादीगण भी इसी माननीय न्यायालय के क्षेत्राधिकार के भीतर निवास करते हैं।"
+            )
+
+        has_valuation = any(k in joined_pleadings for k in ("मूल्यांकन", "न्याय शुल्क", "न्यायालय शुल्क", "बाजारी कीमत", "मालियत"))
+        if not has_valuation:
+            val_amt = str(facts.get("valuation") or "............").strip()
+            fee_str = str(facts.get("court_fee") or "नियमानुसार उचित न्याय शुल्क पृथक से अदा की गई है").strip()
+            pleadings.append(
+                f"यह कि वाद का मूल्यांकन स्थायी निषेधाज्ञा एवं वांछित अनुतोष हेतु रु० {val_amt} निश्चित है और न्याय शुल्क अधिनियम के प्राविधान के अनुसार {fee_str}।"
+            )
+
+        out["pleadings"] = pleadings
+
+    # Clean Prayer clauses: strip redundant lead-ins inside individual sub-clauses
+    if out.get("prayer"):
+        cleaned_prayer: list[str] = []
+        for item in out["prayer"]:
+            s = re.sub(
+                r"^\s*(?:\([क-ज्ञa-zA-Z0-9]+\)\s*)?(?:अतः\s*)?(?:अत्यन्त\s*विनयपूर्वक\s*)?(?:माननीय\s*न्यायालय\s*से\s*)?(?:सादर\s*)?प्रार्थना\s*(?:की\s*जाती\s*)?है\s*कि\s*[:-]*\s*",
+                "",
+                str(item).strip(),
+            ).strip()
+            if s:
+                cleaned_prayer.append(s)
+        out["prayer"] = cleaned_prayer
+
+    # Clean Verification: remove duplicate leading "सत्यापन" heading line and ensure paragraph-range specificity
+    ver = str(out.get("verification") or "").strip()
+    if ver:
+        ver_lines = [
+            ln.strip() for ln in ver.splitlines()
+            if ln.strip() and not re.match(r"^[\s\-–—:*_]*सत्यापन[\s\-–—:*_]*$", ln.strip())
+        ]
+        ver = "\n".join(ver_lines).strip()
+        total_p = len(out.get("pleadings") or [])
+        if total_p >= 4 and "पैरा" not in ver and "धारा" not in ver:
+            party_name = _extract_primary_party_name(facts)
+            place_str = str(facts.get("court_complex") or facts.get("place") or "बमुकाम कचहरी बिधूना, औरैया").strip()
+            factual_end = max(1, total_p - 3)
+            legal_start = factual_end + 1
+            ver = (
+                f"मैं कि {party_name}, उपरोक्त वादी, आज दिनांक ............ को स्थान {place_str} पर यह सत्यापित करता हूँ कि "
+                f"वाद पत्र के पैरा नं० 1 से {factual_end} तक के कथन मेरी निजी जानकारी में सत्य व सही हैं तथा पैरा नं० {legal_start} से {total_p} तक के कथन "
+                f"कानूनी सलाह के आधार पर मेरे विश्वास में सत्य हैं। कोई भी तथ्य असत्य नहीं है और न ही कोई तथ्य छिपाया गया है।"
+            )
+        out["verification"] = ver
+
+    adv_name = str(facts.get("advocate_name") or "वी०डी० शुक्ला, अधिवक्ता").strip()
+    court_complex = str(facts.get("court_complex") or "बमुकाम कचहरी बिधूना, औरैया").strip()
+    party_name = _extract_primary_party_name(facts)
 
     if not out.get("signature_block"):
-        out["signature_block"] = ["वादी / प्रार्थी", "द्वारा अधिवक्ता-", adv_name, court_complex]
+        out["signature_block"] = [
+            f"स्थान : {court_complex}",
+            f"दिनांक : ............",
+            f"वादी — {party_name}",
+            f"द्वारा अधिवक्ता — {adv_name}",
+        ]
 
     return out
 
@@ -215,22 +343,22 @@ class MultiDraftOrchestrator:
 
         if style_mode == "template_mode":
             mode_rules = [
-                f"DRAFTING STYLE MODE: PURCHASED 500+ LEGAL TEMPLATES MODE (Selected Template: {selected_tpl}).",
-                "Use [MASTER TEMPLATE 1] from CORPUS_REFERENCE as the direct template for this draft.",
-                "Keep the template's exact structure, legal clauses, statutory provisions, headings, and professional flow.",
-                "Replace all placeholder blanks and sample details with the user's current case details from CASE_FACTS (Court Name, Court Complex, Parties' Names, Issue/Facts, Property, Reliefs, and Advocate Name).",
+                f"DRAFTING STYLE MODE: PURCHASED 500+ LEGAL TEMPLATES MODE (Selected Master Template: {selected_tpl}).",
+                "Use [MASTER TEMPLATE 1] from CORPUS_REFERENCE as the direct Master Template for this draft.",
+                "PRESERVE THE FULL PARAGRAPH ELABORATION, LEGAL PROSE, AND COMPLETE SECTION STRUCTURE OF THE TEMPLATE: never compress the template into short 1-sentence summaries.",
+                "Adapt all standard template paragraphs to CASE_FACTS, including Ownership & Possession, Property Description & Chauhaddi (हदुदर्वा/चौहद्दी), Defendants' Unlawful Conduct & Rule of Law ('जिसकी लाठी भैंस उसी की' वाला सूत्र अपनाकर और कानून के शासन को तोड़कर), Request & Refusal, Cause of Action ('वाद हेतुक' प्रथम बार दिनांक ... को उत्पन्न हुआ तथा निरन्तर जारी है), Jurisdiction (यह मान्य न्यायालय वाद की सुनवाई करने हेतु कार्य क्षेत्र रखती है), and Valuation & Court Fee (न्याय शुल्क अधिनियम के प्राविधान के अनुसार उचित न्याय शुल्क पृथक से अदा की गई है).",
+                "Adapt all comprehensive Prayer sub-clauses ((क), (ख), (ग), (घ)) and formal paragraph-split Verification from the template.",
             ]
         elif style_mode == "dad_style":
             mode_rules = [
                 f"DRAFTING STYLE MODE: DAD'S 306 ORIGINAL FILES MODE (Selected Reference: {selected_tpl}).",
-                "Replicate Advocate B.D. Shukla's exact court drafting language, vocabulary ('मालिक काबिज दखील', 'मुकद्दमा हाजा के वाकयात', 'शराफतन'), paragraph rhythm ('यह कि ...'), and structure from [DAD ORIGINAL DRAFT 1] and CLEAN_STYLE_ANCHOR.",
+                "Replicate Advocate B.D. Shukla's complete 10-to-13 paragraph court structure, rich multi-sentence elaboration, and exact vocabulary ('मालिक काबिज दखील संक्रमणीय भूमिधर', 'नजरी नक्शा', 'चौहद्दी', 'एकांतिक अध्यासन व अधिभोग', 'मेली साजिशी व दबंग किस्म के लोग', 'कहा-कहलवाया व समझाया किन्तु प्रतिवादीगण इंकारी हैं', 'वाद का व्यवहार कारण चन्द दर चन्द कब्जे की कोशिश ऐलानिया धमकी के बाद इंकार आखिरी... श्रीमानजी को वादश्रवण एवं निर्णयाधिकार प्राप्त है', 'वाद का मूल्यांकन... न्याय शुल्क निर्धारित नियमानुसार अदा किया गया है', 'गर्जे कि प्रतिवादीगण वादी को बेदखल करके स्वयं कब्जा आदि का प्रयास न करें न करावें') from [DAD ORIGINAL DRAFT 1] and CLEAN_STYLE_ANCHOR.",
                 "Replace all historical case details with the current case details from CASE_FACTS.",
             ]
         else:
             mode_rules = [
                 f"DRAFTING STYLE MODE: HYBRID MIX (Template Structure + Dad's Language: {selected_tpl}).",
-                "Prioritize the professional template in SECTION 1 for structural headings, statutory grounds, cause of action, jurisdiction, valuation, and prayer points.",
-                "Infuse Advocate B.D. Shukla's authentic court vocabulary and transition style ('यह कि ...') from SECTION 2.",
+                "Combine the complete structural clauses and comprehensive prayer of SECTION 1 with Advocate B.D. Shukla's authentic court vocabulary and transition style ('यह कि ...') from SECTION 2.",
             ]
 
         package = {
@@ -245,16 +373,16 @@ class MultiDraftOrchestrator:
                 "Use standard Unicode Devanagari Hindi in every Hindi sentence.",
             ],
             "OUTPUT_REQUIREMENTS": {
-                "court_heading": "Court heading if supplied/applicable; otherwise empty.",
-                "case_heading": "Party/case heading using only supplied facts.",
-                "parties": "Party lines only; do not invent.",
-                "title": "Correct document title matching the selected template and case.",
-                "opening_averment": "Opening paragraph/statement appropriate to the document type.",
-                "pleadings": "Ordered substantive paragraphs starting with 'यह कि' where natural; no numbering.",
-                "prayer": "Only supported reliefs/demands, empty when inappropriate.",
-                "verification": "Only when appropriate and grounded in supplied facts.",
-                "signature_block": "Use supplied signer/deponent information and advocate_name / court_complex from CASE_FACTS.",
-                "layout": "Optional page-layout metadata. Use only when explicitly requested.",
+                "court_heading": "Court heading (e.g. न्यायालय श्रीमान सिविल जज (प्रवर खंड), औरैया).",
+                "case_heading": "Formal suit/case number line ONLY (e.g. 'वाद नंबर ............ सन् 2026' or 'मूल वाद संख्या ............ सन् 2026'). Never put party names here.",
+                "parties": "Complete party descriptions for plaintiff(s) and defendant(s).",
+                "title": "Formal underlined suit/document title (e.g. 'स्थायी व आदेशात्मक निषेधाज्ञा हेतु वाद पत्र अंतर्गत धारा 38 विशिष्ट अनुतोष अधिनियम सपठित आदेश 7 नियम 1 सिविल प्रक्रिया संहिता').",
+                "opening_averment": "Formal opening address (e.g. 'श्रीमान जी,\\nवादी निम्न प्रकार सविनय निवेदन करता है :-').",
+                "pleadings": "Complete, richly elaborated substantive paragraphs (9 to 12 paragraphs for a Plaint) starting with 'यह कि', including Cause of Action, Jurisdiction, and Valuation/Court Fee; no numbering.",
+                "prayer": "Comprehensive, multi-clause reliefs (at least 3 to 4 detailed clauses covering primary decree against defendants/agents/servants, costs of suit, and omnibus relief); do not repeat 'अतः प्रार्थना है कि' inside individual items.",
+                "verification": "Formal paragraph-split verification body text WITHOUT the heading word 'सत्यापन'.",
+                "signature_block": "Formal place, date, plaintiff signature line, and advocate signature block.",
+                "layout": "Optional page-layout metadata.",
             },
         }
         system = (
@@ -270,12 +398,16 @@ class MultiDraftOrchestrator:
                 schema=SCHEMA,
                 thinking_level=os.getenv("GEMINI_DRAFTING_THINKING_LEVEL", "high"),
             )
-            normalized_raw = _normalize_draft_structure(raw_draft, state.facts)
+            normalized_raw = _normalize_draft_structure(
+                raw_draft, state.facts, document_type=state.document_type, style_mode=style_mode
+            )
             draft = sanitize_draft_unicode(normalized_raw)
             errors = self.validate(draft, state.facts, state.document_type)
             if not errors:
                 state.status = "ready"
-                return format_draft_numbers(draft)
+                if style_mode == "dad_style":
+                    return format_draft_numbers(draft)
+                return draft
             package["SYSTEM_RULES"].append(
                 "Previous candidate failed validation: " + "; ".join(errors) + ". Regenerate without changing approved facts."
             )
