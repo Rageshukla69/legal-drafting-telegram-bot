@@ -28,9 +28,11 @@ def _is_dad_document(d: dict[str, Any]) -> bool:
 
 
 class HybridCorpusRetriever:
-    """Dual-Source Corpus Retriever:
-    Retrieves professional templates (for structural blueprint & statutory precision)
-    and Advocate B.D. Shukla's drafts (for authentic Hindi court language & style).
+    """Multi-Mode Corpus Retriever:
+    Supports:
+    1. `template_mode`: Strictly selects the best-suited template from the 500+ purchased legal templates.
+    2. `dad_style`: Strictly selects the best-suited reference from Advocate B.D. Shukla's 306 court files.
+    3. `hybrid_mode`: Combines both sources.
     """
 
     def __init__(self, index_path=None):
@@ -43,7 +45,6 @@ class HybridCorpusRetriever:
         if not self.documents:
             raise ValueError('corpus_index.json contains no documents.')
 
-        # Ensure every document has a normalized source tag
         for d in self.documents:
             if "source" not in d:
                 d["source"] = "dad_corpus" if _is_dad_document(d) else "professional_template"
@@ -90,7 +91,6 @@ class HybridCorpusRetriever:
         """Search dual sources: professional templates AND advocate dad drafts."""
         q = tokset(decode_krutidev_hybrid(query or ''))
         if not q:
-            # Fallback query tokens from document_type
             q = tokset(document_type)
 
         template_candidates = []
@@ -108,10 +108,12 @@ class HybridCorpusRetriever:
         scored_tpl = self._score_candidates(q, template_candidates)
         scored_dad = self._score_candidates(q, dad_candidates)
 
-        # If no templates matched for this document_type, fall back to any high-scoring templates
         if not scored_tpl:
             all_tpl = [(i, d) for i, d in enumerate(self.documents) if not _is_dad_document(d)]
             scored_tpl = self._score_candidates(q, all_tpl)
+        if not scored_dad:
+            all_dad = [(i, d) for i, d in enumerate(self.documents) if _is_dad_document(d)]
+            scored_dad = self._score_candidates(q, all_dad)
 
         def _fmt(scored_items, limit):
             return [
@@ -127,6 +129,90 @@ class HybridCorpusRetriever:
             "dad_drafts": _fmt(scored_dad, top_dad),
         }
 
+    def retrieve_for_style(
+        self,
+        query: str,
+        document_type: str = 'dava',
+        style_mode: str = 'template_mode',
+    ) -> tuple[str, str]:
+        """Retrieve context and selected template filename based on the user's chosen style_mode:
+        - `template_mode`: Strictly uses the 500+ purchased legal templates (Template Fill-In Mode).
+        - `dad_style`: Strictly uses Advocate B.D. Shukla's 306 original files.
+        - `hybrid_mode`: Uses both.
+        """
+        mode = (style_mode or "template_mode").strip().lower()
+        dual = self.dual_search(query, document_type=document_type, top_templates=3, top_dad=3)
+        templates = dual.get("templates", [])
+        dad_drafts = dual.get("dad_drafts", [])
+
+        if mode == "template_mode":
+            if not templates:
+                templates = dad_drafts[:2]
+            top_name = str(templates[0].get("filename", "Standard Legal Template")) if templates else "Standard Legal Template"
+            blocks = [
+                "================================================================================\n"
+                "SELECTED MASTER TEMPLATE (FROM PURCHASED 500+ LEGAL TEMPLATES)\n"
+                f"PRIMARY MATCHED TEMPLATE: {top_name}\n"
+                "MODE: STRICT TEMPLATE FILL-IN & ADAPTATION\n"
+                "CRITICAL INSTRUCTIONS:\n"
+                "1. Use [MASTER TEMPLATE 1] below as your direct structural & drafting foundation.\n"
+                "2. Keep its exact legal structure, headings, statutory provisions, legal clauses,\n"
+                "   cause of action format, valuation/court-fee wording, and prayer structure.\n"
+                "3. Replace all placeholder blanks (...) and sample details with the user's actual\n"
+                "   case details from CASE_FACTS (Court Name, Court Complex, Parties' Names, Issue/Facts,\n"
+                "   Property Description, Dates, Reliefs, and Advocate Name).\n"
+                "4. If CASE_FACTS includes custom_add_points, integrate those points cleanly.\n"
+                "5. If CASE_FACTS includes custom_remove_points, omit those points from the draft.\n"
+                "================================================================================"
+            ]
+            for i, r in enumerate(templates[:2], 1):
+                raw_text = str(r.get("text", "") or "")
+                text = raw_text if len(raw_text) <= 18000 else raw_text[:18000] + "\n[END OF TEMPLATE]"
+                blocks.append(
+                    f"[MASTER TEMPLATE {i}]\n"
+                    f"filename: {r.get('filename', '')}\n"
+                    f"document_type: {r.get('document_type', '')}\n"
+                    f"statutes: {', '.join(r.get('structure', {}).get('detected_statutes', []))}\n\n"
+                    f"{text}"
+                )
+            return "\n\n".join(blocks), top_name
+
+        if mode == "dad_style":
+            if not dad_drafts:
+                dad_drafts = templates[:2]
+            top_name = str(dad_drafts[0].get("filename", "Advocate B.D. Shukla Draft")) if dad_drafts else "Advocate B.D. Shukla Draft"
+            blocks = [
+                "================================================================================\n"
+                "SELECTED ORIGINAL ADVOCATE DRAFT (FROM DAD'S 306 COURT FILES)\n"
+                f"PRIMARY MATCHED FILE: {top_name}\n"
+                "MODE: DAD'S AUTHENTIC LEGAL STYLE & STRUCTURE REPLICATION\n"
+                "CRITICAL INSTRUCTIONS:\n"
+                "1. Replicate Advocate B.D. Shukla's exact legal drafting style, vocabulary\n"
+                "   ('मालिक काबिज दखील', 'मुकद्दमा हाजा के वाकयात', 'शराफतन'), paragraph rhythm ('यह कि ...'),\n"
+                "   party formatting, prayer phrasing, and verification wording from [DAD ORIGINAL DRAFT 1].\n"
+                "2. Replace all historical case details (old party names, old dates, old gata numbers)\n"
+                "   with the current case details from CASE_FACTS.\n"
+                "3. If CASE_FACTS includes custom_add_points, add those points in the exact same style.\n"
+                "4. If CASE_FACTS includes custom_remove_points, omit those points.\n"
+                "================================================================================"
+            ]
+            for i, r in enumerate(dad_drafts[:3], 1):
+                raw_text = str(r.get("text", "") or "")
+                text = raw_text if len(raw_text) <= 15000 else raw_text[:15000] + "\n[END OF DRAFT]"
+                blocks.append(
+                    f"[DAD ORIGINAL DRAFT {i}]\n"
+                    f"filename: {r.get('filename', '')}\n"
+                    f"category: {r.get('category', '')}\n\n"
+                    f"{text}"
+                )
+            return "\n\n".join(blocks), top_name
+
+        # Default / hybrid_mode
+        tpl_name = str(templates[0].get("filename", "")) if templates else ""
+        dad_name = str(dad_drafts[0].get("filename", "")) if dad_drafts else ""
+        combined_name = f"{tpl_name} + {dad_name}".strip(" +")
+        return self.format_dual_context(dual), combined_name
+
     def search(self, query: str, document_type: str = 'dava', top_k: int | None = None) -> list[dict[str, Any]]:
         """Standard search with balanced source representation."""
         top_k = top_k or int(os.getenv('CORPUS_TOP_K', '8'))
@@ -134,7 +220,6 @@ class HybridCorpusRetriever:
         combined = []
         seen_ids = set()
 
-        # Interleave template and dad drafts, starting with top template
         tpls = dual.get("templates", [])
         dads = dual.get("dad_drafts", [])
         for tpl, dad in zip(tpls, dads):

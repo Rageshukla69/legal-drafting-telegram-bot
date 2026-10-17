@@ -64,7 +64,7 @@ EDIT_SCHEMA = {
 }
 
 SYSTEM = """You are a precise legal-document edit parser for an Indian advocate's Hindi drafting bot.
-Convert the lawyer's natural-language or voice-dictated edit instruction into a structured edit operation against the supplied structured draft.
+Convert the lawyer's natural-language or voice-dictated edit instruction (including requests to add a point, remove a point, or update case details) into a structured edit operation against the supplied structured draft.
 
 Rules:
 - Never rewrite unrelated parts of the document.
@@ -72,12 +72,11 @@ Rules:
 - Supported operations:
   * `replace`: replace `old_text` with `new_text` in the selected section/index. `old_text` MUST be an exact contiguous substring of the selected item.
   * `replace_all`: when the lawyer wants a name, Gata/Khasra number, date, or term corrected everywhere it appears across the entire document, set `operation="replace_all"`, `old_text` to the exact existing text, and `new_text` to replacement.
-  * `delete`: delete `old_text` from the selected item (or remove the entire paragraph if `old_text` equals the entire item).
-  * `insert_before` / `insert_after`: insert `new_text` before or after `index` in list sections (`pleadings`, `prayer`, `parties`, `signature_block`).
-  * `append`: add a new paragraph/clause `new_text` to the end of `pleadings`, `prayer`, `parties`, or `signature_block` (`old_text` should be empty).
+  * `delete`: delete `old_text` from the selected item, OR if the lawyer wants an entire point/paragraph removed (e.g. 'पैराग्राफ 4 हटा दो' or 'यह पॉइंट हटा दो'), set `old_text` to the ENTIRE text of that item in `pleadings` or `prayer` so the whole item is removed cleanly.
+  * `insert_before` / `insert_after`: insert a new point/paragraph `new_text` before or after `index` in list sections (`pleadings`, `prayer`, `parties`, `signature_block`).
+  * `append`: add a new point/paragraph/clause `new_text` to the end of `pleadings`, `prayer`, `parties`, or `signature_block` (`old_text` should be empty).
   * `batch`: if the lawyer gave multiple distinct changes in one message, set `operation="batch"` and put each change in `edits`.
 - Layout operations: `page_break_before`, `page_break_after`, `remove_page_break_before`, `remove_page_break_after`.
-  * E.g. “प्रार्थना दूसरे पेज पर ले जाओ”, “prayer next page”, “सत्यापन नए पेज से” -> `page_break_before` on `section=prayer` or `section=verification`.
 - Always write Hindi legal additions/replacements in clean Unicode Devanagari Hindi (starting new pleading paragraphs with "यह कि " where natural, without numbering).
 - Return JSON only matching the schema.
 """
@@ -106,7 +105,6 @@ def _flex_replace_once(source: str, old: str, new: str) -> str | None:
     if m:
         return source[:m.start()] + new + source[m.end():]
 
-    # Try punctuation-normalized match
     norm_source = _normalize_hindi_punct(source)
     norm_old = _normalize_hindi_punct(clean_old)
     if norm_old in norm_source:
@@ -177,10 +175,94 @@ class DraftEditor:
             "reason": "Unambiguous request to start section on the next page.",
         }
 
+    @staticmethod
+    def _deterministic_remove_paragraph(draft: dict[str, Any], instruction: str) -> dict[str, Any] | None:
+        """Fast-path for unambiguous paragraph removal like 'पैराग्राफ 3 हटा दो' or 'paragraph 2 delete'."""
+        text = re.sub(r"\s+", " ", str(instruction or "").strip().casefold())
+        m = re.match(
+            r"^(?:पैराग्राफ|पैरा|पॉइंट|बिंदु|दावा पैरा|paragraph|para|point)?\s*(\d+)\s*(?:को\s*)?(?:हटा\s*दो|हटाओ|डिलीट\s*करो|हटाना\s*है|delete|remove)?$",
+            text,
+        )
+        if not m:
+            return None
+        has_delete_word = any(w in text for w in ("हटा", "डिलीट", "delete", "remove"))
+        if not has_delete_word and not text.isdigit():
+            return None
+        idx = int(m.group(1)) - 1
+        pleadings = draft.get("pleadings") or []
+        if 0 <= idx < len(pleadings):
+            return {
+                "operation": "delete",
+                "section": "pleadings",
+                "index": idx,
+                "old_text": str(pleadings[idx]),
+                "new_text": "",
+                "reason": f"Remove paragraph {idx + 1}",
+            }
+        return None
+
+    def parse_add_point(self, draft: dict[str, Any], instruction: str) -> dict[str, Any]:
+        """Dedicated parser when the user explicitly clicked 'Add Point'."""
+        clean = instruction.strip()
+        # Strip leading command phrases if present
+        clean_body = re.sub(
+            r"^(?:यह\s*पॉइंट\s*जोड़\s*दो\s*(?:कि)?|पॉइंट\s*जोड़ो\s*:?|इसमें\s*यह\s*जोड़ो\s*(?:कि)?|add\s*point\s*:?)\s*",
+            "",
+            clean,
+            flags=re.IGNORECASE,
+        ).strip()
+        # Check if user specified a specific paragraph position or prayer section
+        low = clean.casefold()
+        if any(k in low for k in ("के पहले", "के बाद", "प्रार्थना में", "सत्यापन में", "before", "after", "in prayer")):
+            return self.parse(draft, f"Add this point to the draft: {clean}")
+
+        if clean_body and not clean_body.startswith("यह कि") and any("\u0900" <= c <= "\u097f" for c in clean_body):
+            formatted = f"यह कि {clean_body}"
+        else:
+            formatted = clean_body or clean
+        if formatted and not formatted.endswith(("।", ".", "!", "?")):
+            formatted += "।"
+
+        pleadings = draft.get("pleadings") or []
+        # Insert before canonical closing clauses (कारण वाद / क्षेत्राधिकार / मूल्यांकन) when possible
+        insert_idx = len(pleadings)
+        for i, p in enumerate(pleadings):
+            if any(k in str(p) for k in ("कारण वाद", "क्षेत्राधिकार", "मूल्यांकन", "न्यायालय शुल्क")):
+                insert_idx = i
+                break
+
+        if insert_idx < len(pleadings):
+            return {
+                "operation": "insert_before",
+                "section": "pleadings",
+                "index": insert_idx,
+                "old_text": "",
+                "new_text": formatted,
+                "reason": "Insert new point before formal closing clauses.",
+            }
+        return {
+            "operation": "append",
+            "section": "pleadings",
+            "index": max(0, len(pleadings) - 1),
+            "old_text": "",
+            "new_text": formatted,
+            "reason": "Append new point to pleadings.",
+        }
+
+    def parse_remove_point(self, draft: dict[str, Any], instruction: str) -> dict[str, Any]:
+        """Dedicated parser when the user explicitly clicked 'Remove Point'."""
+        direct = self._deterministic_remove_paragraph(draft, instruction)
+        if direct:
+            return direct
+        return self.parse(draft, f"Remove/delete this point or paragraph from the draft: {instruction}")
+
     def parse(self, draft: dict[str, Any], instruction: str) -> dict[str, Any]:
         direct = self._deterministic_layout_intent(instruction)
         if direct:
             return direct
+        direct_rm = self._deterministic_remove_paragraph(draft, instruction)
+        if direct_rm:
+            return direct_rm
         context = json.dumps({"draft": draft, "editable_sections": self._sections(draft)}, ensure_ascii=False, indent=2)
         res = self._get_client().generate_json(
             system=SYSTEM,
@@ -288,16 +370,19 @@ class DraftEditor:
                 out[section] = items
                 return sanitize_draft_unicode(out)
 
-            # Defensive index handling
             if index < 0 or index >= len(items):
                 index = max(0, min(index, len(items) - 1))
 
             current = str(items[index]) if items else ""
             if operation in {"replace", "delete"}:
+                # If delete is requested and old_text is empty or matches the whole item, pop the item
+                if operation == "delete" and (not old.strip() or old.strip() == current.strip()):
+                    items.pop(index)
+                    out[section] = items
+                    return sanitize_draft_unicode(out)
                 replacement = "" if operation == "delete" else new
                 updated = _flex_replace_once(current, old, replacement)
                 if updated is None:
-                    # Search across other items in the same section
                     found_idx = next((i for i, it in enumerate(items) if _flex_replace_once(str(it), old, replacement) is not None), None)
                     if found_idx is None:
                         raise ValueError(f"Target text '{old}' not found in {section}.")
@@ -368,9 +453,9 @@ class DraftEditor:
         if op == "append":
             return f"➕ {target} के अंत में नया बिंदु जोड़ा जाएगा:\n{new}"
         if op == "delete":
-            return f"🗑️ {target} से यह अंश हटेगा:\n{old}"
+            return f"🗑️ {target} से यह बिंदु हटाया जाएगा:\n{old}"
         if op == "replace":
             return f"✏️ {target} में बदलाव:\nBefore: {old}\nAfter: {new}"
         if op == "insert_before":
-            return f"➕ {target} से पहले जोड़ा जाएगा:\n{new}"
-        return f"➕ {target} के बाद जोड़ा जाएगा:\n{new}"
+            return f"➕ {target} से पहले नया बिंदु जोड़ा जाएगा:\n{new}"
+        return f"➕ {target} के बाद नया बिंदु जोड़ा जाएगा:\n{new}"

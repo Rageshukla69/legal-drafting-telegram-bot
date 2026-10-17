@@ -3,7 +3,7 @@ import json, os, re
 from pathlib import Path
 from typing import Any
 from .case_intake import extract_case_facts, reconcile_case_state
-from .conversation_state import CaseState, missing_fields, next_questions
+from .conversation_state import CaseState, STYLE_NAMES, missing_fields, next_questions
 from .gemini_client import GeminiClient
 from .hybrid_retriever import HybridCorpusRetriever
 from .hindi_corpus_guard import legacy_corruption_score
@@ -12,7 +12,7 @@ from .legal_number_formatter import format_draft_numbers
 
 TYPE_META = {
     "dava_plaint": ("dava", "dava_specialist.txt", "Dava / वाद पत्र"),
-    "written_statement": ("written_statement", "written_statement_specialist.txt", "Written Statement / लिखित कथन"),
+    "written_statement": ("written_statement", "written_statement_specialist.txt", "Written Statement / जवाब दावा"),
     "application": ("application", "application_specialist.txt", "Application / प्रार्थना पत्र"),
     "evidence_pw_affidavit": ("evidence_pw_affidavit", "evidence_specialist.txt", "Evidence / PW Affidavit"),
     "affidavit": ("affidavit", "affidavit_specialist.txt", "Affidavit / शपथपत्र"),
@@ -25,12 +25,11 @@ SCHEMA = json.loads((ROOT / "draft_schema.json").read_text(encoding="utf-8"))
 
 BASE_RULES = [
     "CASE_FACTS are the sole authority for case-specific facts.",
-    "PRIORITY 1 (STRUCTURE & STATUTORY PRECISION): Follow the primary legal template in SECTION 1 for the overarching legal structure, statutory Order & Rule citations (CPC, Specific Relief Act, NI Act), standard cause of action formulation, valuation, court fee, jurisdiction, and comprehensive prayer clauses.",
-    "PRIORITY 2 (AUTHENTIC VERNACULAR ADVOCACY): Infuse Advocate B.D. Shukla's authentic court vocabulary ('मालिक काबिज दखील', 'शराफतन', 'मुकद्दमा हाजा'), respectful pleadings tone, and transition rhythm ('यह कि ...') from SECTION 2.",
     "Never invent names, dates, addresses, property identifiers, statutes, case law, ownership, title, possession, witnesses, valuation, court fee, limitation or jurisdiction.",
     "Preserve event status exactly: attempt is not completion; threat is not dispossession; allegation is not an established fact.",
-    "Do not invent reliefs/demands/defences. Use only supported user-provided material.",
-    "Never number paragraphs. The deterministic renderer assigns numbering.",
+    "If CASE_FACTS contains custom_add_points, include every requested point as a proper legal paragraph/clause.",
+    "If CASE_FACTS contains custom_remove_points, omit those topics/clauses from the draft.",
+    "Never number paragraphs yourself. The deterministic renderer assigns continuous Hindi numbering.",
     "Return only JSON matching the supplied schema.",
 ]
 
@@ -109,8 +108,11 @@ def _normalize_draft_structure(draft: dict[str, Any], facts: dict[str, Any]) -> 
         if fallback_parties:
             out["parties"] = fallback_parties
 
+    adv_name = str(facts.get("advocate_name") or "वी०डी० शुक्ला एडवोकेट").strip()
+    court_complex = str(facts.get("court_complex") or "सिविल कोर्ट कम्पाउण्ड, बिधूना, औरैया").strip()
+
     if not out.get("signature_block"):
-        out["signature_block"] = ["वादी", "द्वारा अधिवक्ता-", "वी०डी० शुक्ला एडवोकेट", "सिविल कोर्ट कम्पाउण्ड, बिधूना, औरैया"]
+        out["signature_block"] = ["वादी / प्रार्थी", "द्वारा अधिवक्ता-", adv_name, court_complex]
 
     return out
 
@@ -189,36 +191,56 @@ class MultiDraftOrchestrator:
         )
         return self.collect(state, refreshed)
 
-    def _retrieve(self, facts, document_type):
+    def _retrieve(self, facts: dict[str, Any], document_type: str, style_mode: str = "template_mode") -> tuple[str, str]:
         pieces = []
         for key in ("court_name", "plaintiff_intro", "defendant_intro", "property_description", "cause_of_action", "jurisdiction_facts", "purpose", "sender", "recipient", "deponent"):
             if facts.get(key):
                 pieces.append(str(facts[key]))
-        for key in ("facts", "reliefs", "demands", "defence_points", "documents"):
+        for key in ("facts", "reliefs", "demands", "defence_points", "documents", "custom_add_points"):
             val = facts.get(key, [])
             pieces.extend(str(x) for x in (val if isinstance(val, list) else [val]))
         query = " ".join(pieces)
         corpus_type = TYPE_META[document_type][0]
-        top_tpl = int(os.getenv("CORPUS_TOP_TEMPLATES", "2"))
-        top_dad = int(os.getenv("CORPUS_TOP_DAD", "2"))
-        dual = self.retriever.dual_search(query, document_type=corpus_type, top_templates=top_tpl, top_dad=top_dad)
-        return self.retriever.format_dual_context(dual)
+        return self.retriever.retrieve_for_style(query, document_type=corpus_type, style_mode=style_mode)
 
     def draft_live(self, state: CaseState):
         if missing_fields(state.facts, state.document_type):
             raise ValueError("Required facts are still missing.")
         corpus_type, prompt_file, label = TYPE_META[state.document_type]
         style = (PROMPTS / prompt_file).read_text(encoding="utf-8")
-        context = self._retrieve(state.facts, state.document_type)
+        style_mode = (state.style_mode or "template_mode").strip().lower()
+        context, selected_tpl = self._retrieve(state.facts, state.document_type, style_mode=style_mode)
+        state.selected_template_name = selected_tpl
         style_anchor = (ROOT / "style_reference.txt").read_text(encoding="utf-8")
-        package = {
-            "DOCUMENT_TYPE": label,
-            "CASE_FACTS": state.facts,
-            "DUAL_CORPUS_REFERENCE": context,
-            "CLEAN_STYLE_ANCHOR": style_anchor,
-            "SYSTEM_RULES": BASE_RULES + [
+
+        if style_mode == "template_mode":
+            mode_rules = [
+                f"DRAFTING STYLE MODE: PURCHASED 500+ LEGAL TEMPLATES MODE (Selected Template: {selected_tpl}).",
+                "Use [MASTER TEMPLATE 1] from CORPUS_REFERENCE as the direct template for this draft.",
+                "Keep the template's exact structure, legal clauses, statutory provisions, headings, and professional flow.",
+                "Replace all placeholder blanks and sample details with the user's current case details from CASE_FACTS (Court Name, Court Complex, Parties' Names, Issue/Facts, Property, Reliefs, and Advocate Name).",
+            ]
+        elif style_mode == "dad_style":
+            mode_rules = [
+                f"DRAFTING STYLE MODE: DAD'S 306 ORIGINAL FILES MODE (Selected Reference: {selected_tpl}).",
+                "Replicate Advocate B.D. Shukla's exact court drafting language, vocabulary ('मालिक काबिज दखील', 'मुकद्दमा हाजा के वाकयात', 'शराफतन'), paragraph rhythm ('यह कि ...'), and structure from [DAD ORIGINAL DRAFT 1] and CLEAN_STYLE_ANCHOR.",
+                "Replace all historical case details with the current case details from CASE_FACTS.",
+            ]
+        else:
+            mode_rules = [
+                f"DRAFTING STYLE MODE: HYBRID MIX (Template Structure + Dad's Language: {selected_tpl}).",
                 "Prioritize the professional template in SECTION 1 for structural headings, statutory grounds, cause of action, jurisdiction, valuation, and prayer points.",
                 "Infuse Advocate B.D. Shukla's authentic court vocabulary and transition style ('यह कि ...') from SECTION 2.",
+            ]
+
+        package = {
+            "DOCUMENT_TYPE": label,
+            "SELECTED_STYLE_MODE": STYLE_NAMES.get(style_mode, style_mode),
+            "SELECTED_TEMPLATE_FILE": selected_tpl,
+            "CASE_FACTS": state.facts,
+            "CORPUS_REFERENCE": context,
+            "CLEAN_STYLE_ANCHOR": style_anchor if style_mode != "template_mode" else "",
+            "SYSTEM_RULES": BASE_RULES + mode_rules + [
                 "Never output legacy-font artifacts or mixed Latin characters inside Hindi words.",
                 "Use standard Unicode Devanagari Hindi in every Hindi sentence.",
             ],
@@ -226,20 +248,19 @@ class MultiDraftOrchestrator:
                 "court_heading": "Court heading if supplied/applicable; otherwise empty.",
                 "case_heading": "Party/case heading using only supplied facts.",
                 "parties": "Party lines only; do not invent.",
-                "title": "Correct document title.",
+                "title": "Correct document title matching the selected template and case.",
                 "opening_averment": "Opening paragraph/statement appropriate to the document type.",
                 "pleadings": "Ordered substantive paragraphs starting with 'यह कि' where natural; no numbering.",
                 "prayer": "Only supported reliefs/demands, empty when inappropriate.",
                 "verification": "Only when appropriate and grounded in supplied facts.",
-                "signature_block": "Use supplied signer/deponent information; advocate signature is presentation metadata if needed.",
-                "layout": "Optional page-layout metadata. Use only when explicitly requested; page_break_before/page_break_after contain section names such as prayer or verification.",
+                "signature_block": "Use supplied signer/deponent information and advocate_name / court_complex from CASE_FACTS.",
+                "layout": "Optional page-layout metadata. Use only when explicitly requested.",
             },
         }
         system = (
             style
-            + "\n\nYou are now the FINAL DRAFTING ENGINE for Indian Civil Court drafting.\n"
-            + "Synthesize the structural rigor of the professional template with Advocate B.D. Shukla's authentic legal vocabulary.\n"
-            + "\n".join(f"- {x}" for x in BASE_RULES)
+            + "\n\nYou are the FINAL DRAFTING ENGINE for Indian Civil Court drafting.\n"
+            + "\n".join(f"- {x}" for x in (BASE_RULES + mode_rules))
         )
         errors = []
         for attempt in range(2):

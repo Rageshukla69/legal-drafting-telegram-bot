@@ -1,14 +1,25 @@
-"""Serializable multi-document intake state and deterministic missing checks."""
+"""Serializable multi-document intake state, style selection, and deterministic missing checks."""
 from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 import json
 from pathlib import Path
 
+STYLE_NAMES = {
+    "template_mode": "📜 500+ Purchased Legal Templates",
+    "dad_style": "🏛️ Dad's 306 Original Files (Adv. B.D. Shukla)",
+    "hybrid_mode": "⚡ Hybrid Mix (Template + Dad's Language)",
+}
+
+
 @dataclass
 class CaseState:
     case_id: str
     document_type: str = "dava_plaint"
+    style_mode: str = "template_mode"
+    style_selected: bool = False
+    selected_template_name: str = ""
+    pending_point_action: str = ""
     facts: dict[str, Any] = field(default_factory=dict)
     asked_fields: list[str] = field(default_factory=list)
     status: str = "collecting"
@@ -38,6 +49,7 @@ class CaseState:
         list_fields = {
             "plaintiffs", "defendants", "parties", "facts", "reliefs",
             "interim_reliefs", "demands", "defence_points", "documents",
+            "custom_add_points", "custom_remove_points",
         }
         for key, value in (new_facts or {}).items():
             if value is None or value == "" or value == [] or value == {}:
@@ -85,8 +97,14 @@ class CaseState:
         self.draft_versions.append({"version": self.draft_version, "draft": self.draft})
         self.draft_versions = self.draft_versions[-10:]
         self.status = "drafted"
-        # Keep the multi-document registry live even while this document remains active.
-        item = {"document_id": self.active_document_id, "document_type": self.document_type, "version": self.draft_version, "draft": self.draft}
+        item = {
+            "document_id": self.active_document_id,
+            "document_type": self.document_type,
+            "style_mode": self.style_mode,
+            "selected_template_name": self.selected_template_name,
+            "version": self.draft_version,
+            "draft": self.draft,
+        }
         for i, existing in enumerate(self.documents):
             if existing.get("document_id") == self.active_document_id:
                 self.documents[i] = item
@@ -96,7 +114,7 @@ class CaseState:
         self.documents = self.documents[-20:]
         self.edit_mode = False
         self.pending_edit = {}
-
+        self.pending_point_action = ""
 
     def archive_active_document(self) -> None:
         """Persist the current generated document into the case's multi-document list."""
@@ -105,6 +123,8 @@ class CaseState:
         item = {
             "document_id": self.active_document_id or f"{self.document_type}-1",
             "document_type": self.document_type,
+            "style_mode": self.style_mode,
+            "selected_template_name": self.selected_template_name,
             "version": self.draft_version,
             "draft": self.draft,
         }
@@ -119,14 +139,16 @@ class CaseState:
         self.documents = self.documents[-20:]
 
     def begin_new_document(self, document_type: str) -> None:
-        """Keep shared case facts but start a fresh document of the requested type."""
+        """Keep shared case facts and selected style mode, but start a fresh document of the requested type."""
         self.archive_active_document()
         self.document_type = document_type
+        self.selected_template_name = ""
         self.draft = {}
         self.draft_versions = []
         self.draft_version = 0
         self.edit_mode = False
         self.pending_edit = {}
+        self.pending_point_action = ""
         self.document_counter += 1
         self.active_document_id = f"{document_type}-{self.document_counter}"
         self.status = "collecting"
@@ -135,6 +157,8 @@ class CaseState:
         return [{
             "document_id": x.get("document_id", ""),
             "document_type": x.get("document_type", ""),
+            "style_mode": x.get("style_mode", self.style_mode),
+            "selected_template_name": x.get("selected_template_name", ""),
             "version": x.get("version", 0),
         } for x in self.documents]
 
@@ -142,7 +166,6 @@ class CaseState:
 
     @classmethod
     def from_dict(cls, data):
-        # Ignore unknown legacy keys rather than making an old saved case unloadable.
         allowed = {f.name for f in cls.__dataclass_fields__.values()}
         clean = {k: v for k, v in (data or {}).items() if k in allowed}
         return cls(**clean)
@@ -151,29 +174,32 @@ class CaseState:
     @classmethod
     def load(cls, path): return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
+
 DISPLAY_NAMES = {
-    "dava_plaint":"Dava / वाद पत्र",
-    "written_statement":"Written Statement / लिखित कथन",
-    "application":"Application / प्रार्थना पत्र",
-    "evidence_pw_affidavit":"Evidence / PW Affidavit",
-    "affidavit":"Affidavit / शपथपत्र",
-    "legal_notice":"Legal Notice / विधिक नोटिस",
-    "other_civil":"Other Civil Draft / अन्य सिविल ड्राफ्ट",
+    "dava_plaint": "Dava / वाद पत्र",
+    "written_statement": "Written Statement / जवाब दावा",
+    "application": "Application / प्रार्थना पत्र",
+    "evidence_pw_affidavit": "Evidence / PW Affidavit",
+    "affidavit": "Affidavit / शपथपत्र",
+    "legal_notice": "Legal Notice / विधिक नोटिस",
+    "other_civil": "Other Civil Draft / अन्य सिविल ड्राफ्ट",
 }
 
 REQUIRED_BY_TYPE = {
-    "dava_plaint": [("court_name","न्यायालय"),("plaintiffs","वादी"),("defendants","प्रतिवादी"),("facts","मुख्य तथ्य"),("reliefs","राहत")],
-    "written_statement": [("court_name","न्यायालय"),("plaintiffs","वादी"),("defendants","प्रतिवादी"),("facts","जवाब/प्रतिरक्षा के तथ्य")],
-    "application": [("court_name","न्यायालय"),("parties","पक्षकार"),("facts","मुख्य तथ्य"),("reliefs","मांगी गई राहत")],
-    "evidence_pw_affidavit": [("court_name","न्यायालय"),("deponent","शपथकर्ता/साक्षी"),("facts","साक्ष्य के तथ्य")],
-    "affidavit": [("deponent","शपथकर्ता"),("facts","शपथपत्र के तथ्य"),("purpose","शपथपत्र का उद्देश्य")],
-    "legal_notice": [("sender","प्रेषक"),("recipient","प्राप्तकर्ता"),("facts","नोटिस के तथ्य"),("demands","मांग/अनुपालन")],
-    "other_civil": [("parties","पक्षकार"),("facts","मुख्य तथ्य"),("purpose","ड्राफ्ट का उद्देश्य")],
+    "dava_plaint": [("court_name", "न्यायालय"), ("plaintiffs", "वादी"), ("defendants", "प्रतिवादी"), ("facts", "मुख्य तथ्य / विवाद"), ("reliefs", "राहत")],
+    "written_statement": [("court_name", "न्यायालय"), ("plaintiffs", "वादी"), ("defendants", "प्रतिवादी"), ("facts", "जवाब/प्रतिरक्षा के तथ्य")],
+    "application": [("court_name", "न्यायालय"), ("parties", "पक्षकार"), ("facts", "मुख्य तथ्य"), ("reliefs", "मांगी गई राहत")],
+    "evidence_pw_affidavit": [("court_name", "न्यायालय"), ("deponent", "शपथकर्ता/साक्षी"), ("facts", "साक्ष्य के तथ्य")],
+    "affidavit": [("deponent", "शपथकर्ता"), ("facts", "शपथपत्र के तथ्य"), ("purpose", "शपथपत्र का उद्देश्य")],
+    "legal_notice": [("sender", "प्रेषक"), ("recipient", "प्राप्तकर्ता"), ("facts", "नोटिस के तथ्य"), ("demands", "मांग/अनुपालन")],
+    "other_civil": [("parties", "पक्षकार"), ("facts", "मुख्य तथ्य"), ("purpose", "ड्राफ्ट का उद्देश्य")],
 }
+
 
 def missing_fields(facts, document_type="dava_plaint"):
     return [key for key, _ in REQUIRED_BY_TYPE.get(document_type, REQUIRED_BY_TYPE["other_civil"]) if not facts.get(key)]
 
+
 def next_questions(facts, document_type="dava_plaint", max_questions=5):
     labels = REQUIRED_BY_TYPE.get(document_type, REQUIRED_BY_TYPE["other_civil"])
-    return [(key,label) for key,label in labels if not facts.get(key)][:max_questions]
+    return [(key, label) for key, label in labels if not facts.get(key)][:max_questions]

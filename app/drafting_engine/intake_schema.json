@@ -6,6 +6,14 @@
       "type": "string",
       "description": "Court/forum named or clearly identified in the user's case narrative, e.g. न्यायालय, कोर्ट, before the Civil Judge, तहसील/जिला forum."
     },
+    "court_complex": {
+      "type": "string",
+      "description": "Court complex, kachahri, station, or district address if supplied (e.g. सिविल कोर्ट कम्पाउण्ड, बिधूना, औरैया / दीवानी कचहरी आगरा)."
+    },
+    "advocate_name": {
+      "type": "string",
+      "description": "Advocate/counsel name (e.g. father's name / वी०डी० शुक्ला एडवोकेट / बी०डी० शुक्ला एडवोकेट) if explicitly supplied by the user."
+    },
     "case_number": {
       "type": "string",
       "description": "Existing case/suit/application/notice number only if explicitly supplied."
@@ -19,7 +27,7 @@
       "items": {
         "type": "string"
       },
-      "description": "Persons/entities bringing the proceeding: वादी, plaintiff, claimant, applicant where the document type treats them as the initiating party, petitioner/prार्थी when applicable."
+      "description": "Persons/entities bringing the proceeding: वादी, plaintiff, claimant, applicant where the document type treats them as the initiating party, petitioner/प्रार्थी when applicable."
     },
     "defendants": {
       "type": "array",
@@ -124,6 +132,20 @@
         "type": "string"
       },
       "description": "Documents/evidence explicitly mentioned: sale deed, registry, notice, receipt, order, khasra, photographs, witness, etc."
+    },
+    "custom_add_points": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Specific additional points, clauses, or paragraphs the user/advocate explicitly requests to add into the template or draft."
+    },
+    "custom_remove_points": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Specific points, clauses, or template sections that the user/advocate explicitly wants omitted or removed."
     },
     "purpose": {
       "type": "string",
