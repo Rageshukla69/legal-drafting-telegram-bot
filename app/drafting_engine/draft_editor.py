@@ -1,9 +1,11 @@
 from __future__ import annotations
-import json, os, re
+import json, logging, os, re
 from copy import deepcopy
 from typing import Any
 from .gemini_client import GeminiClient
 from .krutidev_converter import sanitize_draft_unicode
+
+log = logging.getLogger("legal-bot.editor")
 
 EDIT_SCHEMA = {
     "type": "object",
@@ -21,6 +23,7 @@ EDIT_SCHEMA = {
                 "page_break_after",
                 "remove_page_break_before",
                 "remove_page_break_after",
+                "batch",
             ],
         },
         "section": {
@@ -41,6 +44,21 @@ EDIT_SCHEMA = {
         "old_text": {"type": "string"},
         "new_text": {"type": "string"},
         "reason": {"type": "string"},
+        "edits": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "operation": {"type": "string"},
+                    "section": {"type": "string"},
+                    "index": {"type": "integer", "minimum": 0},
+                    "old_text": {"type": "string"},
+                    "new_text": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["operation", "section", "index", "old_text", "new_text", "reason"],
+            },
+        },
     },
     "required": ["operation", "section", "index", "old_text", "new_text", "reason"],
 }
@@ -51,30 +69,51 @@ Convert the lawyer's natural-language or voice-dictated edit instruction into a 
 Rules:
 - Never rewrite unrelated parts of the document.
 - Select the target `section` and zero-based `index` (use 0 for scalar sections or when using `append` / `replace_all`).
-- Supported text operations:
+- Supported operations:
   * `replace`: replace `old_text` with `new_text` in the selected section/index. `old_text` MUST be an exact contiguous substring of the selected item.
-  * `replace_all`: when the lawyer wants a name, Gata/Khasra number, date, or term corrected everywhere it appears across the entire document, set `operation="replace_all"`, `old_text` to the exact existing text, and `new_text` to the replacement text.
-  * `delete`: delete `old_text` from the selected item (or if `old_text` equals the entire item in a list section, remove that item).
-  * `insert_before` / `insert_after`: insert `new_text` before or after `index` in a list section (`pleadings`, `prayer`, `parties`, `signature_block`), or anchored by `old_text` in a scalar section.
+  * `replace_all`: when the lawyer wants a name, Gata/Khasra number, date, or term corrected everywhere it appears across the entire document, set `operation="replace_all"`, `old_text` to the exact existing text, and `new_text` to replacement.
+  * `delete`: delete `old_text` from the selected item (or remove the entire paragraph if `old_text` equals the entire item).
+  * `insert_before` / `insert_after`: insert `new_text` before or after `index` in list sections (`pleadings`, `prayer`, `parties`, `signature_block`).
   * `append`: add a new paragraph/clause `new_text` to the end of `pleadings`, `prayer`, `parties`, or `signature_block` (`old_text` should be empty).
-- Supported layout operations: `page_break_before`, `page_break_after`, `remove_page_break_before`, `remove_page_break_after`.
-  * Requests like “प्रार्थना दूसरे पेज पर ले जाओ”, “prayer next page”, “सत्यापन नए पेज से शुरू करो” mean `page_break_before` on `section=prayer` or `section=verification` with empty `old_text` and `new_text`.
-- Always write Hindi legal additions/replacements in clean Unicode Devanagari Hindi (starting new pleading paragraphs with "यह कि " when appropriate, without numbering).
+  * `batch`: if the lawyer gave multiple distinct changes in one message, set `operation="batch"` and put each change in `edits`.
+- Layout operations: `page_break_before`, `page_break_after`, `remove_page_break_before`, `remove_page_break_after`.
+  * E.g. “प्रार्थना दूसरे पेज पर ले जाओ”, “prayer next page”, “सत्यापन नए पेज से” -> `page_break_before` on `section=prayer` or `section=verification`.
+- Always write Hindi legal additions/replacements in clean Unicode Devanagari Hindi (starting new pleading paragraphs with "यह कि " where natural, without numbering).
 - Return JSON only matching the schema.
 """
 
 
+def _normalize_hindi_punct(text: str) -> str:
+    t = text.replace("०", "0").replace("।", ".")
+    t = re.sub(r"[\-–—]", "-", t)
+    return t
+
+
 def _flex_replace_once(source: str, old: str, new: str) -> str | None:
-    """Replace `old` in `source`, falling back to whitespace-flexible matching."""
+    """Replace `old` in `source`, with whitespace, punctuation, and zero-normalization flexibility."""
     if old in source:
         return source.replace(old, new, 1)
-    tokens = [re.escape(tok) for tok in old.strip().split() if tok]
+
+    clean_old = old.strip().rstrip(" .।:,;-–—")
+    if clean_old and clean_old in source:
+        return source.replace(clean_old, new, 1)
+
+    tokens = [re.escape(tok) for tok in clean_old.split() if tok]
     if not tokens:
         return None
     pattern = re.compile(r"\s+".join(tokens))
     m = pattern.search(source)
     if m:
         return source[:m.start()] + new + source[m.end():]
+
+    # Try punctuation-normalized match
+    norm_source = _normalize_hindi_punct(source)
+    norm_old = _normalize_hindi_punct(clean_old)
+    if norm_old in norm_source:
+        start_idx = norm_source.find(norm_old)
+        end_idx = start_idx + len(norm_old)
+        return source[:start_idx] + new + source[end_idx:]
+
     return None
 
 
@@ -135,7 +174,7 @@ class DraftEditor:
             "index": 0,
             "old_text": "",
             "new_text": "",
-            "reason": "Unambiguous natural-language request to start the selected section on the next page.",
+            "reason": "Unambiguous request to start section on the next page.",
         }
 
     def parse(self, draft: dict[str, Any], instruction: str) -> dict[str, Any]:
@@ -152,29 +191,29 @@ class DraftEditor:
         return sanitize_draft_unicode(res)
 
     @staticmethod
-    def _valid_section(draft, section):
+    def _valid_section(section: str) -> bool:
         return section in {
             "pleadings", "prayer", "opening_averment", "verification",
             "parties", "signature_block", "title", "court_heading", "case_heading",
         }
 
-    def apply(self, draft: dict[str, Any], edit: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    def _apply_single_op(self, draft: dict[str, Any], edit: dict[str, Any]) -> dict[str, Any]:
         out = deepcopy(draft)
         section = str(edit.get("section", ""))
         operation = str(edit.get("operation", ""))
         old = str(edit.get("old_text", ""))
         new = str(edit.get("new_text", ""))
         index = int(edit.get("index", -1))
-        if not self._valid_section(out, section):
-            raise ValueError("Invalid edit section.")
+
+        if not self._valid_section(section):
+            raise ValueError(f"Invalid edit section: {section}")
+
         layout_ops = {"page_break_before", "page_break_after", "remove_page_break_before", "remove_page_break_after"}
         text_ops = {"replace", "replace_all", "delete", "insert_before", "insert_after", "append"}
         if operation not in text_ops | layout_ops:
-            raise ValueError("Unsupported edit operation.")
+            raise ValueError(f"Unsupported edit operation: {operation}")
 
         if operation in layout_ops:
-            if old or new:
-                raise ValueError("Layout edits must not contain old_text/new_text.")
             layout = out.setdefault("layout", {})
             if not isinstance(layout, dict):
                 layout = {}
@@ -193,7 +232,7 @@ class DraftEditor:
             elif section not in values:
                 values.append(section)
             layout[key] = values
-            return out, self.describe(edit)
+            return out
 
         if operation == "replace_all":
             if not old:
@@ -216,32 +255,26 @@ class DraftEditor:
                         new_items.append(s_it)
                     out[list_key] = new_items
             if not changed:
-                raise ValueError("The target text was not found in the draft; no change applied.")
-            return sanitize_draft_unicode(out), self.describe(edit)
+                raise ValueError(f"Target text '{old}' not found across draft; no change applied.")
+            return sanitize_draft_unicode(out)
 
         scalar = section in {"opening_averment", "verification", "title", "court_heading", "case_heading"}
         if scalar:
             current = str(out.get(section, "") or "")
-            if index not in (0, -1):
-                raise ValueError("Invalid target index.")
             if not current:
                 if operation in {"replace", "append", "insert_after"} and new:
                     out[section] = new
-                    return sanitize_draft_unicode(out), self.describe(edit)
-                raise ValueError("Target section is empty.")
+                    return sanitize_draft_unicode(out)
+                raise ValueError(f"Target section '{section}' is empty.")
             if operation in {"replace", "delete"}:
-                if not old:
-                    raise ValueError("The exact target text was not found; no change applied.")
                 replacement = "" if operation == "delete" else new
                 updated = _flex_replace_once(current, old, replacement)
                 if updated is None:
-                    raise ValueError("The exact target text was not found; no change applied.")
+                    raise ValueError(f"Target text '{old}' not found in {section}.")
                 out[section] = updated
             elif operation == "append":
                 out[section] = (current + " " + new).strip()
             else:
-                if not old or old not in current:
-                    raise ValueError("The exact anchor text was not found; no change applied.")
                 repl = (new + old) if operation == "insert_before" else (old + new)
                 out[section] = current.replace(old, repl, 1)
         else:
@@ -253,40 +286,56 @@ class DraftEditor:
                     raise ValueError("Cannot append empty text.")
                 items.append(new.strip())
                 out[section] = items
-                return sanitize_draft_unicode(out), self.describe(edit)
+                return sanitize_draft_unicode(out)
+
+            # Defensive index handling
             if index < 0 or index >= len(items):
-                raise ValueError("Target paragraph/item index is out of range.")
-            current = str(items[index])
+                index = max(0, min(index, len(items) - 1))
+
+            current = str(items[index]) if items else ""
             if operation in {"replace", "delete"}:
-                if not old:
-                    raise ValueError("The exact target text was not found; no change applied.")
                 replacement = "" if operation == "delete" else new
                 updated = _flex_replace_once(current, old, replacement)
                 if updated is None:
-                    # Fallback: search across other items in the same section if the lawyer gave 1-based vs 0-based index
+                    # Search across other items in the same section
                     found_idx = next((i for i, it in enumerate(items) if _flex_replace_once(str(it), old, replacement) is not None), None)
                     if found_idx is None:
-                        raise ValueError("The exact target text was not found; no change applied.")
+                        raise ValueError(f"Target text '{old}' not found in {section}.")
                     index = found_idx
                     edit["index"] = found_idx
                     updated = _flex_replace_once(str(items[found_idx]), old, replacement)
+
                 if operation == "delete" and not updated.strip():
                     items.pop(index)
                 else:
                     items[index] = updated.strip()
             elif operation == "insert_before":
-                if old and old not in current:
-                    raise ValueError("The exact anchor text was not found; no change applied.")
                 items.insert(index, new)
             elif operation == "insert_after":
-                if old and old not in current:
-                    raise ValueError("The exact anchor text was not found; no change applied.")
                 items.insert(index + 1, new)
             out[section] = items
-        return sanitize_draft_unicode(out), self.describe(edit)
+
+        return sanitize_draft_unicode(out)
+
+    def apply(self, draft: dict[str, Any], edit: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        operation = str(edit.get("operation", ""))
+        if operation == "batch" and isinstance(edit.get("edits"), list):
+            current = deepcopy(draft)
+            descriptions = []
+            for sub_edit in edit["edits"]:
+                current = self._apply_single_op(current, sub_edit)
+                descriptions.append(self.describe(sub_edit))
+            return current, "\n".join(descriptions)
+
+        updated = self._apply_single_op(draft, edit)
+        return updated, self.describe(edit)
 
     @staticmethod
     def describe(edit: dict[str, Any]) -> str:
+        if edit.get("operation") == "batch" and isinstance(edit.get("edits"), list):
+            lines = [f"{i}. {DraftEditor.describe(sub)}" for i, sub in enumerate(edit["edits"], 1)]
+            return "\n".join(lines)
+
         op = edit.get("operation")
         section = edit.get("section")
         idx = edit.get("index", 0)

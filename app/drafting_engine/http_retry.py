@@ -1,15 +1,13 @@
 """Shared HTTP resilience helper.
 
-Every outbound AI/API call in this project (Gemini, Azure Speech) is a network
-request that can transiently fail with 429/500/502/503/504 under provider
-load. A single unlucky attempt should not fail a user's request. This module
-gives every caller a `requests.Session` whose adapter retries those status
-codes with exponential backoff + jitter before ever raising, following
-Google's own documented guidance for the Gemini API:
-https://ai.google.dev/gemini-api/docs/troubleshooting
+Every outbound AI/API call in this project (Gemini, Azure AI Foundry, Azure Speech)
+is a network request that can transiently fail with 429/500/502/503/504 under provider
+load. This helper provides a requests.Session whose adapter retries those status
+codes with exponential backoff before ever raising.
 """
 from __future__ import annotations
 
+import inspect
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -24,21 +22,29 @@ def build_retrying_session(
     backoff_max: float = 60.0,
     methods: frozenset[str] = frozenset({"POST"}),
 ) -> requests.Session:
-    retry = Retry(
-        total=max_retries,
-        connect=max_retries,
-        read=max_retries,
-        status=max_retries,
-        backoff_factor=backoff_factor,
-        backoff_max=backoff_max,
-        backoff_jitter=0.5,
-        status_forcelist=sorted(RETRYABLE_STATUS),
-        allowed_methods=methods,
-        respect_retry_after_header=True,
-        # Return the final failing response instead of raising, so callers can
-        # inspect the status code/body and produce a clean, specific error.
-        raise_on_status=False,
-    )
+    retry_kwargs = {
+        "total": max_retries,
+        "connect": max_retries,
+        "read": max_retries,
+        "status": max_retries,
+        "backoff_factor": backoff_factor,
+        "status_forcelist": sorted(RETRYABLE_STATUS),
+        "raise_on_status": False,
+    }
+    sig = inspect.signature(Retry.__init__)
+    if "allowed_methods" in sig.parameters:
+        retry_kwargs["allowed_methods"] = methods
+    elif "method_whitelist" in sig.parameters:
+        retry_kwargs["method_whitelist"] = methods
+
+    if "backoff_max" in sig.parameters:
+        retry_kwargs["backoff_max"] = backoff_max
+    if "backoff_jitter" in sig.parameters:
+        retry_kwargs["backoff_jitter"] = 0.5
+    if "respect_retry_after_header" in sig.parameters:
+        retry_kwargs["respect_retry_after_header"] = True
+
+    retry = Retry(**retry_kwargs)
     session = requests.Session()
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("https://", adapter)

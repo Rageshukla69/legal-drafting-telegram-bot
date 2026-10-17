@@ -12,10 +12,11 @@ log = logging.getLogger("legal-bot.ai")
 
 DEFAULT_AZURE_ENDPOINT = "https://vakilbot.services.ai.azure.com/openai/v1/chat/completions"
 DEFAULT_AZURE_MODEL = "gpt-6.0-luna"
+DEFAULT_OPENAI_API_VERSION = "2024-08-01-preview"
 
 
 class GeminiError(RuntimeError):
-    """Raised for any failed AI model call (Microsoft Foundry GPT-6.0-Luna or Gemini)."""
+    """Raised for any failed AI model call (Microsoft Foundry GPT-6.0-Luna, Azure OpenAI, or Gemini)."""
 
     def __init__(self, message: str, *, status_code: int | None = None, retryable: bool = False):
         super().__init__(message)
@@ -51,7 +52,6 @@ def _normalize_azure_endpoint(raw: str) -> str:
     url = (raw or "").strip()
     if not url:
         return DEFAULT_AZURE_ENDPOINT
-    # Preserve full URLs that already contain /chat/completions or /responses (including ?api-version=...)
     if "/chat/completions" in url or "/responses" in url:
         return url
     url = url.rstrip("/")
@@ -111,32 +111,53 @@ def _apply_schema_defaults(data: dict[str, Any], schema: dict[str, Any]) -> dict
 
 
 class GeminiClient:
-    """Unified LLM client supporting Microsoft Foundry (`gpt-6.0-luna`) as primary default and Google Gemini as fallback."""
+    """Unified LLM client supporting Microsoft Foundry (`gpt-6.0-luna`) as primary default,
+    Azure OpenAI (`gpt-4.1-mini`) as secondary fallback, and Google Gemini as tertiary fallback.
+    """
 
     def __init__(self):
+        # Primary Azure AI / Microsoft Foundry settings
         self.azure_key = (
             os.getenv("AZURE_AI_KEY", "").strip()
             or os.getenv("FOUNDRY_API_KEY", "").strip()
-            or os.getenv("AZURE_OPENAI_API_KEY", "").strip()
-            or os.getenv("OPENAI_API_KEY", "").strip()
         )
         self.azure_endpoint = _normalize_azure_endpoint(
             os.getenv("AZURE_AI_ENDPOINT", "")
             or os.getenv("FOUNDRY_ENDPOINT", "")
-            or os.getenv("AZURE_OPENAI_ENDPOINT", "")
             or DEFAULT_AZURE_ENDPOINT
         )
         self.azure_model = (
             os.getenv("AZURE_AI_MODEL", "").strip()
             or os.getenv("FOUNDRY_MODEL", "").strip()
-            or os.getenv("AZURE_OPENAI_DEPLOYMENT", "").strip()
             or DEFAULT_AZURE_MODEL
         )
 
+        # Secondary Azure OpenAI deployment fallback settings
+        self.azure_openai_key = (
+            os.getenv("AZURE_OPENAI_API_KEY", "").strip()
+            or self.azure_key
+            or os.getenv("OPENAI_API_KEY", "").strip()
+        )
+        self.azure_openai_endpoint = (
+            os.getenv("AZURE_OPENAI_ENDPOINT", "").strip()
+            or os.getenv("AZURE_AI_ENDPOINT", "").strip()
+            or self.azure_endpoint
+        )
+        self.azure_openai_deployment = (
+            os.getenv("AZURE_OPENAI_DEPLOYMENT", "").strip()
+            or "gpt-4.1-mini"
+        )
+
+        # If primary azure_key was not set, fall back to azure_openai_key
+        if not self.azure_key and self.azure_openai_key:
+            self.azure_key = self.azure_openai_key
+
+        # Google Gemini settings
         self.key = os.getenv("GEMINI_API_KEY", "").strip()
         self.model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
         self.fallback_model = os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
 
+        # Handle provider configuration edge-cases
         provider_pref = os.getenv("AI_PROVIDER", "").strip().lower()
         if not self.azure_key and self.key:
             low_model = self.model.lower()
@@ -155,11 +176,6 @@ class GeminiClient:
         self.retry_backoff_seconds = float(os.getenv("GEMINI_RETRY_BACKOFF_SECONDS", "1.5"))
         self.retry_backoff_max_seconds = float(os.getenv("GEMINI_RETRY_BACKOFF_MAX_SECONDS", "60"))
 
-        if not self.azure_key and not self.key:
-            raise GeminiError(
-                "Neither AZURE_AI_KEY (Microsoft Foundry gpt-6.0-luna) nor GEMINI_API_KEY is set."
-            )
-
         self._session = build_retrying_session(
             max_retries=self.max_retries,
             backoff_factor=self.retry_backoff_seconds,
@@ -168,13 +184,22 @@ class GeminiClient:
 
     def _post_azure_chat(self, url: str, headers: dict[str, str], payload: dict[str, Any]) -> requests.Response:
         r = self._session.post(url, headers=headers, json=payload, timeout=self.timeout)
-        # Newer GPT-5 / GPT-6 models on Azure Foundry may reject temperature=0; retry without temperature if 400
+        # Newer GPT models on Azure Foundry may reject temperature=0; retry without temperature if 400
         if r.status_code == 400 and "temperature" in r.text.lower() and "temperature" in payload:
             fallback_payload = {k: v for k, v in payload.items() if k != "temperature"}
             r = self._session.post(url, headers=headers, json=fallback_payload, timeout=self.timeout)
         return r
 
-    def _call_azure(self, *, model: str, system: str, prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
+    def _call_azure(
+        self,
+        *,
+        model: str,
+        endpoint: str,
+        api_key: str,
+        system: str,
+        prompt: str,
+        schema: dict[str, Any],
+    ) -> dict[str, Any]:
         schema_block = (
             "\n\nCRITICAL JSON OUTPUT REQUIREMENT:\n"
             "Return ONLY a single valid JSON object (no markdown fences, no commentary) "
@@ -192,45 +217,52 @@ class GeminiClient:
         }
         headers = {
             "Content-Type": "application/json",
-            "api-key": self.azure_key,
-            "Authorization": f"Bearer {self.azure_key}",
+            "api-key": api_key,
+            "Authorization": f"Bearer {api_key}",
         }
-        try:
-            r = self._post_azure_chat(self.azure_endpoint, headers, payload)
-            # If /openai/v1/chat/completions returns 404 for an Azure OpenAI deployment or slug variant,
-            # automatically try the Azure OpenAI deployments path and common GPT-6.0-Luna slug variants.
-            if r.status_code == 404:
-                base_host = _base_host_url(self.azure_endpoint)
-                candidate_models = [model]
-                for m_var in ("gpt-6.0-luna", "gpt-6-luna", "gpt-6.0", "gpt-6-0-luna"):
-                    if m_var not in candidate_models:
-                        candidate_models.append(m_var)
-                for cand_m in candidate_models:
-                    cand_payload = {**payload, "model": cand_m}
-                    for cand_url in (
-                        self.azure_endpoint,
-                        f"{base_host}/openai/deployments/{cand_m}/chat/completions?api-version=2025-01-01-preview",
-                    ):
-                        if cand_url == self.azure_endpoint and cand_m == model:
-                            continue
+
+        # Build candidate URLs
+        base_host = _base_host_url(endpoint)
+        candidate_urls = [endpoint]
+        if "/openai/deployments/" not in endpoint:
+            # Also try the Azure OpenAI deployments endpoint format
+            dep_url = f"{base_host}/openai/deployments/{model}/chat/completions?api-version={DEFAULT_OPENAI_API_VERSION}"
+            if dep_url not in candidate_urls:
+                candidate_urls.append(dep_url)
+
+        last_response = None
+        for cand_url in candidate_urls:
+            try:
+                r = self._post_azure_chat(cand_url, headers, payload)
+                last_response = r
+                if r.ok:
+                    break
+                # If 404, try model name variants if model is gpt-6.0-luna
+                if r.status_code == 404 and "luna" in model.lower():
+                    for m_var in ("gpt-6.0-luna", "gpt-6-luna", "gpt-6.0", "gpt-6-0-luna"):
+                        cand_payload = {**payload, "model": m_var}
                         r_try = self._post_azure_chat(cand_url, headers, cand_payload)
                         if r_try.ok:
                             r = r_try
+                            last_response = r
                             break
                     if r.ok:
                         break
-        except requests.RequestException as e:
-            raise GeminiError(f"Azure AI Foundry network error ({model}): {e}", retryable=True) from e
+            except requests.RequestException as e:
+                raise GeminiError(f"Azure AI network error ({model} at {cand_url}): {e}", retryable=True) from e
 
-        if not r.ok:
-            retryable = r.status_code in _RETRYABLE_STATUS
+        if last_response is None or not last_response.ok:
+            status_code = last_response.status_code if last_response is not None else 500
+            err_text = last_response.text[:2000] if last_response is not None else "No response"
+            retryable = status_code in _RETRYABLE_STATUS
             raise GeminiError(
-                f"Azure AI Foundry HTTP {r.status_code} ({model}): {r.text[:2000]}",
-                status_code=r.status_code,
+                f"Azure AI HTTP {status_code} ({model}): {err_text}",
+                status_code=status_code,
                 retryable=retryable,
             )
+
         try:
-            body = r.json()
+            body = last_response.json()
             if "choices" in body:
                 text = body["choices"][0]["message"]["content"]
             elif "output_text" in body:
@@ -240,14 +272,15 @@ class GeminiClient:
             result = _extract_json_object(text)
         except (KeyError, IndexError, TypeError, ValueError) as e:
             raise GeminiError(
-                f"Azure AI Foundry returned invalid structured JSON ({model}): {r.text[:2000]}"
+                f"Azure AI returned invalid structured JSON ({model}): {last_response.text[:2000]}"
             ) from e
+
         return _apply_schema_defaults(result, schema)
 
     def _call_gemini(
         self, *, model: str, system: str, prompt: str, schema: dict[str, Any], thinking_level: str
     ) -> dict[str, Any]:
-        url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){model}:generateContent"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         gen: dict[str, Any] = {
             "temperature": 0,
             "responseMimeType": "application/json",
@@ -283,26 +316,55 @@ class GeminiClient:
     def generate_json(
         self, *, system: str, prompt: str, schema: dict[str, Any], thinking_level: str = "medium"
     ) -> dict[str, Any]:
+        """Generate structured JSON with automatic multi-tier fallback:
+        Tier 1: Primary Microsoft Foundry GPT-6.0-Luna
+        Tier 2: Secondary Azure OpenAI Deployment (gpt-4.1-mini)
+        Tier 3: Google Gemini (if configured)
+        """
+        if not self.azure_key and not self.azure_openai_key and not self.key:
+            raise GeminiError(
+                "No AI API keys configured. Set AZURE_AI_KEY (for gpt-6.0-luna), "
+                "AZURE_OPENAI_API_KEY (for gpt-4.1-mini), or GEMINI_API_KEY."
+            )
+
         level = str(thinking_level or "medium").lower()
         if level not in {"low", "medium", "high"}:
             level = "medium"
 
-        last_err: GeminiError | None = None
+        errors: list[str] = []
 
+        # Tier 1: Try Primary Azure AI / Microsoft Foundry (gpt-6.0-luna)
         if self.azure_key:
             try:
                 return self._call_azure(
                     model=self.azure_model,
+                    endpoint=self.azure_endpoint,
+                    api_key=self.azure_key,
                     system=system,
                     prompt=prompt,
                     schema=schema,
                 )
             except GeminiError as e:
-                last_err = e
-                log.warning("Azure AI Foundry model '%s' failed: %s", self.azure_model, e)
-                if not self.key:
-                    raise
+                log.warning("Primary Azure AI model '%s' failed: %s. Attempting fallback.", self.azure_model, e)
+                errors.append(f"Primary ({self.azure_model}): {e}")
 
+        # Tier 2: Try Secondary Azure OpenAI Deployment (gpt-4.1-mini) if different or if primary failed
+        if self.azure_openai_key and (self.azure_openai_deployment != self.azure_model or not self.azure_key):
+            try:
+                log.info("Invoking secondary fallback Azure deployment: %s", self.azure_openai_deployment)
+                return self._call_azure(
+                    model=self.azure_openai_deployment,
+                    endpoint=_normalize_azure_endpoint(self.azure_openai_endpoint),
+                    api_key=self.azure_openai_key,
+                    system=system,
+                    prompt=prompt,
+                    schema=schema,
+                )
+            except GeminiError as e:
+                log.warning("Secondary Azure deployment '%s' failed: %s.", self.azure_openai_deployment, e)
+                errors.append(f"Secondary ({self.azure_openai_deployment}): {e}")
+
+        # Tier 3: Try Gemini models if configured
         if self.key:
             models_to_try = [self.model]
             if self.fallback_model and self.fallback_model != self.model:
@@ -310,8 +372,7 @@ class GeminiClient:
 
             for i, model in enumerate(models_to_try):
                 try:
-                    if i > 0 or last_err is not None:
-                        log.warning("Falling back to Gemini model '%s'.", model)
+                    log.info("Invoking tertiary fallback Gemini model: %s", model)
                     return self._call_gemini(
                         model=model,
                         system=system,
@@ -320,10 +381,10 @@ class GeminiClient:
                         thinking_level=level,
                     )
                 except GeminiError as e:
-                    last_err = e
-                    log.warning("Gemini call failed on model '%s': %s", model, e)
+                    log.warning("Gemini model '%s' failed: %s", model, e)
+                    errors.append(f"Gemini ({model}): {e}")
                     continue
 
-        assert last_err is not None
-        raise last_err
-                    
+        raise GeminiError(
+            "All configured AI model endpoints failed:\n" + "\n".join(f"- {err}" for err in errors)
+        )

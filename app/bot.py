@@ -1,11 +1,15 @@
-"""Professional Telegram UI for all seven legal draft types — supports voice, text, and image/PDF typist workflows."""
+"""Professional Telegram UI for Indian legal drafts — supports voice, text, photo/PDF OCR,
+dual-source corpus synthesis (Professional Templates + Advocate B.D. Shukla), and multi-turn editing.
+"""
 from __future__ import annotations
-import asyncio, logging, os, re, tempfile
+import asyncio, json, logging, os, re, tempfile
 from io import BytesIO
+from pathlib import Path
+
 try:
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
     from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
-except ImportError:  # pragma: no cover - allows importing helper functions in minimal test environments
+except ImportError:  # pragma: no cover - minimal test environments
     class InlineKeyboardButton:
         def __init__(self, text, callback_data=None):
             self.text = text
@@ -16,6 +20,7 @@ except ImportError:  # pragma: no cover - allows importing helper functions in m
     class Update:
         ALL_TYPES = None
     Application = CallbackQueryHandler = CommandHandler = ContextTypes = MessageHandler = filters = None
+
 from app.case_store import CaseStore
 from app.access_control import AccessController
 from app.drafting_engine.conversation_state import CaseState, DISPLAY_NAMES, missing_fields, next_questions
@@ -29,13 +34,20 @@ from app.drafting_engine.krutidev_converter import decode_krutidev_hybrid
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
 log = logging.getLogger("legal-bot")
+
 store = CaseStore()
 access = AccessController(store, allow_unset=True)
 orchestrator = MultiDraftOrchestrator()
 editor = DraftEditor()
 
-TYPE_ORDER = ["dava_plaint", "written_statement", "application", "evidence_pw_affidavit", "affidavit", "legal_notice", "other_civil"]
-TYPE_ICONS = {"dava_plaint": "📜", "written_statement": "📝", "application": "📄", "evidence_pw_affidavit": "⚖️", "affidavit": "📋", "legal_notice": "📬", "other_civil": "📑"}
+TYPE_ORDER = [
+    "dava_plaint", "written_statement", "application",
+    "evidence_pw_affidavit", "affidavit", "legal_notice", "other_civil"
+]
+TYPE_ICONS = {
+    "dava_plaint": "📜", "written_statement": "📝", "application": "📄",
+    "evidence_pw_affidavit": "⚖️", "affidavit": "📋", "legal_notice": "📬", "other_civil": "📑"
+}
 
 
 def case_id_for(user_id: int) -> str:
@@ -57,21 +69,29 @@ def dashboard():
 
 
 def case_actions(state):
-    rows = [[InlineKeyboardButton("✨ Generate Draft", callback_data="generate"), InlineKeyboardButton("👁 Review", callback_data="review")]]
+    rows = [
+        [InlineKeyboardButton("✨ Generate Draft", callback_data="generate"), InlineKeyboardButton("👁 Review Facts", callback_data="review")]
+    ]
     if state.draft:
-        rows.append([InlineKeyboardButton("➕ Add Another Document", callback_data="add_document"), InlineKeyboardButton("✏️ Edit Draft", callback_data="edit_mode")])
+        rows.append([
+            InlineKeyboardButton("➕ Add Another Document", callback_data="add_document"),
+            InlineKeyboardButton("✏️ Edit Draft", callback_data="edit_mode")
+        ])
     if len(state.documents) > 1:
         rows.append([InlineKeyboardButton("📚 Case Documents", callback_data="case_documents")])
-    elif state.documents:
+    elif state.documents and not state.draft:
         rows.append([InlineKeyboardButton("➕ Add Another Document", callback_data="add_document")])
-    rows.append([InlineKeyboardButton("🗑 Cancel", callback_data="cancel")])
+    rows.append([InlineKeyboardButton("🗑 Cancel Session", callback_data="cancel")])
     return InlineKeyboardMarkup(rows)
 
 
 def document_menu():
     rows = []
     for i in range(0, len(TYPE_ORDER), 2):
-        rows.append([InlineKeyboardButton(f"{TYPE_ICONS[t]} {DISPLAY_NAMES[t].split(' / ')[0]}", callback_data=f"addtype:{t}") for t in TYPE_ORDER[i:i + 2]])
+        rows.append([
+            InlineKeyboardButton(f"{TYPE_ICONS[t]} {DISPLAY_NAMES[t].split(' / ')[0]}", callback_data=f"addtype:{t}")
+            for t in TYPE_ORDER[i:i + 2]
+        ])
     rows.append([InlineKeyboardButton("↩️ Keep Current Document", callback_data="review")])
     return InlineKeyboardMarkup(rows)
 
@@ -90,13 +110,13 @@ def existing_documents_menu(state):
 
 
 _TYPE_KEYWORDS = {
-    "written_statement": ("written statement", "लिखित कथन", "जवाब दावा", "जवाब-दावा", "प्रतिवादपत्र", "प्रतिवाद पत्र", "लिखित बयान"),
-    "application": ("application", "प्रार्थना पत्र", "प्रार्थना-पत्र", "प्रार्थनापत्र", "आवेदन", "कमीशन", "6ग", "संशोधन"),
-    "evidence_pw_affidavit": ("evidence affidavit", "pw affidavit", "साक्ष्य शपथपत्र", "साक्ष्य का शपथपत्र", "बयान चीफ", "पी डब्लू", "डी डब्लू", "pw-1", "dw-1"),
+    "written_statement": ("written statement", "लिखित कथन", "जवाब दावा", "जवाब-दावा", "प्रतिवादपत्र", "प्रतिवाद पत्र", "लिखित बयान", "ws"),
+    "application": ("application", "प्रार्थना पत्र", "प्रार्थना-पत्र", "प्रार्थनापत्र", "आवेदन", "कमीशन", "6ग", "संशोधन", "39 नियम 1", "7 नियम 11"),
+    "evidence_pw_affidavit": ("evidence affidavit", "pw affidavit", "साक्ष्य शपथपत्र", "साक्ष्य का शपथपत्र", "बयान चीफ", "पी डब्लू", "डी डब्लू", "pw-1", "dw-1", "pw1"),
     "affidavit": ("affidavit", "शपथपत्र", "हलफनामा", "शपथ पत्र"),
-    "legal_notice": ("legal notice", "कानूनी नोटिस", "विधिक नोटिस", "रजिस्टर्ड नोटिस"),
-    "other_civil": ("other civil", "अन्य सिविल", "सिविल ड्राफ्ट", "कैवियट", "केवियट", "caveat", "तलाशपता"),
-    "dava_plaint": ("dava", "दावा", "वाद पत्र", "वाद-पत्र", "वादपत्र", "plaint", "plaintiff suit", "स्थायी निषेधाज्ञा"),
+    "legal_notice": ("legal notice", "कानूनी नोटिस", "विधिक नोटिस", "रजिस्टर्ड नोटिस", "138 ni", "धारा 138"),
+    "other_civil": ("other civil", "अन्य सिविल", "सिविल ड्राफ्ट", "कैवियट", "केवियट", "caveat", "तलाशपता", "इकरारनामा"),
+    "dava_plaint": ("dava", "दावा", "वाद पत्र", "वाद-पत्र", "वादपत्र", "plaint", "plaintiff suit", "स्थायी निषेधाज्ञा", "बंटवारा", "विशिष्ट अनुपालन"),
 }
 
 
@@ -116,7 +136,10 @@ def detect_additional_document_type(text: str):
     low = re.sub(r"\s+", " ", str(text or "").strip().casefold())
     if not low:
         return None
-    create_markers = ("बना", "बनाओ", "बना दो", "तैयार", "तैयार कर", "ड्राफ्ट", "create", "generate", "draft", "make", "prepare", "चाहिए")
+    create_markers = (
+        "बना", "बनाओ", "बना दो", "तैयार", "तैयार कर", "ड्राफ्ट", "create",
+        "generate", "draft", "make", "prepare", "चाहिए"
+    )
     if not any(x in low for x in create_markers):
         return None
     for typ, markers in _TYPE_KEYWORDS.items():
@@ -126,15 +149,18 @@ def detect_additional_document_type(text: str):
 
 
 def detect_edit_intent(text: str) -> bool:
-    """Detect when a user message/voice note is a correction instruction for an already-generated draft."""
+    """Detect when a user message/voice note is a correction/revision instruction for an already-generated draft."""
     low = re.sub(r"\s+", " ", str(text or "").strip().casefold())
     if not low:
         return False
     edit_markers = (
-        "बदल", "बदलो", "कर दो", "करो", "हटा", "हटाओ", "जोड़", "जोड़ो", "संशोधन", "सुधार",
-        "की जगह", "के स्थान पर", "पैराग्राफ", "धारा", "प्रार्थना में", "सत्यापन में", "शीर्षक में",
-        "दूसरे पेज", "अगले पेज", "नए पेज", "replace", "change", "edit", "delete", "remove",
-        "insert", "add", "correct", "update", "next page", "page 2",
+        "बदल", "बदलो", "बदलना", "कर दो", "करो", "हटा", "हटाओ", "हटाना",
+        "जोड़", "जोड़ो", "जोड़ना", "संशोधन", "सुधार", "सुधारना", "संशोधित",
+        "की जगह", "के स्थान पर", "पैराग्राफ", "धारा", "प्रार्थना में", "सत्यापन में",
+        "शीर्षक में", "पक्षकार में", "दूसरे पेज", "अगले पेज", "नए पेज", "गलती",
+        "ठीक कर", "सही कर", "काट दो", "लिख दो", "लगा दो", "शुद्ध",
+        "replace", "change", "edit", "delete", "remove", "insert", "add",
+        "correct", "update", "modify", "amend", "next page", "page 2",
     )
     return any(m in low for m in edit_markers)
 
@@ -159,7 +185,11 @@ def questions_text(state):
     qs = next_questions(state.facts, state.document_type)
     if not qs:
         return "सारी आवश्यक जानकारी मिल गई है।"
-    return "अभी इन जानकारी की आवश्यकता है:\n\n" + "\n".join(f"• {label}" for _, label in qs) + "\n\nआप बोलकर (Voice Note), लिखकर या फोटो भेजकर एक साथ उत्तर दे सकते हैं।"
+    return (
+        "अभी इन जानकारी की आवश्यकता है:\n\n"
+        + "\n".join(f"• {label}" for _, label in qs)
+        + "\n\nआप बोलकर (Voice Note), लिखकर या फोटो/कागजात भेजकर एक साथ उत्तर दे सकते हैं।"
+    )
 
 
 def summary_text(state):
@@ -198,6 +228,68 @@ async def myid(update, context):
     if not update.message or not update.effective_user:
         return
     await update.message.reply_text(f"🆔 आपका Telegram User ID है: `{update.effective_user.id}`", parse_mode="Markdown")
+
+
+async def corpus_info(update, context):
+    if not update.message or not update.effective_user:
+        return
+    if not await require_access(update):
+        return
+
+    idx_path = Path(__file__).resolve().parent.parent / "corpus_index.json"
+    total_docs = 0
+    dad_count = 0
+    tpl_count = 0
+    if idx_path.exists():
+        try:
+            data = json.loads(idx_path.read_text(encoding="utf-8"))
+            total_docs = len(data.get("documents", []))
+            counts = data.get("source_counts", {})
+            dad_count = counts.get("dad_corpus", 0)
+            tpl_count = counts.get("professional_template", 0)
+        except Exception:
+            pass
+
+    ai_model = os.getenv("AZURE_AI_MODEL", "gpt-6.0-luna")
+    fallback_model = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1-mini")
+
+    msg = (
+        "📚 *LEGAL CORPUS & AI ARCHITECTURE*\n\n"
+        f"🤖 *Primary Drafting Engine:* `{ai_model}` (Microsoft Foundry)\n"
+        f"🛡️ *Fallback Engine:* `{fallback_model}` (Azure OpenAI)\n\n"
+        f"📊 *Indexed Documents:* {total_docs}\n"
+        f"  • *Professional Templates:* {tpl_count}\n"
+        f"  • *Advocate B.D. Shukla Corpus:* {dad_count}\n\n"
+        "⚖️ *Dual-Source Synthesis Strategy:*\n"
+        "1. *Professional Templates (Priority 1):* Enforce procedural rigor, statutory grounds (CPC/CrPC/Specific Relief Act/NI Act), cause of action format, jurisdiction, valuation, and complete prayer clauses.\n"
+        "2. *Advocate B.D. Shukla Corpus (Priority 2):* Infuse authentic Hindi legal vocabulary ('मालिक काबिज दखील', 'शराफतन'), paragraph rhythm ('यह कि...'), and signature court tone.\n\n"
+        "📥 *500+ Templates Ingestion:*\n"
+        "जब आप Google Drive से 500+ templates zip डाउनलोड करें, तो repo में रखकर `python3 scripts/build_corpus_index.py` चलाएं।"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def help_command(update, context):
+    if not update.message or not update.effective_user:
+        return
+    if not await require_access(update):
+        return
+    msg = (
+        "⚖️ *LEGAL DRAFTING BOT GUIDE*\n\n"
+        "*Commands:*\n"
+        "• /newcase — नया legal draft शुरू करें\n"
+        "• /edit — बने हुए draft में संशोधन (Edit Mode)\n"
+        "• /summary — current case के facts देखें\n"
+        "• /corpus — legal corpus व AI model की स्थिति\n"
+        "• /cancel — current draft session समाप्त करें\n\n"
+        "*Input Methods (टाइपिस्ट की तरह बोलें):*\n"
+        "🎙️ *Voice Note:* सीधे बोलकर केस के तथ्य या संशोधन बताएं\n"
+        "📸 *Photo/PDF:* पुराने मुकदमे की नकल, खतौनी, बैनामा या नोटिस भेजें (OCR)\n"
+        "✏️ *Text:* हिंदी या अंग्रेजी में लिखकर भेजें\n\n"
+        "*Multi-Turn Editing:*\n"
+        "ड्राफ्ट बनने के बाद आप जितनी बार चाहें बोलकर या लिखकर संशोधन करा सकते हैं। उदाहरण: `पैराग्राफ 2 में 15 जून की जगह 20 जून कर दो`"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 
 async def authorize(update, context):
@@ -256,7 +348,7 @@ async def start(update, context):
         return
     await update.message.reply_text(
         "⚖️ *LEGAL DRAFTING WORKSPACE*\n\n"
-        "सात प्रकार के legal drafts तैयार करें। नीचे document type चुनें, या सीधे Voice Note / Photo / Text भेजकर केस बोलना शुरू करें (जैसे टाइपिस्ट को बोलकर लिखवाते हैं)।",
+        "सात प्रकार के court drafts तैयार करें। नीचे document type चुनें, या सीधे Voice Note / Photo / Text भेजकर केस बोलना शुरू करें (जैसे टाइपिस्ट को बोलकर लिखवाते हैं)।",
         parse_mode="Markdown",
         reply_markup=dashboard(),
     )
@@ -267,7 +359,11 @@ async def newcase(update, context):
         return
     if not await require_access(update):
         return
-    await update.message.reply_text("⚖️ *नया Legal Draft*\n\nपहले document type चुनें (या सीधे बोलकर/लिखकर भेजें):", parse_mode="Markdown", reply_markup=dashboard())
+    await update.message.reply_text(
+        "⚖️ *नया Legal Draft*\n\nपहले document type चुनें (या सीधे बोलकर/लिखकर भेजें):",
+        parse_mode="Markdown",
+        reply_markup=dashboard(),
+    )
 
 
 async def cancel(update, context):
@@ -301,7 +397,6 @@ async def intake_text(update, context, text=None, *, suppress_questions=False, a
     text = decode_krutidev_hybrid((text or update.message.text or "").strip())
     state = get_state(uid)
     if not state:
-        # Auto-create CaseState when the advocate starts dictating or typing directly without clicking /newcase first
         inferred_type = infer_document_type(text, default="dava_plaint")
         state = CaseState(case_id_for(uid), document_type=inferred_type)
         store.save(uid, state)
@@ -368,20 +463,18 @@ async def text_message(update, context):
     uid = update.effective_user.id
     raw_text = update.message.text or ""
     state = get_state(uid)
-    if state and state.edit_mode and state.draft:
-        await edit_text_message(update, context)
-        return
+
     if state and state.draft:
         requested_type = detect_additional_document_type(raw_text)
         if requested_type:
             await start_additional_document(update, context, requested_type)
             return
-        # If a draft already exists and the lawyer sends a correction instruction, route directly to DraftEditor
-        if detect_edit_intent(raw_text):
+        if state.edit_mode or detect_edit_intent(raw_text):
             state.edit_mode = True
             store.save(uid, state)
             await process_edit_instruction(update, context, raw_text)
             return
+
     await intake_text(update, context)
 
 
@@ -392,9 +485,7 @@ async def voice_message(update, context):
         return
     uid = update.effective_user.id
     state = get_state(uid)
-    if state and state.edit_mode and state.draft:
-        await edit_voice_message(update, context)
-        return
+
     await update.message.reply_text("🎙️ Voice note मिला। Transcript तैयार किया जा रहा है…")
     try:
         f = await context.bot.get_file(update.message.voice.file_id)
@@ -402,17 +493,19 @@ async def voice_message(update, context):
         await f.download_to_memory(out=buf)
         transcript = await asyncio.to_thread(transcribe_voice, buf.getvalue(), "telegram_voice.ogg")
         await update.message.reply_text(f"📝 *Transcript:*\n{transcript[:3500]}", parse_mode="Markdown")
+
         state = get_state(uid)
         if state and state.draft:
             requested_type = detect_additional_document_type(transcript)
             if requested_type:
                 await start_additional_document(update, context, requested_type)
                 return
-            if detect_edit_intent(transcript):
+            if state.edit_mode or detect_edit_intent(transcript):
                 state.edit_mode = True
                 store.save(uid, state)
                 await process_edit_instruction(update, context, transcript)
                 return
+
         await intake_text(update, context, transcript)
     except Exception:
         log.exception("voice failed")
@@ -420,7 +513,7 @@ async def voice_message(update, context):
 
 
 async def image_document_message(update, context):
-    """OCR a Telegram photo/image/PDF and feed extracted text + caption into semantic intake."""
+    """OCR a Telegram photo/image/PDF and feed extracted text + caption into semantic intake or edit mode."""
     if not update.message or not update.effective_user:
         return
     if not await require_access(update):
@@ -478,23 +571,17 @@ async def image_document_message(update, context):
         else:
             return
 
-        await update.message.reply_text(
-            "📸 Document मिला। OCR और document structure निकाली जा रही है…"
-        )
-        extracted = await asyncio.to_thread(
-            analyze_document_bytes, file_bytes, content_type, filename
-        )
+        await update.message.reply_text("📸 Document मिला। OCR और structure निकाली जा रही है…")
+        extracted = await asyncio.to_thread(analyze_document_bytes, file_bytes, content_type, filename)
         text = extracted.text.strip()
         if caption:
             text = f"{caption}\n\n{text}".strip()
         if not text:
-            await update.message.reply_text(
-                "⚠️ Document से readable text नहीं मिला। कृपया साफ़/सीधी photo या बेहतर scan भेजें।"
-            )
+            await update.message.reply_text("⚠️ Document से readable text नहीं मिला। कृपया साफ़/सीधी photo भेजें।")
             return
 
-        # If a draft already exists and the user sent a screenshot/image with an edit instruction in the caption
-        if state.draft and (state.edit_mode or (caption and detect_edit_intent(caption))):
+        # If a draft already exists and edit mode is active or caption indicates corrections
+        if state.draft and (state.edit_mode or (caption and detect_edit_intent(caption)) or detect_edit_intent(text[:500])):
             state.edit_mode = True
             store.save(uid, state)
             await process_edit_instruction(update, context, caption or text)
@@ -506,32 +593,29 @@ async def image_document_message(update, context):
         if len(chunks) == 1:
             await update.message.reply_text(
                 f"✅ OCR पूरा हुआ — {page_count} page{'s' if page_count != 1 else ''}, {len(text)} characters.\n\n"
-                "🧠 अब extracted text से legal case facts structure किए जा रहे हैं…"
+                "🧠 अब extracted text से legal case facts समझे जा रहे हैं…"
             )
         else:
             await update.message.reply_text(
                 f"✅ OCR पूरा हुआ — {page_count} pages, {len(text)} characters.\n"
-                f"📚 Large document है, इसलिए Gemini intake को {len(chunks)} safe chunks में process किया जाएगा।"
+                f"📚 Large document को {len(chunks)} safe chunks में process किया जाएगा।"
             )
         for index, chunk in enumerate(chunks, 1):
             if len(chunks) > 1 and index in {1, len(chunks)}:
                 await update.message.reply_text(f"🧠 OCR semantic extraction {index}/{len(chunks)}…")
             await intake_text(update, context, chunk, suppress_questions=True, announce=False)
+
         state = get_state(uid)
         if state and not missing_fields(state.facts, state.document_type):
             await update.message.reply_text(f"✅ पूरे document से आवश्यक case facts समझ लिए गए।\n\n{summary_text(state)}", parse_mode="Markdown", reply_markup=case_actions(state))
         else:
-            await update.message.reply_text(f"📋 OCR/semantic extraction पूरा हुआ। अभी केवल वास्तव में न मिली जानकारी पूछी जाएगी:\n\n{questions_text(state)}\n\nProgress: {progress(state)}", reply_markup=case_actions(state))
+            await update.message.reply_text(f"📋 OCR पूरा हुआ। अभी केवल आवश्यक जानकारी पूछी जाएगी:\n\n{questions_text(state)}\n\nProgress: {progress(state)}", reply_markup=case_actions(state))
     except DocumentIntelligenceError as exc:
         log.exception("Document Intelligence failed")
-        await update.message.reply_text(
-            f"❌ Image/document पढ़ा नहीं जा सका: {str(exc)[:500]}"
-        )
+        await update.message.reply_text(f"❌ Image/document पढ़ा नहीं जा सका: {str(exc)[:500]}")
     except Exception:
         log.exception("image/document processing failed")
-        await update.message.reply_text(
-            "❌ Image/document process नहीं हो सका। कृपया साफ़ image/PDF दोबारा भेजें।"
-        )
+        await update.message.reply_text("❌ Image/document process नहीं हो सका। कृपया दोबारा भेजें।")
 
 
 async def generate_for(update, uid, state, edit=False):
@@ -539,7 +623,7 @@ async def generate_for(update, uid, state, edit=False):
     if edit:
         await update.callback_query.edit_message_text(
             f"⚖️ *{DISPLAY_NAMES[state.document_type]}*\n\n⏳ Draft तैयार किया जा रहा है…\n\n"
-            "1/4 Case verified\n2/4 Advocate 306-corpus examples selected\n3/4 Drafting & validation\n4/4 Canonical DOCX & PDF rendering",
+            "1/4 Case facts verified\n2/4 Dual-Source: Professional Template + Advocate B.D. Shukla corpus selected\n3/4 Synthesizing statutory structure & authentic advocacy language\n4/4 Rendering canonical DOCX & court-standard PDF",
             parse_mode="Markdown",
         )
     else:
@@ -553,10 +637,11 @@ async def generate_for(update, uid, state, edit=False):
             with open(docx, "rb") as f:
                 await target.reply_document(f, filename=docx.name, caption=f"📄 Editable DOCX — {DISPLAY_NAMES[state.document_type]}")
             with open(pdf, "rb") as f:
-                await target.reply_document(f, filename=pdf.name, caption=f"📑 PDF — {DISPLAY_NAMES[state.document_type]}")
+                await target.reply_document(f, filename=pdf.name, caption=f"📑 Court-Ready PDF — {DISPLAY_NAMES[state.document_type]}")
         store.save(uid, state)
         await target.reply_text(
-            "✅ Draft तैयार है। आप सीधे बोलकर (Voice Note), लिखकर या ✏️ Edit Draft दबाकर कोई भी संशोधन/बदलाव करवा सकते हैं।",
+            "✅ Draft तैयार है!\n\n"
+            "💡 *संशोधन (Edit):* आप सीधे बोलकर (Voice Note) या लिखकर कोई भी बदलाव करवा सकते हैं (जैसे: `पैराग्राफ 2 में 15 जून की जगह 20 जून कर दो`)।",
             reply_markup=case_actions(state),
         )
     except Exception as exc:
@@ -579,13 +664,13 @@ async def enter_edit_mode(update, context):
     store.save(update.effective_user.id, state)
     await update.message.reply_text(
         "✏️ *DRAFT EDIT MODE*\n\n"
-        "अपना बदलाव Hindi/English में लिखें या Voice Note भेजें (जैसे टाइपिस्ट को संशोधन बताते हैं)।\n\n"
+        "अपना बदलाव Hindi/English में लिखें, Voice Note भेजें, या फोटो भेजें।\n\n"
         "उदाहरण:\n"
         "• `पैराग्राफ 3 में 15.06.2026 की जगह 20.06.2026 कर दो।`\n"
         "• `पूरे ड्राफ्ट में गाटा संख्या 214 की जगह 215 कर दो।`\n"
         "• `पैराग्राफ 4 के बाद यह वाक्य जोड़ दो: ...`\n"
         "• `प्रार्थना को दूसरे पेज पर ले जाओ।`\n\n"
-        "AI केवल वही बदलाव करेगा और बाकी ड्राफ्ट जस का तस रहेगा।",
+        "AI केवल वही बदलाव करेगा और बाकी संपूर्ण ड्राफ्ट सुरक्षित रहेगा।",
         parse_mode="Markdown",
     )
 
@@ -607,18 +692,15 @@ async def process_edit_instruction(update, context, instruction: str):
     if not instruction:
         return
     state.edit_mode = True
-    await update.message.reply_text("🔎 आपके संशोधन निर्देश का exact target खोजा जा रहा है…")
+    await update.message.reply_text("🔎 संशोधन निर्देश का exact target विश्लेषित किया जा रहा है…")
     try:
         edit = await asyncio.to_thread(editor.parse, state.draft, instruction)
-        if not edit.get("old_text") and edit.get("operation") in {"replace", "replace_all", "delete"}:
-            await update.message.reply_text("⚠️ यह बदलाव पर्याप्त स्पष्ट नहीं है। कृपया पैराग्राफ/सेक्शन और बदलने वाला शब्द स्पष्ट बताएं।")
-            return
-        candidate, _ = await asyncio.to_thread(editor.apply, state.draft, edit)
+        candidate, preview = await asyncio.to_thread(editor.apply, state.draft, edit)
         state.pending_edit = {"edit": edit, "candidate": candidate, "instruction": instruction}
         store.save(uid, state)
-        preview = editor.describe(edit)
         await update.message.reply_text(
-            "🔎 Proposed change\n\n" + preview + "\n\nकेवल यही targeted change लागू होगा; बाकी structured draft बदला नहीं जाएगा।",
+            "🔎 *Proposed Changes:*\n\n" + preview + "\n\nकेवल यही targeted बदलाव लागू होगा; बाकी संपूर्ण ड्राफ्ट अपरिवर्तित रहेगा।",
+            parse_mode="Markdown",
             reply_markup=edit_actions(),
         )
     except Exception as exc:
@@ -645,7 +727,7 @@ async def edit_voice_message(update, context):
         buf = BytesIO()
         await f.download_to_memory(out=buf)
         transcript = await asyncio.to_thread(transcribe_voice, buf.getvalue(), "telegram_edit.ogg")
-        await update.message.reply_text("📝 Transcript:\n\n" + transcript[:3500])
+        await update.message.reply_text(f"📝 *Transcript:*\n{transcript[:3500]}", parse_mode="Markdown")
         await process_edit_instruction(update, context, transcript)
     except Exception:
         log.exception("voice edit failed")
@@ -664,19 +746,22 @@ async def apply_edit(update, context):
     if not state or not candidate:
         await q.edit_message_text("⚠️ यह edit अब उपलब्ध नहीं है।")
         return
+
     state.set_draft(candidate)
+    state.edit_mode = True  # Keep edit mode active for continuous iterative editing
     store.save(uid, state)
-    await q.edit_message_text("⏳ Change applied. DOCX/PDF को फिर से render किया जा रहा है…")
+
+    await q.edit_message_text("⏳ Change applied! Updated DOCX व PDF render किए जा रहे हैं…")
     try:
         with tempfile.TemporaryDirectory() as tmp:
             label = DISPLAY_NAMES[state.document_type].split(" /")[0].replace(" ", "_")
             docx, pdf = render_both(candidate, tmp, base_name=f"{label}_{uid}_v{state.draft_version}", paper=os.getenv("LEGAL_PAPER", "legal"))
             with open(docx, "rb") as f:
-                await q.message.reply_document(f, filename=docx.name, caption=f"📄 Updated editable DOCX — v{state.draft_version}")
+                await q.message.reply_document(f, filename=docx.name, caption=f"📄 Updated DOCX — v{state.draft_version}")
             with open(pdf, "rb") as f:
                 await q.message.reply_document(f, filename=pdf.name, caption=f"📑 Updated PDF — v{state.draft_version}")
         await q.message.reply_text(
-            "✅ Edit applied. बाकी structured content को नहीं बदला गया। और बदलाव करना हो तो सीधे लिखें या Voice Note भेजें।",
+            f"✅ Edit applied (v{state.draft_version})! बाकी structured content सुरक्षित है।\n\nअगला बदलाव करने के लिए सीधे बोलें (Voice Note) या लिखें।",
             reply_markup=case_actions(state),
         )
     except Exception:
@@ -711,7 +796,7 @@ async def button(update, context):
         state.draft = item.get("draft") or {}
         state.draft_version = int(item.get("version", 1) or 1)
         state.draft_versions = [{"version": state.draft_version, "draft": state.draft}]
-        state.edit_mode = False
+        state.edit_mode = True
         state.pending_edit = {}
         state.status = "drafted"
         store.save(uid, state)
@@ -808,6 +893,8 @@ def build_application():
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("summary", summary))
     app.add_handler(CommandHandler("edit", edit_command))
+    app.add_handler(CommandHandler("corpus", corpus_info))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("adddocument", add_document_command))
     app.add_handler(CommandHandler("myid", myid))
     app.add_handler(CommandHandler("authorize", authorize))

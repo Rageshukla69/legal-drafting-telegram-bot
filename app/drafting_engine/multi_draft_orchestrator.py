@@ -25,7 +25,8 @@ SCHEMA = json.loads((ROOT / "draft_schema.json").read_text(encoding="utf-8"))
 
 BASE_RULES = [
     "CASE_FACTS are the sole authority for case-specific facts.",
-    "Retrieved advocate drafts in ORIGINAL_ADVOCATE_DRAFTS are style, terminology, and structure references from Advocate V.D. Shukla's 306-document corpus; never copy their factual details.",
+    "PRIORITY 1 (STRUCTURE & STATUTORY PRECISION): Follow the primary legal template in SECTION 1 for the overarching legal structure, statutory Order & Rule citations (CPC, Specific Relief Act, NI Act), standard cause of action formulation, valuation, court fee, jurisdiction, and comprehensive prayer clauses.",
+    "PRIORITY 2 (AUTHENTIC VERNACULAR ADVOCACY): Infuse Advocate B.D. Shukla's authentic court vocabulary ('मालिक काबिज दखील', 'शराफतन', 'मुकद्दमा हाजा'), respectful pleadings tone, and transition rhythm ('यह कि ...') from SECTION 2.",
     "Never invent names, dates, addresses, property identifiers, statutes, case law, ownership, title, possession, witnesses, valuation, court fee, limitation or jurisdiction.",
     "Preserve event status exactly: attempt is not completion; threat is not dispossession; allegation is not an established fact.",
     "Do not invent reliefs/demands/defences. Use only supported user-provided material.",
@@ -115,8 +116,6 @@ def _normalize_draft_structure(draft: dict[str, Any], facts: dict[str, Any]) -> 
 
 
 def _has_identifiable_party(draft: dict[str, Any], facts: dict[str, Any]) -> bool:
-    """Check whether supplied party/deponent names appear in the draft (handling punctuation,
-    abbreviation normalization `स्व0`->`स्व०`, and English-intake vs Hindi-draft transliteration)."""
     source_names: list[str] = []
     for k in ("plaintiffs", "defendants", "parties", "sender", "recipient", "deponent"):
         v = facts.get(k, [])
@@ -183,7 +182,6 @@ class MultiDraftOrchestrator:
         return self.collect(state, extracted)
 
     def refresh_intake(self, state: CaseState):
-        """Reconcile the entire accumulated user evidence before drafting."""
         refreshed = reconcile_case_state(
             state.facts,
             state.document_type,
@@ -201,8 +199,10 @@ class MultiDraftOrchestrator:
             pieces.extend(str(x) for x in (val if isinstance(val, list) else [val]))
         query = " ".join(pieces)
         corpus_type = TYPE_META[document_type][0]
-        refs = self.retriever.search(query, document_type=corpus_type, top_k=int(os.getenv("CORPUS_TOP_K", "6")))
-        return self.retriever.format_context(refs)
+        top_tpl = int(os.getenv("CORPUS_TOP_TEMPLATES", "2"))
+        top_dad = int(os.getenv("CORPUS_TOP_DAD", "2"))
+        dual = self.retriever.dual_search(query, document_type=corpus_type, top_templates=top_tpl, top_dad=top_dad)
+        return self.retriever.format_dual_context(dual)
 
     def draft_live(self, state: CaseState):
         if missing_fields(state.facts, state.document_type):
@@ -214,10 +214,11 @@ class MultiDraftOrchestrator:
         package = {
             "DOCUMENT_TYPE": label,
             "CASE_FACTS": state.facts,
-            "ORIGINAL_ADVOCATE_DRAFTS": context,
+            "DUAL_CORPUS_REFERENCE": context,
             "CLEAN_STYLE_ANCHOR": style_anchor,
             "SYSTEM_RULES": BASE_RULES + [
-                "Follow the authentic Hindi legal drafting style, terminology, and structure of ORIGINAL_ADVOCATE_DRAFTS and CLEAN_STYLE_ANCHOR.",
+                "Prioritize the professional template in SECTION 1 for structural headings, statutory grounds, cause of action, jurisdiction, valuation, and prayer points.",
+                "Infuse Advocate B.D. Shukla's authentic court vocabulary and transition style ('यह कि ...') from SECTION 2.",
                 "Never output legacy-font artifacts or mixed Latin characters inside Hindi words.",
                 "Use standard Unicode Devanagari Hindi in every Hindi sentence.",
             ],
@@ -236,7 +237,8 @@ class MultiDraftOrchestrator:
         }
         system = (
             style
-            + "\n\nYou are now the FINAL DRAFTING ENGINE, not a planning-only assistant. Generate the actual filing-ready structured draft.\n"
+            + "\n\nYou are now the FINAL DRAFTING ENGINE for Indian Civil Court drafting.\n"
+            + "Synthesize the structural rigor of the professional template with Advocate B.D. Shukla's authentic legal vocabulary.\n"
             + "\n".join(f"- {x}" for x in BASE_RULES)
         )
         errors = []
