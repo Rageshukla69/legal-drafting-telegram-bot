@@ -721,6 +721,11 @@ def _prepare_draft(draft: dict[str, Any]) -> dict[str, Any]:
     return sanitize_draft_unicode(draft or {})
 
 
+def _is_right_role_line(line: str) -> bool:
+    s = line.strip()
+    return bool(re.match(r"^(?:[.\-–—]+\s*)?(?:प्रतिवादीगण|प्रतिवादिनीगण|प्रतिवादिनी|प्रतिवादी|विपक्षीगण|विपक्षी|वादीगण|वादिनी|वादी|प्रार्थीगण|प्रार्थिनी|प्रार्थी)$", s))
+
+
 def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "legal"):
     draft = _prepare_draft(draft)
     output_path = Path(output_path)
@@ -743,15 +748,19 @@ def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "le
     plaintiff, defendant, other = split_party_blocks(parties)
     if plaintiff and defendant:
         for party in plaintiff:
-            _add_docx_para(doc, party, align=WD_ALIGN_PARAGRAPH.LEFT, size=14, first_indent=False, after=3)
+            is_role = _is_right_role_line(party)
+            _add_docx_para(doc, party, align=WD_ALIGN_PARAGRAPH.RIGHT if is_role else WD_ALIGN_PARAGRAPH.LEFT, size=14, bold=is_role, first_indent=False, after=3)
         _add_docx_para(doc, "बनाम", align=WD_ALIGN_PARAGRAPH.CENTER, size=14, bold=True, first_indent=False, after=3)
         for party in defendant:
-            _add_docx_para(doc, party, align=WD_ALIGN_PARAGRAPH.LEFT, size=14, first_indent=False, after=4)
+            is_role = _is_right_role_line(party)
+            _add_docx_para(doc, party, align=WD_ALIGN_PARAGRAPH.RIGHT if is_role else WD_ALIGN_PARAGRAPH.LEFT, size=14, bold=is_role, first_indent=False, after=4)
         for party in other:
-            _add_docx_para(doc, party, align=WD_ALIGN_PARAGRAPH.LEFT, size=14, first_indent=False, after=4)
+            is_role = _is_right_role_line(party)
+            _add_docx_para(doc, party, align=WD_ALIGN_PARAGRAPH.RIGHT if is_role else WD_ALIGN_PARAGRAPH.LEFT, size=14, bold=is_role, first_indent=False, after=4)
     else:
         for party in (plaintiff + defendant + other) or parties:
-            _add_docx_para(doc, party, align=WD_ALIGN_PARAGRAPH.LEFT, size=14, first_indent=False, after=4)
+            is_role = _is_right_role_line(party)
+            _add_docx_para(doc, party, align=WD_ALIGN_PARAGRAPH.RIGHT if is_role else WD_ALIGN_PARAGRAPH.LEFT, size=14, bold=is_role, first_indent=False, after=4)
 
     _docx_page_break_if_needed(doc, draft, "title")
     _add_docx_para(doc, _title_text(draft), align=WD_ALIGN_PARAGRAPH.CENTER, size=16, bold=True, underline=True, first_indent=False, after=10)
@@ -759,7 +768,9 @@ def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "le
     opening = str(draft.get("opening_averment", "")).strip()
     if opening:
         _docx_page_break_if_needed(doc, draft, "opening_averment")
-        _add_docx_para(doc, opening, align=WD_ALIGN_PARAGRAPH.JUSTIFY, size=14, first_indent=False, after=10)
+        for op_line in opening.splitlines():
+            if op_line.strip():
+                _add_docx_para(doc, op_line.strip(), align=WD_ALIGN_PARAGRAPH.LEFT, size=14, first_indent=False, after=6)
 
     _docx_page_break_if_needed(doc, draft, "pleadings")
     for idx, paragraph in enumerate(_ordered_pleading_items(draft), 1):
@@ -783,9 +794,11 @@ def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "le
     if verification:
         _docx_page_break_if_needed(doc, draft, "verification")
         _add_docx_para(doc, "सत्यापन", align=WD_ALIGN_PARAGRAPH.CENTER, size=16, bold=True, underline=True, first_indent=False, after=8)
-        for line in verification.splitlines():
-            if line.strip():
-                _add_docx_para(doc, line.strip(), align=WD_ALIGN_PARAGRAPH.JUSTIFY, size=14, first_indent=True, after=10)
+        ver_lines = [ln.strip() for ln in verification.splitlines() if ln.strip()]
+        if len(ver_lines) > 1 and re.match(r"^[\s\-–—:*_]*सत्यापन[\s\-–—:*_]*$", ver_lines[0]):
+            ver_lines = ver_lines[1:]
+        for line in ver_lines:
+            _add_docx_para(doc, line, align=WD_ALIGN_PARAGRAPH.JUSTIFY, size=14, first_indent=True, after=10)
 
     doc.save(output_path)
     return output_path
@@ -826,18 +839,23 @@ def _pdf_story(draft: dict[str, Any], font: str, bold_font: str, latin_font: str
 
     if _layout_break(draft, "page_break_before", "parties"):
         story.append(PageBreak())
+    right_bold = ParagraphStyle("VakilRightBold", parent=right, fontName=bold_font)
     plaintiff, defendant, other = split_party_blocks(parties)
     if plaintiff and defendant:
         for party in plaintiff:
-            story.append(Paragraph(_pdf_inline_font_markup(party, font, latin_font, symbol_font), left))
+            is_role = _is_right_role_line(party)
+            story.append(Paragraph(_pdf_inline_font_markup(party, bold_font if is_role else font, latin_bold if is_role else latin_font, symbol_font), right_bold if is_role else left))
         story.append(Paragraph(_pdf_inline_font_markup("बनाम", bold_font, latin_bold, symbol_font), center))
         for party in defendant:
-            story.append(Paragraph(_pdf_inline_font_markup(party, font, latin_font, symbol_font), left))
+            is_role = _is_right_role_line(party)
+            story.append(Paragraph(_pdf_inline_font_markup(party, bold_font if is_role else font, latin_bold if is_role else latin_font, symbol_font), right_bold if is_role else left))
         for party in other:
-            story.append(Paragraph(_pdf_inline_font_markup(party, font, latin_font, symbol_font), left))
+            is_role = _is_right_role_line(party)
+            story.append(Paragraph(_pdf_inline_font_markup(party, bold_font if is_role else font, latin_bold if is_role else latin_font, symbol_font), right_bold if is_role else left))
     else:
         for party in (plaintiff + defendant + other) or parties:
-            story.append(Paragraph(_pdf_inline_font_markup(party, font, latin_font, symbol_font), left))
+            is_role = _is_right_role_line(party)
+            story.append(Paragraph(_pdf_inline_font_markup(party, bold_font if is_role else font, latin_bold if is_role else latin_font, symbol_font), right_bold if is_role else left))
 
     if _layout_break(draft, "page_break_before", "title"):
         story.append(PageBreak())
@@ -847,7 +865,9 @@ def _pdf_story(draft: dict[str, Any], font: str, bold_font: str, latin_font: str
     if opening:
         if _layout_break(draft, "page_break_before", "opening_averment"):
             story.append(PageBreak())
-        story.append(Paragraph(_pdf_inline_font_markup(opening, font, latin_font, symbol_font), noindent))
+        for op_line in opening.splitlines():
+            if op_line.strip():
+                story.append(Paragraph(_pdf_inline_font_markup(op_line.strip(), font, latin_font, symbol_font), left))
 
     if _layout_break(draft, "page_break_before", "pleadings"):
         story.append(PageBreak())
@@ -873,9 +893,11 @@ def _pdf_story(draft: dict[str, Any], font: str, bold_font: str, latin_font: str
         if _layout_break(draft, "page_break_before", "verification"):
             story.append(PageBreak())
         story.append(Paragraph("सत्यापन", ParagraphStyle("VerificationTitle", parent=center16, underline=True, spaceBefore=8, spaceAfter=8)))
-        for line in verification.splitlines():
-            if line.strip():
-                story.append(Paragraph(_pdf_inline_font_markup(line.strip(), font, latin_font, symbol_font), body))
+        ver_lines = [ln.strip() for ln in verification.splitlines() if ln.strip()]
+        if len(ver_lines) > 1 and re.match(r"^[\s\-–—:*_]*सत्यापन[\s\-–—:*_]*$", ver_lines[0]):
+            ver_lines = ver_lines[1:]
+        for line in ver_lines:
+            story.append(Paragraph(_pdf_inline_font_markup(line, font, latin_font, symbol_font), body))
     return story
 
 
