@@ -349,6 +349,131 @@ async def help_command(update, context):
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
+async def trial_command(update, context):
+    """Owner/Sudo command #1: Authorize a user on a Trial basis (limited to 5 documents by default)."""
+    if not update.message or not update.effective_user:
+        return
+    if not access.is_owner(update.effective_user.id):
+        await deny(update)
+        return
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text(
+            "🎁 *Trial Authorization Usage:*\n"
+            "`/trial TELEGRAM_USER_ID` (डिफ़ॉल्ट 5 ड्राफ्ट लिमिट)\n"
+            "या कस्टम लिमिट के लिए: `/trial TELEGRAM_USER_ID 5`",
+            parse_mode="Markdown",
+        )
+        return
+    target = context.args[0]
+    if access.is_owner(target):
+        await update.message.reply_text("👑 Owner के पास पहले से Unlimited access है।")
+        return
+    limit = 5
+    if len(context.args) >= 2 and context.args[1].isdigit() and int(context.args[1]) > 0:
+        limit = int(context.args[1])
+    access.authorize_trial(target, update.effective_user.id, limit=limit)
+    await update.message.reply_text(
+        f"🎁 *Trial Activated!*\n\n"
+        f"• *User ID:* `{target}`\n"
+        f"• *Plan:* 🎁 Free Trial\n"
+        f"• *Document Limit:* `{limit}` documents (Used: `0/{limit}`)",
+        parse_mode="Markdown",
+    )
+    try:
+        await context.bot.send_message(
+            chat_id=int(target),
+            text=(
+                f"🎁 *आपका Free Trial ({limit} Documents) सक्रिय कर दिया गया है!*\n\n"
+                f"अब आप `/start` या `/newcase` दबाकर **{limit} कानूनी ड्राफ्ट (दावा / जवाब दावा / शपथपत्र)** तैयार कर सकते हैं।"
+            ),
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass
+
+
+async def paid_command(update, context):
+    """Owner/Sudo command #2: Authorize a paid user with a specific Dava/document limit (or unlimited)."""
+    if not update.message or not update.effective_user:
+        return
+    if not access.is_owner(update.effective_user.id):
+        await deny(update)
+        return
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text(
+            "💎 *Paid Authorization Usage:*\n"
+            "• `/paid TELEGRAM_USER_ID 50` (50 ड्राफ्ट लिमिट देने के लिए)\n"
+            "• `/paid TELEGRAM_USER_ID 100` (100 ड्राफ्ट लिमिट देने के लिए)\n"
+            "• `/paid TELEGRAM_USER_ID unlimited` (अनलिमिटेड ड्राफ्ट देने के लिए)\n"
+            "• `/paid TELEGRAM_USER_ID` (डिफ़ॉल्ट 50 ड्राफ्ट लिमिट)",
+            parse_mode="Markdown",
+        )
+        return
+    target = context.args[0]
+    if access.is_owner(target):
+        await update.message.reply_text("👑 Owner के पास पहले से Unlimited access है।")
+        return
+    limit = int(os.getenv("DEFAULT_PAID_DOCUMENT_LIMIT", "50"))
+    if len(context.args) >= 2:
+        arg2 = context.args[1].strip().lower()
+        if arg2 in {"unlimited", "inf", "all", "0", "-1"}:
+            limit = -1
+        elif arg2.isdigit() and int(arg2) > 0:
+            limit = int(arg2)
+        else:
+            await update.message.reply_text("⚠️ कृपया सही संख्या लिखें, जैसे: `/paid 987654321 50` या `/paid 987654321 unlimited`", parse_mode="Markdown")
+            return
+    access.authorize_paid(target, update.effective_user.id, limit=limit)
+    limit_str = "♾️ Unlimited" if limit < 0 else f"`{limit}` documents (Used: `0/{limit}`)"
+    await update.message.reply_text(
+        f"💎 *Paid Plan Activated!*\n\n"
+        f"• *User ID:* `{target}`\n"
+        f"• *Plan:* 💎 Paid Subscriber\n"
+        f"• *Document Limit:* {limit_str}",
+        parse_mode="Markdown",
+    )
+    try:
+        user_limit_str = "अनलिमिटेड (Unlimited)" if limit < 0 else f"{limit} ड्राफ्ट"
+        await context.bot.send_message(
+            chat_id=int(target),
+            text=(
+                f"💎 *आपका Paid Plan ({user_limit_str}) सक्रिय कर दिया गया है!*\n\n"
+                "अब आप `/start` या `/newcase` दबाकर अपने कानूनी ड्राफ्ट तैयार कर सकते हैं।\n"
+                "अपने प्लान की स्थिति देखने के लिए कभी भी `/myplan` भेजें।"
+            ),
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass
+
+
+async def myplan_command(update, context):
+    """Show current user's subscription plan and remaining document quota."""
+    if not update.message or not update.effective_user:
+        return
+    uid = update.effective_user.id
+    status = access.get_plan_status(uid)
+    if not status["authorized"]:
+        await update.message.reply_text(
+            f"🔒 *Plan Status:* Not Authorized\n"
+            f"🆔 *Your Telegram ID:* `{uid}`\n\n"
+            "Trial (5 Documents) या Paid Plan सक्रिय कराने के लिए एडमिन को अपना Telegram ID भेजें।",
+            parse_mode="Markdown",
+        )
+        return
+    qlim = status["quota_limit"]
+    used = status["used_documents"]
+    rem = status["remaining"]
+    quota_line = "♾️ Unlimited" if qlim < 0 else f"`{used}/{qlim}` used (`{rem}` remaining)"
+    await update.message.reply_text(
+        f"📊 *YOUR SUBSCRIPTION PLAN*\n\n"
+        f"• *User ID:* `{uid}`\n"
+        f"• *Plan:* {status['plan_label']}\n"
+        f"• *Quota Usage:* {quota_line}",
+        parse_mode="Markdown",
+    )
+
+
 async def authorize(update, context):
     if not update.message or not update.effective_user:
         return
@@ -356,14 +481,30 @@ async def authorize(update, context):
         await deny(update)
         return
     if not context.args or not context.args[0].isdigit():
-        await update.message.reply_text("Usage: `/authorize TELEGRAM_USER_ID`", parse_mode="Markdown")
+        await update.message.reply_text(
+            "*Owner Authorization Commands:*\n"
+            "• `/trial USER_ID` — 5 ड्राफ्ट का Free Trial दें\n"
+            "• `/paid USER_ID 50` — 50 ड्राफ्ट का Paid Plan दें\n"
+            "• `/authorize USER_ID` — Unlimited access दें",
+            parse_mode="Markdown",
+        )
         return
     target = context.args[0]
     if access.is_owner(target):
         await update.message.reply_text("👑 Owner पहले से permanently authorized है।")
         return
+    if len(context.args) >= 2 and context.args[1].lower() == "trial":
+        lim = int(context.args[2]) if (len(context.args) >= 3 and context.args[2].isdigit()) else 5
+        access.authorize_trial(target, update.effective_user.id, limit=lim)
+        await update.message.reply_text(f"🎁 User `{target}` को Trial Plan ({lim} documents) पर authorize कर दिया गया है।", parse_mode="Markdown")
+        return
+    if len(context.args) >= 2 and context.args[1].lower() == "paid":
+        lim = int(context.args[2]) if (len(context.args) >= 3 and context.args[2].isdigit()) else int(os.getenv("DEFAULT_PAID_DOCUMENT_LIMIT", "50"))
+        access.authorize_paid(target, update.effective_user.id, limit=lim)
+        await update.message.reply_text(f"💎 User `{target}` को Paid Plan ({lim} documents) पर authorize कर दिया गया है।", parse_mode="Markdown")
+        return
     access.authorize(target, update.effective_user.id)
-    await update.message.reply_text(f"✅ User `{target}` को authorize कर दिया गया है।", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ User `{target}` को authorize (Unlimited) कर दिया गया है।", parse_mode="Markdown")
 
 
 async def unauthorize(update, context):
@@ -393,8 +534,16 @@ async def authorized(update, context):
         await deny(update)
         return
     users = access.authorized_users()
-    lines = [f"👑 Owner: `{access.owner_id}`", "", "*Authorized users:*"]
-    lines.extend(f"• `{u['user_id']}`" for u in users)
+    lines = [f"👑 *Owner (Sudo):* `{access.owner_id}` (♾️ Unlimited)", "", "*Authorized Users & Quotas:*"]
+    if not users:
+        lines.append("• _No users authorized yet._")
+    for u in users:
+        plan = str(u.get("plan", "unlimited")).lower()
+        qlim = int(u.get("quota_limit", -1))
+        used = int(u.get("used_documents", 0))
+        badge = "🎁 Trial" if plan == "trial" else ("💎 Paid" if plan == "paid" else "♾️ Unlimited")
+        usage_str = "Unlimited" if qlim < 0 else f"{used}/{qlim} drafts used"
+        lines.append(f"• `{u['user_id']}` — *{badge}* ({usage_str})")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
@@ -737,6 +886,13 @@ async def image_document_message(update, context):
 
 async def generate_for(update, uid, state, edit=False):
     target = update.callback_query.message if update.callback_query else update.message
+    allowed, quota_msg = access.can_generate(uid)
+    if not allowed:
+        if edit and update.callback_query:
+            await update.callback_query.edit_message_text(quota_msg, parse_mode="Markdown")
+        else:
+            await target.reply_text(quota_msg, parse_mode="Markdown")
+        return
     style_label = STYLE_NAMES.get(state.style_mode, state.style_mode)
     if edit:
         await update.callback_query.edit_message_text(
@@ -762,7 +918,12 @@ async def generate_for(update, uid, state, edit=False):
             with open(pdf, "rb") as f:
                 await target.reply_document(f, filename=pdf.name, caption=f"📑 Court-Ready PDF — {DISPLAY_NAMES[state.document_type]}")
         store.save(uid, state)
-        tpl_info = f"📄 *Selected Template:* `{state.selected_template_name}`\n" if state.selected_template_name else ""
+        plan_status = access.consume_quota(uid)
+        if plan_status.get("quota_limit", -1) > 0:
+            quota_info = f"📊 *Plan Quota:* {plan_status['plan_label']} — `{plan_status['remaining']}/{plan_status['quota_limit']}` drafts remaining\n"
+        else:
+            quota_info = ""
+        tpl_info = (f"📄 *Selected Template:* `{state.selected_template_name}`\n" if state.selected_template_name else "") + quota_info
         await target.reply_text(
             f"✅ *Draft तैयार है!*\n"
             f"🎨 *Style:* {style_label}\n"
@@ -1169,6 +1330,12 @@ def build_application():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("adddocument", add_document_command))
     app.add_handler(CommandHandler("myid", myid))
+    app.add_handler(CommandHandler("myplan", myplan_command))
+    app.add_handler(CommandHandler("quota", myplan_command))
+    app.add_handler(CommandHandler("trial", trial_command))
+    app.add_handler(CommandHandler("authorize_trial", trial_command))
+    app.add_handler(CommandHandler("paid", paid_command))
+    app.add_handler(CommandHandler("authorize_paid", paid_command))
     app.add_handler(CommandHandler("authorize", authorize))
     app.add_handler(CommandHandler("unauthorize", unauthorize))
     app.add_handler(CommandHandler("authorized", authorized))

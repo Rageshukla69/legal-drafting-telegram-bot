@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json, logging, os, sqlite3, tempfile
 from pathlib import Path
+from typing import Any
 from app.drafting_engine.conversation_state import CaseState
 
 log = logging.getLogger("legal-bot.store")
@@ -8,16 +9,12 @@ DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "cases.sqlit
 
 
 class CaseStore:
-    """Cosmos-backed case state with resilient SQLite fallback for local development.
+    """Cosmos-backed case state & commercial user quota store with resilient SQLite/in-memory fallback."""
 
-    Cosmos DB for NoSQL is used when COSMOS_ENDPOINT and COSMOS_KEY are present.
-    The application schema remains JSON so switching storage does not affect the
-    drafting engine.
-    """
     def __init__(self, path: str | Path | None = None):
         self.use_cosmos = bool(os.getenv("COSMOS_ENDPOINT") and os.getenv("COSMOS_KEY"))
         self._memory_cache: dict[str, str] = {}
-        self._memory_auth: dict[str, dict[str, str]] = {}
+        self._memory_auth: dict[str, dict[str, Any]] = {}
 
         if not self.use_cosmos:
             target_path = Path(path or os.getenv("SQLITE_PATH", str(DEFAULT_DB_PATH)))
@@ -57,9 +54,22 @@ class CaseStore:
                     )
                     db.execute(
                         "CREATE TABLE IF NOT EXISTS authorized_users ("
-                        "user_id TEXT PRIMARY KEY, added_by TEXT NOT NULL, authorized_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
+                        "user_id TEXT PRIMARY KEY, "
+                        "added_by TEXT NOT NULL, "
+                        "plan TEXT NOT NULL DEFAULT 'unlimited', "
+                        "quota_limit INTEGER NOT NULL DEFAULT -1, "
+                        "used_documents INTEGER NOT NULL DEFAULT 0, "
+                        "authorized_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
                         ")"
                     )
+                    # Auto-migrate existing SQLite tables that were created before commercial quota columns existed
+                    existing_cols = {row[1] for row in db.execute("PRAGMA table_info(authorized_users)").fetchall()}
+                    if "plan" not in existing_cols:
+                        db.execute("ALTER TABLE authorized_users ADD COLUMN plan TEXT NOT NULL DEFAULT 'unlimited'")
+                    if "quota_limit" not in existing_cols:
+                        db.execute("ALTER TABLE authorized_users ADD COLUMN quota_limit INTEGER NOT NULL DEFAULT -1")
+                    if "used_documents" not in existing_cols:
+                        db.execute("ALTER TABLE authorized_users ADD COLUMN used_documents INTEGER NOT NULL DEFAULT 0")
                     db.commit()
                 log.info("SQLite initialized at %s", candidate)
                 return candidate
@@ -126,28 +136,65 @@ class CaseStore:
         except Exception as exc:
             log.error("Failed to persist case %s to disk SQLite (%s). Preserved in memory.", state.case_id, exc)
 
-    def is_user_authorized(self, user_id: str) -> bool:
+    def get_user_auth(self, user_id: str) -> dict[str, Any] | None:
+        """Return full authorization & quota record for a user, or None if not authorized."""
         user_str = str(user_id)
         if self.use_cosmos:
             try:
-                self.container.read_item(item=f"auth:{user_str}", partition_key="__auth__")
-                return True
+                item = self.container.read_item(item=f"auth:{user_str}", partition_key="__auth__")
+                return {
+                    "user_id": user_str,
+                    "added_by": str(item.get("added_by", "")),
+                    "plan": str(item.get("plan", "unlimited")),
+                    "quota_limit": int(item.get("quota_limit", -1)),
+                    "used_documents": int(item.get("used_documents", 0)),
+                }
             except Exception:
                 pass
 
         if str(self.path) == ":memory:":
-            return user_str in self._memory_auth
+            rec = self._memory_auth.get(user_str)
+            return dict(rec) if rec else None
 
         try:
             with self._get_db() as db:
-                row = db.execute("SELECT 1 FROM authorized_users WHERE user_id=?", (user_str,)).fetchone()
-            return row is not None
+                row = db.execute(
+                    "SELECT user_id, added_by, plan, quota_limit, used_documents FROM authorized_users WHERE user_id=?",
+                    (user_str,),
+                ).fetchone()
+            if row:
+                return {
+                    "user_id": str(row[0]),
+                    "added_by": str(row[1]),
+                    "plan": str(row[2] or "unlimited"),
+                    "quota_limit": int(row[3] if row[3] is not None else -1),
+                    "used_documents": int(row[4] if row[4] is not None else 0),
+                }
+            return None
         except Exception:
-            return user_str in self._memory_auth
+            rec = self._memory_auth.get(user_str)
+            return dict(rec) if rec else None
 
-    def authorize_user(self, user_id: str, added_by: str) -> None:
+    def is_user_authorized(self, user_id: str) -> bool:
+        return self.get_user_auth(str(user_id)) is not None
+
+    def authorize_user(
+        self,
+        user_id: str,
+        added_by: str,
+        plan: str = "unlimited",
+        quota_limit: int = -1,
+        used_documents: int = 0,
+    ) -> None:
         user_str = str(user_id)
-        self._memory_auth[user_str] = {"user_id": user_str, "added_by": str(added_by)}
+        record = {
+            "user_id": user_str,
+            "added_by": str(added_by),
+            "plan": str(plan or "unlimited"),
+            "quota_limit": int(quota_limit),
+            "used_documents": int(used_documents),
+        }
+        self._memory_auth[user_str] = record
 
         if self.use_cosmos:
             try:
@@ -157,6 +204,9 @@ class CaseStore:
                     "record_type": "authorized_user",
                     "authorized_user_id": user_str,
                     "added_by": str(added_by),
+                    "plan": record["plan"],
+                    "quota_limit": record["quota_limit"],
+                    "used_documents": record["used_documents"],
                 })
                 return
             except Exception as exc:
@@ -168,12 +218,30 @@ class CaseStore:
         try:
             with self._get_db() as db:
                 db.execute(
-                    "INSERT OR REPLACE INTO authorized_users(user_id, added_by, authorized_at) VALUES (?,?,CURRENT_TIMESTAMP)",
-                    (user_str, str(added_by)),
+                    "INSERT OR REPLACE INTO authorized_users"
+                    "(user_id, added_by, plan, quota_limit, used_documents, authorized_at) "
+                    "VALUES (?,?,?,?,?,CURRENT_TIMESTAMP)",
+                    (user_str, str(added_by), record["plan"], record["quota_limit"], record["used_documents"]),
                 )
                 db.commit()
         except Exception as exc:
             log.error("SQLite authorization save failed (%s).", exc)
+
+    def increment_user_usage(self, user_id: str) -> dict[str, Any] | None:
+        """Increment `used_documents` by 1 for a user and persist the updated record."""
+        rec = self.get_user_auth(str(user_id))
+        if not rec:
+            return None
+        new_used = int(rec.get("used_documents", 0)) + 1
+        self.authorize_user(
+            user_id=str(user_id),
+            added_by=rec.get("added_by", ""),
+            plan=rec.get("plan", "unlimited"),
+            quota_limit=int(rec.get("quota_limit", -1)),
+            used_documents=new_used,
+        )
+        rec["used_documents"] = new_used
+        return rec
 
     def unauthorize_user(self, user_id: str) -> bool:
         user_str = str(user_id)
@@ -197,13 +265,19 @@ class CaseStore:
         except Exception:
             return True
 
-    def list_authorized_users(self) -> list[dict]:
+    def list_authorized_users(self) -> list[dict[str, Any]]:
         if self.use_cosmos:
             try:
-                query = "SELECT c.authorized_user_id, c.added_by FROM c WHERE c.record_type = 'authorized_user'"
+                query = "SELECT c.authorized_user_id, c.added_by, c.plan, c.quota_limit, c.used_documents FROM c WHERE c.record_type = 'authorized_user'"
                 items = list(self.container.query_items(query=query, enable_cross_partition_query=True))
                 return [
-                    {"user_id": str(i.get("authorized_user_id")), "added_by": str(i.get("added_by", ""))}
+                    {
+                        "user_id": str(i.get("authorized_user_id")),
+                        "added_by": str(i.get("added_by", "")),
+                        "plan": str(i.get("plan", "unlimited")),
+                        "quota_limit": int(i.get("quota_limit", -1) if i.get("quota_limit") is not None else -1),
+                        "used_documents": int(i.get("used_documents", 0) or 0),
+                    }
                     for i in items
                 ]
             except Exception:
@@ -214,8 +288,19 @@ class CaseStore:
 
         try:
             with self._get_db() as db:
-                rows = db.execute("SELECT user_id, added_by FROM authorized_users ORDER BY user_id").fetchall()
-            return [{"user_id": str(uid), "added_by": str(added_by)} for uid, added_by in rows]
+                rows = db.execute(
+                    "SELECT user_id, added_by, plan, quota_limit, used_documents FROM authorized_users ORDER BY user_id"
+                ).fetchall()
+            return [
+                {
+                    "user_id": str(uid),
+                    "added_by": str(added_by),
+                    "plan": str(plan or "unlimited"),
+                    "quota_limit": int(qlim if qlim is not None else -1),
+                    "used_documents": int(used if used is not None else 0),
+                }
+                for uid, added_by, plan, qlim, used in rows
+            ]
         except Exception:
             return list(self._memory_auth.values())
 
