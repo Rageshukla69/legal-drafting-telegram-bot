@@ -4,6 +4,7 @@ from copy import deepcopy
 from typing import Any
 from .gemini_client import GeminiClient
 from .krutidev_converter import sanitize_draft_unicode
+from .legal_number_formatter import format_draft_numbers
 
 log = logging.getLogger("legal-bot.editor")
 
@@ -413,7 +414,7 @@ class DraftEditor:
             return current, "\n".join(descriptions)
 
         updated = self._apply_single_op(draft, edit)
-        return updated, self.describe(edit)
+        return format_draft_numbers(updated), self.describe(edit)
 
     @staticmethod
     def describe(edit: dict[str, Any]) -> str:
