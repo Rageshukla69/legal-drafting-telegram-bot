@@ -90,7 +90,7 @@ def normalize_between_label(value: str) -> str:
 
 
 _BANAM_CLEAN_RE = re.compile(r"^[\s\-–—:|।]*बनाम[\s\-–—:|।]*$")
-_LEADING_PARTY_NUM_RE = re.compile(r"^\s*0*(\d+)\s*[.)\-:]\s*")
+_LEADING_PARTY_NUM_RE = re.compile(r"^\s*0*(\d+)\s*(?:\([^)]+\))?\s*[.)\-:]\s*")
 _ROLE_SUFFIX_RE = re.compile(
     r"(\s*(?:[-–—|।]+\s*)?(?:प्रतिवादीगण|प्रतिवादिनीगण|प्रतिवादिनी|प्रतिवादी|विपक्षीगण|विपक्षी|वादीगण|वादिनी|वादी|प्रार्थीगण|प्रार्थिनी|प्रार्थी)\s*)$"
 )
