@@ -6,9 +6,9 @@ import json
 from pathlib import Path
 
 STYLE_NAMES = {
-    "template_mode": "📜 500+ Purchased Legal Templates",
-    "dad_style": "🏛️ Dad's 306 Original Files (Adv. B.D. Shukla)",
-    "hybrid_mode": "⚡ Hybrid Mix (Template + Dad's Language)",
+    "template_mode": "🏛️ मानक न्यायिक प्रारूप (Standard Judicial)",
+    "dad_style": "⚖️ वरिष्ठ अधिवक्ता शैली (Senior Counsel)",
+    "hybrid_mode": "✨ Vakil AI Pro — हाइब्रिड संस्करण",
 }
 
 
@@ -179,20 +179,20 @@ DISPLAY_NAMES = {
     "dava_plaint": "Dava / वाद पत्र",
     "written_statement": "Written Statement / जवाब दावा",
     "application": "Application / प्रार्थना पत्र",
-    "evidence_pw_affidavit": "Evidence / PW Affidavit",
+    "evidence_pw_affidavit": "Evidence / साक्ष्य शपथपत्र",
     "affidavit": "Affidavit / शपथपत्र",
     "legal_notice": "Legal Notice / विधिक नोटिस",
     "other_civil": "Other Civil Draft / अन्य सिविल ड्राफ्ट",
 }
 
 REQUIRED_BY_TYPE = {
-    "dava_plaint": [("court_name", "न्यायालय"), ("plaintiffs", "वादी"), ("defendants", "प्रतिवादी"), ("facts", "मुख्य तथ्य / विवाद"), ("reliefs", "राहत")],
-    "written_statement": [("court_name", "न्यायालय"), ("plaintiffs", "वादी"), ("defendants", "प्रतिवादी"), ("facts", "जवाब/प्रतिरक्षा के तथ्य")],
-    "application": [("court_name", "न्यायालय"), ("parties", "पक्षकार"), ("facts", "मुख्य तथ्य"), ("reliefs", "मांगी गई राहत")],
-    "evidence_pw_affidavit": [("court_name", "न्यायालय"), ("deponent", "शपथकर्ता/साक्षी"), ("facts", "साक्ष्य के तथ्य")],
-    "affidavit": [("deponent", "शपथकर्ता"), ("facts", "शपथपत्र के तथ्य"), ("purpose", "शपथपत्र का उद्देश्य")],
-    "legal_notice": [("sender", "प्रेषक"), ("recipient", "प्राप्तकर्ता"), ("facts", "नोटिस के तथ्य"), ("demands", "मांग/अनुपालन")],
-    "other_civil": [("parties", "पक्षकार"), ("facts", "मुख्य तथ्य"), ("purpose", "ड्राफ्ट का उद्देश्य")],
+    "dava_plaint": [("court_name", "न्यायालय का नाम"), ("plaintiffs", "वादी का नाम व पता"), ("defendants", "प्रतिवादी का नाम व पता"), ("facts", "मुख्य तथ्य / विवाद"), ("reliefs", "मांगी गई राहत (अनुतोष)")],
+    "written_statement": [("court_name", "न्यायालय का नाम"), ("plaintiffs", "वादी का नाम"), ("defendants", "प्रतिवादी का नाम व पता"), ("facts", "जवाब दावा / प्रतिरक्षा के मुख्य तथ्य")],
+    "application": [("court_name", "न्यायालय का नाम"), ("parties", "पक्षकारों का विवरण"), ("facts", "प्रार्थना पत्र के मुख्य तथ्य"), ("reliefs", "मांगी गई अंतरिम राहत")],
+    "evidence_pw_affidavit": [("court_name", "न्यायालय का नाम"), ("deponent", "शपथकर्ता / साक्षी का विवरण"), ("facts", "साक्ष्य के मुख्य बिंदु")],
+    "affidavit": [("deponent", "शपथकर्ता का नाम व पता"), ("facts", "शपथपत्र के कथन"), ("purpose", "शपथपत्र का उद्देश्य")],
+    "legal_notice": [("sender", "नोटिस प्रेषक का नाम व पता"), ("recipient", "नोटिस प्राप्तकर्ता का नाम व पता"), ("facts", "विवाद / लेन-देन का विवरण"), ("demands", "विधिक मांग एवं समयावधि")],
+    "other_civil": [("parties", "पक्षकारों का विवरण"), ("facts", "मुख्य तथ्य"), ("purpose", "दस्तावेज़ का उद्देश्य")],
 }
 
 
