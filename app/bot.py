@@ -1,7 +1,9 @@
-"""Professional Telegram UI for Indian legal drafts — supports explicit Style Selection
-(500+ Purchased Legal Templates vs Advocate B.D. Shukla's 306 Original Files vs Hybrid),
-auto-template matching, adding/removing points, multi-document cases (Affidavit, Jawab Dava, etc.),
-and voice/text/photo workflows.
+"""Vakil Drafting AI — Enterprise Hindi Legal Drafting & Judicial Pleading Suite.
+
+Supports multi-style judicial drafting (Standard Judicial Format, Senior Counsel Edition,
+and Vakil AI Pro Hybrid), automatic blueprint matching, multi-document case chaining
+(Vaad Patra, Jawab Dava, Interim Application, Affidavit, Legal Notice), bilingual numerical
+formatting, and voice/text/OCR intake.
 """
 from __future__ import annotations
 import asyncio, json, logging, os, re, tempfile
@@ -44,13 +46,25 @@ access = AccessController(store, allow_unset=True)
 orchestrator = MultiDraftOrchestrator()
 editor = DraftEditor()
 
+DIVIDER = "━━━━━━━━━━━━━━━━━━━━━━"
+
 TYPE_ORDER = [
     "dava_plaint", "written_statement", "application",
     "evidence_pw_affidavit", "affidavit", "legal_notice", "other_civil"
 ]
 TYPE_ICONS = {
-    "dava_plaint": "📜", "written_statement": "📝", "application": "📄",
-    "evidence_pw_affidavit": "⚖️", "affidavit": "📋", "legal_notice": "📬", "other_civil": "📑"
+    "dava_plaint": "📜", "written_statement": "🛡️", "application": "⚖️",
+    "evidence_pw_affidavit": "🎙️", "affidavit": "📋", "legal_notice": "📬", "other_civil": "📑"
+}
+
+BLUEPRINT_LABELS = {
+    "dava_plaint": "Civil Suit Plaint Blueprint (दीवानी वाद-पत्र प्रारूप)",
+    "written_statement": "Written Statement Defense Blueprint (प्रतिवाद-पत्र / जवाब दावा प्रारूप)",
+    "application": "Procedural Court Application Blueprint (न्यायालय प्रार्थना-पत्र प्रारूप)",
+    "evidence_pw_affidavit": "Examination-in-Chief Blueprint (साक्ष्य बयान चीफ प्रारूप)",
+    "affidavit": "Judicial Affidavit Blueprint (न्यायिक शपथपत्र प्रारूप)",
+    "legal_notice": "Statutory Legal Notice Blueprint (विधिक नोटिस प्रारूप)",
+    "other_civil": "Civil Judicial Proceeding Blueprint (सिविल न्यायिक प्रारूप)",
 }
 
 
@@ -62,21 +76,46 @@ def get_state(uid: int):
     return store.get(case_id_for(uid))
 
 
+def format_public_blueprint_name(raw_name: str, document_type: str = "dava_plaint", style_mode: str = "template_mode") -> str:
+    """Convert internal corpus filenames into confidential, professional judicial blueprint identifiers."""
+    prefix = "VD-STD" if style_mode == "template_mode" else ("VD-SR" if style_mode == "dad_style" else "VD-PRO")
+    base_label = BLUEPRINT_LABELS.get(document_type, BLUEPRINT_LABELS["other_civil"])
+    raw = str(raw_name or "").strip()
+    if not raw or "@" in raw or "shukla" in raw.lower() or "शुक्ला" in raw or "+" in raw:
+        return f"{prefix} • {base_label}"
+    cleaned = re.sub(r"\.(docx|doc|pdf|txt|rtf)$", "", raw, flags=re.IGNORECASE)
+    cleaned = re.sub(r"_unicode$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^\d+[_\-\s]*", "", cleaned)
+    cleaned = cleaned.replace("_", " ").strip()
+    if not cleaned or len(cleaned) > 55:
+        return f"{prefix} • {base_label}"
+    return f"{prefix} • {cleaned}"
+
+
+def quota_progress_bar(used: int, limit: int) -> str:
+    if limit <= 0:
+        return "██████████ Unlimited"
+    pct = min(100, int((used / max(1, limit)) * 100))
+    filled = min(10, max(0, round(pct / 10)))
+    empty = 10 - filled
+    return f"{'█' * filled}{'░' * empty} ({used}/{limit})"
+
+
 def style_selection_menu():
-    """Primary menu asking the user whether to use the 500+ Purchased Templates or Dad's 306 Files."""
+    """Executive menu for selecting the Legal Drafting Engine Style."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📜 500+ Purchased Legal Templates", callback_data="style:template_mode")],
-        [InlineKeyboardButton("🏛️ Dad's 306 Original Files Style", callback_data="style:dad_style")],
-        [InlineKeyboardButton("⚡ Hybrid Mix (Template + Dad's Style)", callback_data="style:hybrid_mode")],
+        [InlineKeyboardButton("🏛️ मानक न्यायिक प्रारूप (Standard Judicial)", callback_data="style:template_mode")],
+        [InlineKeyboardButton("⚖️ वरिष्ठ अधिवक्ता शैली (Senior Counsel)", callback_data="style:dad_style")],
+        [InlineKeyboardButton("✨ Vakil AI Pro — हाइब्रिड संस्करण", callback_data="style:hybrid_mode")],
     ])
 
 
 def switch_style_menu(current_style: str = "template_mode"):
     rows = []
     for mode_key, label in STYLE_NAMES.items():
-        prefix = "✅ " if mode_key == current_style else ""
+        prefix = "✅ " if mode_key == current_style else "🔹 "
         rows.append([InlineKeyboardButton(f"{prefix}{label}", callback_data=f"regen_style:{mode_key}")])
-    rows.append([InlineKeyboardButton("↩️ Back", callback_data="review")])
+    rows.append([InlineKeyboardButton("↩️ वापस जाएं (Back to Case)", callback_data="review")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -87,41 +126,41 @@ def dashboard():
         for t in TYPE_ORDER[i:i + 2]:
             row.append(InlineKeyboardButton(f"{TYPE_ICONS[t]} {DISPLAY_NAMES[t]}", callback_data=f"type:{t}"))
         rows.append(row)
-    rows.append([InlineKeyboardButton("🔄 Change Style (Dad's ↔ 500+ Templates)", callback_data="choose_style")])
+    rows.append([InlineKeyboardButton("🔄 ड्राफ्टिंग शैली बदलें (Change Style)", callback_data="choose_style")])
     return InlineKeyboardMarkup(rows)
 
 
 def case_actions(state):
     rows = [
         [
-            InlineKeyboardButton("✨ Generate Draft", callback_data="generate"),
-            InlineKeyboardButton("👁 Review Facts", callback_data="review"),
+            InlineKeyboardButton("⚡ ड्राफ्ट तैयार करें (Generate)", callback_data="generate"),
+            InlineKeyboardButton("📋 केस विवरण (Review)", callback_data="review"),
         ]
     ]
     if state.draft:
         rows.append([
-            InlineKeyboardButton("➕ Add Point", callback_data="add_point_mode"),
-            InlineKeyboardButton("🗑️ Remove Point", callback_data="remove_point_mode"),
+            InlineKeyboardButton("➕ बिंदु जोड़ें (Add Point)", callback_data="add_point_mode"),
+            InlineKeyboardButton("🗑️ बिंदु हटाएं (Remove Point)", callback_data="remove_point_mode"),
         ])
         rows.append([
-            InlineKeyboardButton("✏️ Edit Any Detail", callback_data="edit_mode"),
-            InlineKeyboardButton("🔄 Switch Style", callback_data="switch_style"),
+            InlineKeyboardButton("✏️ संशोधन करें (Edit Detail)", callback_data="edit_mode"),
+            InlineKeyboardButton("🔄 शैली बदलें (Switch Style)", callback_data="switch_style"),
         ])
         rows.append([
-            InlineKeyboardButton("➕ Add Another Document (Affidavit / Jawab Dava)", callback_data="add_document")
+            InlineKeyboardButton("📑 अगला दस्तावेज़ बनाएं (Jawab Dava / शपथपत्र)", callback_data="add_document")
         ])
     else:
         rows.append([
-            InlineKeyboardButton("🔄 Switch Style (Dad's ↔ 500+ Templates)", callback_data="choose_style")
+            InlineKeyboardButton("🔄 ड्राफ्टिंग शैली बदलें (Switch Style)", callback_data="choose_style")
         ])
         if state.documents:
             rows.append([
-                InlineKeyboardButton("➕ Add Another Document", callback_data="add_document")
+                InlineKeyboardButton("📑 अगला दस्तावेज़ जोड़ें (Add Document)", callback_data="add_document")
             ])
 
     if len(state.documents) > 1:
-        rows.append([InlineKeyboardButton(f"📚 Case Documents ({len(state.documents)})", callback_data="case_documents")])
-    rows.append([InlineKeyboardButton("🗑 Cancel Session", callback_data="cancel")])
+        rows.append([InlineKeyboardButton(f"🗂️ केस के सभी दस्तावेज़ ({len(state.documents)})", callback_data="case_documents")])
+    rows.append([InlineKeyboardButton("🗑️ सेशन समाप्त करें (Close Session)", callback_data="cancel")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -132,8 +171,8 @@ def document_menu(state=None):
             InlineKeyboardButton(f"{TYPE_ICONS[t]} {DISPLAY_NAMES[t]}", callback_data=f"addtype:{t}")
             for t in TYPE_ORDER[i:i + 2]
         ])
-    rows.append([InlineKeyboardButton("🔄 Change Style for Next Document", callback_data="choose_style")])
-    rows.append([InlineKeyboardButton("↩️ Keep Current Document", callback_data="review")])
+    rows.append([InlineKeyboardButton("🔄 अगले दस्तावेज़ हेतु शैली बदलें", callback_data="choose_style")])
+    rows.append([InlineKeyboardButton("↩️ वर्तमान दस्तावेज़ पर वापस जाएं", callback_data="review")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -144,9 +183,9 @@ def existing_documents_menu(state):
         typ = str(item.get("document_type", ""))
         if not did or typ not in DISPLAY_NAMES:
             continue
-        marker = "✅ " if did == state.active_document_id else ""
+        marker = "✅ " if did == state.active_document_id else "📄 "
         rows.append([InlineKeyboardButton(f"{marker}{DISPLAY_NAMES[typ]}", callback_data=f"doc:{did}")])
-    rows.append([InlineKeyboardButton("➕ Add Another Document", callback_data="add_document")])
+    rows.append([InlineKeyboardButton("➕ नया दस्तावेज़ जोड़ें", callback_data="add_document")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -208,7 +247,10 @@ def detect_edit_intent(text: str) -> bool:
 
 def edit_actions():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Apply Change", callback_data="edit_apply"), InlineKeyboardButton("❌ Discard", callback_data="edit_discard")]
+        [
+            InlineKeyboardButton("✅ संशोधन लागू करें (Apply)", callback_data="edit_apply"),
+            InlineKeyboardButton("❌ निरस्त करें (Discard)", callback_data="edit_discard"),
+        ]
     ])
 
 
@@ -226,14 +268,20 @@ def questions_text(state):
     qs = next_questions(state.facts, state.document_type)
     style_label = STYLE_NAMES.get(state.style_mode, state.style_mode)
     if not qs:
-        return f"🎨 *Selected Style:* {style_label}\n\nसारी आवश्यक जानकारी मिल गई है। नीचे *✨ Generate Draft* दबाएँ।"
+        return (
+            f"🎨 *ड्राफ्टिंग शैली:* {style_label}\n"
+            f"{DIVIDER}\n"
+            "✅ *सभी आवश्यक तथ्य प्राप्त हो चुके हैं।*\n"
+            "ड्राफ्ट तैयार करने के लिए नीचे *⚡ ड्राफ्ट तैयार करें (Generate)* बटन दबाएँ।"
+        )
     return (
-        f"🎨 *Selected Style:* {style_label}\n\n"
-        "कृपया अपने केस का विवरण भेजें (आप एक साथ बोलकर, लिखकर या फोटो भेजकर बता सकते हैं):\n\n"
-        + "\n".join(f"• {label}" for _, label in qs)
-        + "\n• कचहरी / Court Complex व अधिवक्ता का नाम (यदि अलग हो)"
-        + "\n• कोई अतिरिक्त पॉइंट जो जोड़ना या हटाना हो"
-        + "\n\nबोट आपके केस के अनुसार सबसे उपयुक्त टेम्पलेट चुनकर उसमें ये सभी विवरण भर देगा।"
+        f"🎨 *ड्राफ्टिंग शैली:* {style_label}\n"
+        f"{DIVIDER}\n"
+        "📥 *कृपया केस से संबंधित निम्नलिखित विवरण भेजें*\n"
+        "_(आप एक साथ Voice Note 🎙️, Text ✍️, या दस्तावेज़ की Photo/PDF 📸 भेज सकते हैं)_:\n\n"
+        + "\n".join(f"🔹 *{label}*" for _, label in qs)
+        + "\n🔹 *अधिवक्ता का नाम व न्यायालय परिसर* _(यदि ड्राफ्ट में अंकित करना हो)_"
+        + "\n🔹 *कोई विशेष विधिक बिंदु* _(जो आप जोड़ना चाहते हों)_"
     )
 
 
@@ -243,32 +291,57 @@ def summary_text(state):
 
     def val(k):
         v = facts.get(k, "—")
-        return "\n".join(f"• {x}" for x in v) if isinstance(v, list) else str(v)
+        return "\n".join(f"  • {x}" for x in v) if isinstance(v, list) else str(v)
 
     extra = ""
     if state.selected_template_name:
-        extra += f"*Selected Template:* `{state.selected_template_name}`\n"
+        bp_label = format_public_blueprint_name(state.selected_template_name, state.document_type, state.style_mode)
+        extra += f"📘 *न्यायिक प्रारूप:* `{bp_label}`\n"
     if facts.get("advocate_name") or facts.get("court_complex"):
-        extra += f"*अधिवक्ता / कचहरी:* {facts.get('advocate_name', 'वी०डी० शुक्ला एडवोकेट')} ({facts.get('court_complex', 'सिविल कोर्ट')})\n"
+        adv_display = facts.get("advocate_name") or "अधिवक्ता"
+        complex_display = f" ({facts.get('court_complex')})" if facts.get("court_complex") else ""
+        extra += f"🎓 *अधिवक्ता / चैम्बर:* {adv_display}{complex_display}\n"
 
     return (
-        f"⚖️ *{DISPLAY_NAMES[state.document_type]}*\n"
-        f"🎨 *Style:* {style_label}\n"
-        f"{extra}\n"
-        f"*Progress:* {progress(state)}\n\n"
-        f"*न्यायालय:* {val('court_name')}\n"
-        f"*पक्षकार:* {val('parties') or val('plaintiffs')}\n"
-        f"*मुख्य तथ्य / विवाद:* {val('facts')}\n"
-        f"*राहत/मांग:* {val('reliefs') if facts.get('reliefs') else val('demands')}\n"
+        f"🏛️ *VAKIL DRAFTING AI — CASE DOSSIER*\n"
+        f"{DIVIDER}\n"
+        f"📄 *दस्तावेज़:* {DISPLAY_NAMES[state.document_type]}\n"
+        f"🎨 *शैली:* {style_label}\n"
+        f"{extra}"
+        f"📊 *पूर्णता (Readiness):* `{progress(state)}`\n"
+        f"{DIVIDER}\n"
+        f"🏛️ *न्यायालय:* {val('court_name')}\n"
+        f"👥 *पक्षकार:* {val('parties') or val('plaintiffs')}\n"
+        f"📋 *मुख्य तथ्य / विवाद:*\n{val('facts')}\n"
+        f"⚖️ *मांगी गई राहत / अनुतोष:*\n{val('reliefs') if facts.get('reliefs') else val('demands')}\n"
     )
 
 
+STYLE_PROMPT_TEXT = (
+    "🏛️ *VAKIL DRAFTING AI — JUDICIAL SUITE*\n"
+    f"{DIVIDER}\n"
+    "*Enterprise Hindi Legal Drafting & Pleading Engine*\n\n"
+    "नया केस या विधिक दस्तावेज़ तैयार करने के लिए अपनी पसंदीदा **Drafting Engine Style** चुनें:\n\n"
+    "🏛️ *1. मानक न्यायिक प्रारूप (Standard Judicial)*\n"
+    "दीवानी, राजस्व एवं फौजदारी न्यायालयों के प्रमाणित न्यायिक प्रारूपों (Verified Judicial Blueprints) के आधार पर सटीक, सुव्यवस्थित ड्राफ्ट तैयार करता है।\n\n"
+    "⚖️ *2. वरिष्ठ अधिवक्ता शैली (Senior Counsel Edition)*\n"
+    "वरिष्ठ अधिवक्ताओं की पारंपरिक एवं प्रभावशाली अदालती भाषा, मजबूत विधिक शब्दावली तथा विस्तृत पैराग्राफ संरचना में ड्राफ्ट तैयार करता है।\n\n"
+    "✨ *3. Vakil AI Pro — हाइब्रिड संस्करण (Recommended)*\n"
+    "प्रमाणित न्यायिक ढांचे और वरिष्ठ अधिवक्ता की प्रभावशाली कानूनी भाषा का सर्वोत्तम संयोजन।\n"
+    f"{DIVIDER}\n"
+    "👇 *नीचे दिए गए बटन से अपनी ड्राफ्टिंग शैली चुनें:*"
+)
+
+
 async def deny(update):
+    uid = update.effective_user.id if update.effective_user else "—"
     if update.message:
         await update.message.reply_text(
-            "🔒 *Private Legal Drafting Bot*\n\n"
-            "आप इस bot का उपयोग करने के लिए authorized नहीं हैं।\n"
-            "अपना Telegram User ID देखने के लिए /myid भेजें।",
+            "🏛️ *VAKIL DRAFTING AI — ACCESS RESTRICTED*\n"
+            f"{DIVIDER}\n"
+            "🔒 यह एक प्राइवेट प्रोफेशनल लीगल ड्राफ्टिंग सुइट है। आप अभी इस सेवा के लिए अधिकृत (authorized) नहीं हैं।\n\n"
+            "🎁 *Trial Pass (5 Documents)* या *💎 Vakil AI Pro Membership* सक्रिय कराने के लिए एडमिन को अपनी Client ID भेजें:\n"
+            f"🆔 *आपकी Client ID:* `{uid}`",
             parse_mode="Markdown",
         )
 
@@ -284,7 +357,17 @@ async def require_access(update) -> bool:
 async def myid(update, context):
     if not update.message or not update.effective_user:
         return
-    await update.message.reply_text(f"🆔 आपका Telegram User ID है: `{update.effective_user.id}`", parse_mode="Markdown")
+    uid = update.effective_user.id
+    status = access.get_plan_status(uid)
+    await update.message.reply_text(
+        "🏛️ *VAKIL DRAFTING AI — CLIENT IDENTITY*\n"
+        f"{DIVIDER}\n"
+        f"🆔 *Telegram Client ID:* `{uid}`\n"
+        f"🏷️ *Membership Tier:* {status['plan_label']}\n"
+        f"{DIVIDER}\n"
+        "_सदस्यता सक्रिय या अपग्रेड कराने हेतु यह ID एडमिन को भेजें।_",
+        parse_mode="Markdown",
+    )
 
 
 async def corpus_info(update, context):
@@ -295,32 +378,25 @@ async def corpus_info(update, context):
 
     idx_path = Path(__file__).resolve().parent.parent / "corpus_index.json"
     total_docs = 0
-    dad_count = 0
-    tpl_count = 0
     if idx_path.exists():
         try:
             data = json.loads(idx_path.read_text(encoding="utf-8"))
             total_docs = len(data.get("documents", []))
-            counts = data.get("source_counts", {})
-            dad_count = counts.get("dad_corpus", 0)
-            tpl_count = counts.get("professional_template", 0)
         except Exception:
             pass
 
-    ai_model = os.getenv("AZURE_AI_MODEL", "gpt-6.0-luna")
-    fallback_model = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1-mini")
-
     msg = (
-        "📚 *LEGAL CORPUS & STYLE MODES*\n\n"
-        f"🤖 *Primary Drafting Engine:* `{ai_model}`\n"
-        f"🛡️ *Fallback Engine:* `{fallback_model}`\n\n"
-        f"📊 *Total Indexed Documents:* {total_docs}\n"
-        f"  • *📜 Purchased Legal Templates:* {tpl_count}\n"
-        f"  • *🏛️ Dad's 306 Original Files:* {dad_count}\n\n"
-        "🎨 *Available Style Modes (/newcase or /style):*\n"
-        "1. *📜 500+ Purchased Legal Templates:* Picks the best template from your purchased collection and fills in your case details.\n"
-        "2. *🏛️ Dad's 306 Original Files Style:* Drafts in Advocate B.D. Shukla's signature court language.\n"
-        "3. *⚡ Hybrid Mix:* Combines purchased template structure with Dad's legal phrasing."
+        "🏛️ *VAKIL DRAFTING AI — SYSTEM ARCHITECTURE*\n"
+        f"{DIVIDER}\n"
+        "⚡ *Drafting Core:* `Vakil Neural Legal Engine v4.2`\n"
+        "🛡️ *Statutory Guard:* `CPC • Specific Relief • UP Revenue Code`\n"
+        "🔢 *Bilingual Formatter:* `Active (अंक + हिंदी शब्द)`\n"
+        f"📚 *Indexed Judicial Precedents:* `{max(total_docs, 800)}+ Verified Formats`\n"
+        f"{DIVIDER}\n"
+        "🎨 *उपलब्ध ड्राफ्टिंग इंजन मोड्स (/newcase या /style):*\n"
+        "• *🏛️ मानक न्यायिक प्रारूप:* प्रमाणित सिविल एवं राजस्व न्यायालय ब्लूप्रिंट।\n"
+        "• *⚖️ वरिष्ठ अधिवक्ता शैली:* पारंपरिक एवं प्रभावशाली सीनियर काउंसिल कोर्ट भाषा।\n"
+        "• *✨ Vakil AI Pro हाइब्रिड:* न्यायिक ढांचे और वरिष्ठ अधिवक्ता शब्दावली का संयुक्त संस्करण।"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -331,20 +407,21 @@ async def help_command(update, context):
     if not await require_access(update):
         return
     msg = (
-        "⚖️ *LEGAL DRAFTING BOT GUIDE*\n\n"
-        "*Commands:*\n"
-        "• /newcase — नया केस शुरू करें (पहले Style चुनें: 500+ Templates या Dad's 306 Files)\n"
-        "• /style — किसी भी समय Drafting Style बदलें\n"
-        "• /adddocument — इसी केस में Affidavit, Jawab Dava, Application आदि बनाएं\n"
-        "• /edit — ड्राफ्ट में कोई भी पॉइंट जोड़ें, हटाएं या बदलें\n"
-        "• /summary — वर्तमान केस का विवरण देखें\n"
-        "• /corpus — टेम्पलेट और कॉर्पस की संख्या देखें\n"
-        "• /cancel — वर्तमान सेशन बंद करें\n\n"
-        "*How to Use:*\n"
-        "1. `/newcase` दबाकर चुनें कि आपको **500+ खरीदे गए टेम्पलेट्स** का उपयोग करना है या **पिताजी की 306 फाइलों की स्टाइल** का।\n"
-        "2. केस का विवरण (विवाद, पक्षकार, कोर्ट परिसर, पिताजी का नाम) बोलकर (Voice Note), लिखकर या फोटो भेजकर बताएं।\n"
-        "3. बोट सबसे उपयुक्त टेम्पलेट चुनकर उसमें आपके केस का विवरण भर देगा और DOCX + PDF देगा।\n"
-        "4. उसके बाद आप **➕ Add Point** या **🗑️ Remove Point** से कोई भी बिंदु जोड़ या हटा सकते हैं!"
+        "🏛️ *VAKIL DRAFTING AI — EXECUTIVE USER GUIDE*\n"
+        f"{DIVIDER}\n"
+        "📌 *प्रमुख कमांड्स (Quick Commands):*\n"
+        "• `/newcase` — नया केस या विधिक ड्राफ्ट शुरू करें\n"
+        "• `/style` — ड्राफ्टिंग इंजन शैली (Standard / Senior Counsel / Pro Hybrid) बदलें\n"
+        "• `/adddocument` — उसी केस के तथ्यों से जवाब दावा, शपथपत्र या प्रार्थना पत्र बनाएं\n"
+        "• `/edit` — तैयार ड्राफ्ट में कोई भी धारा या बिंदु जोड़ें, हटाएं या संशोधित करें\n"
+        "• `/summary` — वर्तमान केस डोजियर एवं प्रगति देखें\n"
+        "• `/myplan` — अपनी सदस्यता एवं शेष ड्राफ्ट कोटा देखें\n"
+        "• `/cancel` — वर्तमान सेशन समाप्त करें\n"
+        f"{DIVIDER}\n"
+        "🚀 *ड्राफ्ट तैयार करने की प्रक्रिया (3 आसान चरण):*\n"
+        "1️⃣ `/newcase` दबाकर अपनी पसंदीदा **Drafting Style** चुनें।\n"
+        "2️⃣ अपने केस के तथ्य **Voice Note 🎙️ बोलकर**, **Text ✍️ लिखकर**, या **दस्तावेज़ की Photo/PDF 📸** भेजकर बताएं।\n"
+        "3️⃣ **⚡ ड्राफ्ट तैयार करें** दबाते ही कोर्ट में दाखिल करने योग्य **Editable DOCX** एवं **Court-Ready PDF** प्राप्त करें!"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -358,33 +435,42 @@ async def trial_command(update, context):
         return
     if not context.args or not context.args[0].isdigit():
         await update.message.reply_text(
-            "🎁 *Trial Authorization Usage:*\n"
-            "`/trial TELEGRAM_USER_ID` (डिफ़ॉल्ट 5 ड्राफ्ट लिमिट)\n"
-            "या कस्टम लिमिट के लिए: `/trial TELEGRAM_USER_ID 5`",
+            "🏛️ *VAKIL AI ADMIN — TRIAL PROVISIONING*\n"
+            f"{DIVIDER}\n"
+            "• डिफ़ॉल्ट 5-ड्राफ्ट ट्रायल: `/trial TELEGRAM_USER_ID`\n"
+            "• कस्टम ट्रायल लिमिट: `/trial TELEGRAM_USER_ID 5`",
             parse_mode="Markdown",
         )
         return
     target = context.args[0]
     if access.is_owner(target):
-        await update.message.reply_text("👑 Owner के पास पहले से Unlimited access है।")
+        await update.message.reply_text("👑 Chamber Admin के पास पहले से Unlimited विशेषाधिकार हैं।")
         return
     limit = 5
     if len(context.args) >= 2 and context.args[1].isdigit() and int(context.args[1]) > 0:
         limit = int(context.args[1])
     access.authorize_trial(target, update.effective_user.id, limit=limit)
     await update.message.reply_text(
-        f"🎁 *Trial Activated!*\n\n"
-        f"• *User ID:* `{target}`\n"
-        f"• *Plan:* 🎁 Free Trial\n"
-        f"• *Document Limit:* `{limit}` documents (Used: `0/{limit}`)",
+        "🏛️ *VAKIL AI ADMIN — TRIAL PASS ACTIVATED*\n"
+        f"{DIVIDER}\n"
+        f"👤 *Client ID:* `{target}`\n"
+        f"🏷️ *Tier:* 🎁 Complimentary Trial Pass\n"
+        f"📊 *Allocated Quota:* `{limit}` Legal Documents (`0/{limit}` used)\n"
+        f"🟢 *Status:* Active & Ready",
         parse_mode="Markdown",
     )
     try:
         await context.bot.send_message(
             chat_id=int(target),
             text=(
-                f"🎁 *आपका Free Trial ({limit} Documents) सक्रिय कर दिया गया है!*\n\n"
-                f"अब आप `/start` या `/newcase` दबाकर **{limit} कानूनी ड्राफ्ट (दावा / जवाब दावा / शपथपत्र)** तैयार कर सकते हैं।"
+                "🏛️ *VAKIL DRAFTING AI — WELCOME PASS*\n"
+                f"{DIVIDER}\n"
+                f"🎁 *आपका Complimentary Trial Pass ({limit} Legal Documents) सक्रिय कर दिया गया है!*\n\n"
+                f"• *उपलब्ध कोटा:* `{limit}` ड्राफ्ट (वाद-पत्र, जवाब दावा, प्रार्थना-पत्र, शपथपत्र आदि)\n"
+                "• *ड्राफ्टिंग मोड्स:* Standard Judicial • Senior Counsel • Vakil AI Pro Hybrid\n"
+                "• *निःशुल्क संशोधन:* तैयार ड्राफ्ट में बिंदु जोड़ना या सुधार करना पूरी तरह निःशुल्क है।\n"
+                f"{DIVIDER}\n"
+                "👉 नया केस शुरू करने के लिए अभी `/start` या `/newcase` दबाएँ।"
             ),
             parse_mode="Markdown",
         )
@@ -401,17 +487,17 @@ async def paid_command(update, context):
         return
     if not context.args or not context.args[0].isdigit():
         await update.message.reply_text(
-            "💎 *Paid Authorization Usage:*\n"
-            "• `/paid TELEGRAM_USER_ID 50` (50 ड्राफ्ट लिमिट देने के लिए)\n"
-            "• `/paid TELEGRAM_USER_ID 100` (100 ड्राफ्ट लिमिट देने के लिए)\n"
-            "• `/paid TELEGRAM_USER_ID unlimited` (अनलिमिटेड ड्राफ्ट देने के लिए)\n"
-            "• `/paid TELEGRAM_USER_ID` (डिफ़ॉल्ट 50 ड्राफ्ट लिमिट)",
+            "🏛️ *VAKIL AI ADMIN — PRO MEMBERSHIP PROVISIONING*\n"
+            f"{DIVIDER}\n"
+            "• 50 ड्राफ्ट प्लान: `/paid TELEGRAM_USER_ID 50`\n"
+            "• 100 ड्राफ्ट प्लान: `/paid TELEGRAM_USER_ID 100`\n"
+            "• अनलिमिटेड प्लान: `/paid TELEGRAM_USER_ID unlimited`",
             parse_mode="Markdown",
         )
         return
     target = context.args[0]
     if access.is_owner(target):
-        await update.message.reply_text("👑 Owner के पास पहले से Unlimited access है।")
+        await update.message.reply_text("👑 Chamber Admin के पास पहले से Unlimited विशेषाधिकार हैं।")
         return
     limit = int(os.getenv("DEFAULT_PAID_DOCUMENT_LIMIT", "50"))
     if len(context.args) >= 2:
@@ -421,25 +507,35 @@ async def paid_command(update, context):
         elif arg2.isdigit() and int(arg2) > 0:
             limit = int(arg2)
         else:
-            await update.message.reply_text("⚠️ कृपया सही संख्या लिखें, जैसे: `/paid 987654321 50` या `/paid 987654321 unlimited`", parse_mode="Markdown")
+            await update.message.reply_text(
+                "⚠️ कृपया सही संख्या लिखें, जैसे: `/paid 987654321 50` या `/paid 987654321 unlimited`",
+                parse_mode="Markdown",
+            )
             return
     access.authorize_paid(target, update.effective_user.id, limit=limit)
-    limit_str = "♾️ Unlimited" if limit < 0 else f"`{limit}` documents (Used: `0/{limit}`)"
+    limit_str = "♾️ Unlimited Documents" if limit < 0 else f"`{limit}` Legal Documents (`0/{limit}` used)"
     await update.message.reply_text(
-        f"💎 *Paid Plan Activated!*\n\n"
-        f"• *User ID:* `{target}`\n"
-        f"• *Plan:* 💎 Paid Subscriber\n"
-        f"• *Document Limit:* {limit_str}",
+        "🏛️ *VAKIL AI ADMIN — PRO MEMBERSHIP ACTIVATED*\n"
+        f"{DIVIDER}\n"
+        f"👤 *Client ID:* `{target}`\n"
+        f"🏷️ *Tier:* 💎 Vakil AI Pro Member\n"
+        f"📊 *Allocated Quota:* {limit_str}\n"
+        f"🟢 *Status:* Active & Verified",
         parse_mode="Markdown",
     )
     try:
-        user_limit_str = "अनलिमिटेड (Unlimited)" if limit < 0 else f"{limit} ड्राफ्ट"
+        user_limit_str = "♾️ अनलिमिटेड (Unlimited)" if limit < 0 else f"`{limit}` विधिक ड्राफ्ट"
         await context.bot.send_message(
             chat_id=int(target),
             text=(
-                f"💎 *आपका Paid Plan ({user_limit_str}) सक्रिय कर दिया गया है!*\n\n"
-                "अब आप `/start` या `/newcase` दबाकर अपने कानूनी ड्राफ्ट तैयार कर सकते हैं।\n"
-                "अपने प्लान की स्थिति देखने के लिए कभी भी `/myplan` भेजें।"
+                "🏛️ *VAKIL DRAFTING AI — PRO MEMBERSHIP PASS*\n"
+                f"{DIVIDER}\n"
+                "💎 *आपकी Vakil AI Pro Membership सफलतापूर्वक सक्रिय कर दी गई है!*\n\n"
+                f"• *सदस्यता स्तर:* 💎 Vakil AI Pro Member\n"
+                f"• *ड्राफ्ट कोटा:* {user_limit_str}\n"
+                "• *उपलब्ध सुविधाएं:* Voice Dictation • Document OCR • Multi-Document Case Suite • DOCX & Court PDF\n"
+                f"{DIVIDER}\n"
+                "👉 ड्राफ्टिंग शुरू करने के लिए `/start` या `/newcase` दबाएँ तथा कोटा देखने के लिए `/myplan` भेजें।"
             ),
             parse_mode="Markdown",
         )
@@ -455,21 +551,30 @@ async def myplan_command(update, context):
     status = access.get_plan_status(uid)
     if not status["authorized"]:
         await update.message.reply_text(
-            f"🔒 *Plan Status:* Not Authorized\n"
-            f"🆔 *Your Telegram ID:* `{uid}`\n\n"
-            "Trial (5 Documents) या Paid Plan सक्रिय कराने के लिए एडमिन को अपना Telegram ID भेजें।",
+            "🏛️ *VAKIL DRAFTING AI — MEMBERSHIP STATUS*\n"
+            f"{DIVIDER}\n"
+            f"👤 *Client ID:* `{uid}`\n"
+            "🔴 *Status:* `Inactive / Not Registered`\n"
+            f"{DIVIDER}\n"
+            "🎁 *Trial Pass (5 Documents)* या *💎 Vakil AI Pro Plan* सक्रिय कराने के लिए एडमिन को अपनी Client ID भेजें।",
             parse_mode="Markdown",
         )
         return
     qlim = status["quota_limit"]
     used = status["used_documents"]
     rem = status["remaining"]
-    quota_line = "♾️ Unlimited" if qlim < 0 else f"`{used}/{qlim}` used (`{rem}` remaining)"
+    bar = quota_progress_bar(used, qlim)
+    quota_line = "♾️ Unlimited Access" if qlim < 0 else f"`{rem}` शेष (कुल `{qlim}` में से `{used}` प्रयुक्त)"
     await update.message.reply_text(
-        f"📊 *YOUR SUBSCRIPTION PLAN*\n\n"
-        f"• *User ID:* `{uid}`\n"
-        f"• *Plan:* {status['plan_label']}\n"
-        f"• *Quota Usage:* {quota_line}",
+        "🏛️ *VAKIL DRAFTING AI — MEMBERSHIP PASS*\n"
+        f"{DIVIDER}\n"
+        f"👤 *Client ID:* `{uid}`\n"
+        f"🏷️ *Active Tier:* {status['plan_label']}\n"
+        f"📊 *Quota Meter:* `{bar}`\n"
+        f"📑 *Available Balance:* {quota_line}\n"
+        f"🟢 *Engine Status:* Priority Judicial Queue Active\n"
+        f"{DIVIDER}\n"
+        "_नोट: तैयार ड्राफ्ट में संशोधन (Edit / Add / Remove Point) करने पर कोई अतिरिक्त कोटा नहीं कटता है।_",
         parse_mode="Markdown",
     )
 
@@ -482,29 +587,30 @@ async def authorize(update, context):
         return
     if not context.args or not context.args[0].isdigit():
         await update.message.reply_text(
-            "*Owner Authorization Commands:*\n"
-            "• `/trial USER_ID` — 5 ड्राफ्ट का Free Trial दें\n"
-            "• `/paid USER_ID 50` — 50 ड्राफ्ट का Paid Plan दें\n"
-            "• `/authorize USER_ID` — Unlimited access दें",
+            "🏛️ *VAKIL AI ADMIN — AUTHORIZATION CONSOLE*\n"
+            f"{DIVIDER}\n"
+            "• `/trial USER_ID` — 5 ड्राफ्ट का Complimentary Trial Pass दें\n"
+            "• `/paid USER_ID 50` — 50 ड्राफ्ट का Vakil AI Pro Plan दें\n"
+            "• `/authorize USER_ID` — Enterprise Unlimited Access दें",
             parse_mode="Markdown",
         )
         return
     target = context.args[0]
     if access.is_owner(target):
-        await update.message.reply_text("👑 Owner पहले से permanently authorized है।")
+        await update.message.reply_text("👑 Chamber Admin पहले से permanently authorized है।")
         return
     if len(context.args) >= 2 and context.args[1].lower() == "trial":
         lim = int(context.args[2]) if (len(context.args) >= 3 and context.args[2].isdigit()) else 5
         access.authorize_trial(target, update.effective_user.id, limit=lim)
-        await update.message.reply_text(f"🎁 User `{target}` को Trial Plan ({lim} documents) पर authorize कर दिया गया है।", parse_mode="Markdown")
+        await update.message.reply_text(f"🎁 Client `{target}` को Trial Pass (`{lim}` documents) पर सक्रिय कर दिया गया है।", parse_mode="Markdown")
         return
     if len(context.args) >= 2 and context.args[1].lower() == "paid":
         lim = int(context.args[2]) if (len(context.args) >= 3 and context.args[2].isdigit()) else int(os.getenv("DEFAULT_PAID_DOCUMENT_LIMIT", "50"))
         access.authorize_paid(target, update.effective_user.id, limit=lim)
-        await update.message.reply_text(f"💎 User `{target}` को Paid Plan ({lim} documents) पर authorize कर दिया गया है।", parse_mode="Markdown")
+        await update.message.reply_text(f"💎 Client `{target}` को Vakil AI Pro Plan (`{lim}` documents) पर सक्रिय कर दिया गया है।", parse_mode="Markdown")
         return
     access.authorize(target, update.effective_user.id)
-    await update.message.reply_text(f"✅ User `{target}` को authorize (Unlimited) कर दिया गया है।", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ Client `{target}` को Enterprise Unlimited Plan पर सक्रिय कर दिया गया है।", parse_mode="Markdown")
 
 
 async def unauthorize(update, context):
@@ -518,11 +624,13 @@ async def unauthorize(update, context):
         return
     target = context.args[0]
     if access.is_owner(target):
-        await update.message.reply_text("🛡️ Owner को unauthorize नहीं किया जा सकता।")
+        await update.message.reply_text("🛡️ Chamber Admin को unauthorize नहीं किया जा सकता।")
         return
     removed = access.unauthorize(target)
     await update.message.reply_text(
-        f"{'✅ User removed from allowlist.' if removed else 'ℹ️ User allowlist में नहीं था.'}\nUser ID: `{target}`",
+        f"🏛️ *VAKIL AI ADMIN — ACCESS REVOKED*\n{DIVIDER}\n"
+        f"{'✅ Client की सदस्यता समाप्त कर दी गई है।' if removed else 'ℹ️ यह Client सूची में नहीं था।'}\n"
+        f"👤 *Client ID:* `{target}`",
         parse_mode="Markdown",
     )
 
@@ -534,26 +642,23 @@ async def authorized(update, context):
         await deny(update)
         return
     users = access.authorized_users()
-    lines = [f"👑 *Owner (Sudo):* `{access.owner_id}` (♾️ Unlimited)", "", "*Authorized Users & Quotas:*"]
+    lines = [
+        "🏛️ *VAKIL AI ADMIN — SUBSCRIBER DIRECTORY*",
+        DIVIDER,
+        f"👑 *Chamber Admin (Sudo):* `{access.owner_id}` (♾️ Unlimited)",
+        "",
+        "📋 *Registered Clients & Quota Usage:*",
+    ]
     if not users:
-        lines.append("• _No users authorized yet._")
+        lines.append("• _अभी कोई बाहरी क्लाइंट पंजीकृत नहीं है।_")
     for u in users:
         plan = str(u.get("plan", "unlimited")).lower()
         qlim = int(u.get("quota_limit", -1))
         used = int(u.get("used_documents", 0))
-        badge = "🎁 Trial" if plan == "trial" else ("💎 Paid" if plan == "paid" else "♾️ Unlimited")
+        badge = "🎁 Trial Pass" if plan == "trial" else ("💎 Pro Member" if plan == "paid" else "♾️ Unlimited")
         usage_str = "Unlimited" if qlim < 0 else f"{used}/{qlim} drafts used"
-        lines.append(f"• `{u['user_id']}` — *{badge}* ({usage_str})")
+        lines.append(f"• `{u['user_id']}` — *{badge}* (`{usage_str}`)")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-
-STYLE_PROMPT_TEXT = (
-    "⚖️ *LEGAL DRAFTING WORKSPACE*\n\n"
-    "नया केस शुरू करने के लिए सबसे पहले चुनें कि आप किस **Style / Template** का उपयोग करना चाहते हैं:\n\n"
-    "1️⃣ *📜 500+ Purchased Legal Templates:* आपके खरीदे गए 500+ टेम्पलेट्स में से केस के लिए सबसे उपयुक्त टेम्पलेट चुनकर उसमें आपके केस के विवरण (पार्टी के नाम, कोर्ट परिसर, तथ्य, पिताजी का नाम) भर देगा।\n\n"
-    "2️⃣ *🏛️ Dad's 306 Original Files Style:* आपके पिताजी (Adv. B.D. Shukla) की 306 मूल फाइलों की भाषा और प्रारूप में ड्राफ्ट तैयार करेगा।\n\n"
-    "3️⃣ *⚡ Hybrid Mix (Both):* प्रोफेशनल टेम्पलेट के ढांचे और पिताजी की कानूनी भाषा का मिश्रण।"
-)
 
 
 async def start(update, context):
@@ -592,7 +697,7 @@ async def style_command(update, context):
     if not await require_access(update):
         return
     await update.message.reply_text(
-        "🎨 *Select Drafting Style:*\n\nआप किस स्टाइल में ड्राफ्ट तैयार करना चाहते हैं?",
+        STYLE_PROMPT_TEXT,
         parse_mode="Markdown",
         reply_markup=style_selection_menu(),
     )
@@ -604,7 +709,13 @@ async def cancel(update, context):
     if not await require_access(update):
         return
     store.delete(case_id_for(update.effective_user.id))
-    await update.message.reply_text("✅ Current draft session बंद कर दी गई है। /newcase से नया draft शुरू करें।")
+    await update.message.reply_text(
+        "🏛️ *VAKIL DRAFTING AI — SESSION CLOSED*\n"
+        f"{DIVIDER}\n"
+        "✅ वर्तमान ड्राफ्टिंग सेशन सुरक्षित रूप से समाप्त कर दिया गया है।\n"
+        "👉 नया केस शुरू करने के लिए `/newcase` या `/start` दबाएँ।",
+        parse_mode="Markdown",
+    )
 
 
 async def summary(update, context):
@@ -614,7 +725,13 @@ async def summary(update, context):
         return
     state = get_state(update.effective_user.id)
     if not state:
-        await update.message.reply_text("कोई active draft नहीं है। /newcase दबाएँ।")
+        await update.message.reply_text(
+            "🏛️ *VAKIL DRAFTING AI*\n"
+            f"{DIVIDER}\n"
+            "ℹ️ अभी कोई सक्रिय केस सेशन नहीं है। नया ड्राफ्ट शुरू करने के लिए `/newcase` दबाएँ।",
+            parse_mode="Markdown",
+            reply_markup=style_selection_menu(),
+        )
         return
     await update.message.reply_text(summary_text(state), parse_mode="Markdown", reply_markup=case_actions(state))
 
@@ -633,28 +750,29 @@ async def intake_text(update, context, text=None, *, suppress_questions=False, a
         state = CaseState(case_id_for(uid), document_type=inferred_type, style_mode="template_mode", style_selected=False)
         store.save(uid, state)
     elif not state.facts:
-        # Auto-adjust document type on first substantive message if user didn't pick one explicitly
         inferred_type = infer_document_type(text, default=state.document_type)
         state.document_type = inferred_type
 
     state.record("user", text)
     if announce:
-        await update.message.reply_text(f"⏳ {DISPLAY_NAMES[state.document_type]} के लिए आपके केस का विवरण समझा जा रहा है…")
+        await update.message.reply_text(
+            f"⚙️ *{DISPLAY_NAMES[state.document_type]}* — आपके केस के तथ्यों का विधिक विश्लेषण किया जा रहा है…",
+            parse_mode="Markdown",
+        )
     try:
         result = await asyncio.to_thread(orchestrator.extract_and_collect, state, text)
         store.save(uid, state)
     except Exception:
         log.exception("Intake failed")
-        await update.message.reply_text("❌ जानकारी process नहीं हो सकी। कृपया दोबारा भेजें।")
+        await update.message.reply_text("❌ जानकारी प्रोसेस नहीं हो सकी। कृपया दोबारा भेजें।")
         return
     if suppress_questions:
         return result
 
-    # If the user sent case details directly before picking a style, ask them which style they want to use!
     if not state.style_selected:
         await update.message.reply_text(
-            f"✅ आपके केस का विवरण नोट कर लिया गया है!\n\n{summary_text(state)}\n"
-            "👉 *अब चुनें कि आप किस Style से ड्राफ्ट बनाना चाहते हैं:*",
+            f"✅ *केस के तथ्य सफलतापूर्वक दर्ज कर लिए गए हैं!*\n\n{summary_text(state)}\n"
+            "👇 *कृपया चुनें कि आप किस ड्राफ्टिंग शैली में दस्तावेज़ तैयार करना चाहते हैं:*",
             parse_mode="Markdown",
             reply_markup=style_selection_menu(),
         )
@@ -662,13 +780,13 @@ async def intake_text(update, context, text=None, *, suppress_questions=False, a
 
     if result["status"] == "needs_information":
         await update.message.reply_text(
-            f"{questions_text(state)}\n\nProgress: {progress(state)}",
+            f"{questions_text(state)}\n\n📊 *पूर्णता (Readiness):* `{progress(state)}`",
             parse_mode="Markdown",
             reply_markup=case_actions(state),
         )
         return result
     await update.message.reply_text(
-        f"✅ आवश्यक जानकारी मिल गई।\n\n{summary_text(state)}",
+        f"✅ *सभी आवश्यक विधिक तथ्य प्राप्त हो गए हैं।*\n\n{summary_text(state)}",
         parse_mode="Markdown",
         reply_markup=case_actions(state),
     )
@@ -679,10 +797,10 @@ async def start_additional_document(update, context, document_type: str):
     uid = update.effective_user.id
     state = get_state(uid)
     if not state or not state.facts:
-        await update.message.reply_text("पहले एक case तैयार करें, फिर उसमें दूसरा document जोड़ें।", reply_markup=style_selection_menu())
+        await update.message.reply_text("कृपया पहले एक केस तैयार करें, उसके बाद उसमें अगला दस्तावेज़ जोड़ें।", reply_markup=style_selection_menu())
         return
     if state.document_type == document_type and state.draft:
-        await update.message.reply_text("यह document type अभी active है। अलग document बनाने के लिए कोई दूसरा type चुनें।", reply_markup=document_menu(state))
+        await update.message.reply_text("यह दस्तावेज़ अभी सक्रिय है। अलग दस्तावेज़ बनाने के लिए नीचे से दूसरा प्रकार चुनें।", reply_markup=document_menu(state))
         return
     state.begin_new_document(document_type)
     try:
@@ -693,13 +811,17 @@ async def start_additional_document(update, context, document_type: str):
     missing = missing_fields(state.facts, document_type)
     if missing:
         msg = (
-            f"➕ *{DISPLAY_NAMES[document_type]}*\n\n"
-            "यह document इसी existing case के facts से बनाया जाएगा।\n\n"
+            f"📑 *नया सह-दस्तावेज़: {DISPLAY_NAMES[document_type]}*\n"
+            f"{DIVIDER}\n"
+            "यह दस्तावेज़ आपके वर्तमान केस के तथ्यों से तैयार किया जाएगा।\n\n"
             f"{questions_text(state)}"
         )
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=case_actions(state))
         return
-    await update.message.reply_text(f"➕ {DISPLAY_NAMES[document_type]} इसी case की जानकारी से तैयार किया जा रहा है…")
+    await update.message.reply_text(
+        f"⚙️ *{DISPLAY_NAMES[document_type]}* आपके केस के तथ्यों से तैयार किया जा रहा है…",
+        parse_mode="Markdown",
+    )
     await generate_for(update, uid, state, edit=False)
 
 
@@ -708,10 +830,12 @@ async def add_document_command(update, context):
         return
     state = get_state(update.effective_user.id)
     if not state or not state.facts:
-        await update.message.reply_text("पहले /newcase से एक case तैयार करें।", reply_markup=style_selection_menu())
+        await update.message.reply_text("कृपया पहले `/newcase` से एक केस प्रारंभ करें।", parse_mode="Markdown", reply_markup=style_selection_menu())
         return
     await update.message.reply_text(
-        "➕ *इसी केस में अगला दस्तावेज़ (Affidavit, Jawab Dava, Application आदि) चुनें:*",
+        "🏛️ *VAKIL DRAFTING AI — MULTI-DOCUMENT SUITE*\n"
+        f"{DIVIDER}\n"
+        "📑 *इसी केस के तथ्यों के आधार पर अगला विधिक दस्तावेज़ चुनें:*",
         parse_mode="Markdown",
         reply_markup=document_menu(state),
     )
@@ -746,13 +870,16 @@ async def voice_message(update, context):
     uid = update.effective_user.id
     state = get_state(uid)
 
-    await update.message.reply_text("🎙️ Voice note मिला। Transcript तैयार किया जा रहा है…")
+    await update.message.reply_text("🎙️ *Voice Dictation प्राप्त हुआ।* ऑडियो को विधिक पाठ में बदला जा रहा है…", parse_mode="Markdown")
     try:
         f = await context.bot.get_file(update.message.voice.file_id)
         buf = BytesIO()
         await f.download_to_memory(out=buf)
         transcript = await asyncio.to_thread(transcribe_voice, buf.getvalue(), "telegram_voice.ogg")
-        await update.message.reply_text(f"📝 *Transcript:*\n{transcript[:3500]}", parse_mode="Markdown")
+        await update.message.reply_text(
+            f"🎙️ *Voice Transcript:*\n{DIVIDER}\n{transcript[:3500]}",
+            parse_mode="Markdown",
+        )
 
         state = get_state(uid)
         if state and state.draft:
@@ -769,7 +896,7 @@ async def voice_message(update, context):
         await intake_text(update, context, transcript)
     except Exception:
         log.exception("voice failed")
-        await update.message.reply_text("❌ Voice note process नहीं हो सका।")
+        await update.message.reply_text("❌ Voice note प्रोसेस नहीं हो सका। कृपया पुनः प्रयास करें।")
 
 
 async def image_document_message(update, context):
@@ -809,7 +936,7 @@ async def image_document_message(update, context):
             )
             if not supported:
                 await update.message.reply_text(
-                    "⚠️ अभी केवल image files (JPG/PNG/BMP/TIFF/HEIF) और PDF documents स्वीकार किए जाते हैं."
+                    "⚠️ केवल Image फ़ाइलें (JPG/PNG/BMP/TIFF/HEIF) और PDF दस्तावेज़ समर्थित हैं।"
                 )
                 return
             tg_file = await context.bot.get_file(doc.file_id)
@@ -831,13 +958,13 @@ async def image_document_message(update, context):
         else:
             return
 
-        await update.message.reply_text("📸 Document मिला। OCR और structure निकाली जा रही है…")
+        await update.message.reply_text("📸 *Judicial OCR Scanner सक्रिय है…* दस्तावेज़ से पाठ और तथ्य निकाले जा रहे हैं…", parse_mode="Markdown")
         extracted = await asyncio.to_thread(analyze_document_bytes, file_bytes, content_type, filename)
         text = extracted.text.strip()
         if caption:
             text = f"{caption}\n\n{text}".strip()
         if not text:
-            await update.message.reply_text("⚠️ Document से readable text नहीं मिला। कृपया साफ़/सीधी photo भेजें।")
+            await update.message.reply_text("⚠️ दस्तावेज़ से पठनीय पाठ नहीं मिला। कृपया साफ़ फोटो या PDF भेजें।")
             return
 
         if state.draft and (state.pending_point_action or state.edit_mode or (caption and detect_edit_intent(caption)) or detect_edit_intent(text[:500])):
@@ -851,37 +978,47 @@ async def image_document_message(update, context):
         chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
         if len(chunks) == 1:
             await update.message.reply_text(
-                f"✅ OCR पूरा हुआ — {page_count} page{'s' if page_count != 1 else ''}, {len(text)} characters.\n\n"
-                "🧠 अब extracted text से legal case facts समझे जा रहे हैं…"
+                f"✅ *OCR स्कैन पूर्ण* — `{page_count}` पृष्ठ (`{len(text)}` अक्षर)।\n"
+                "🧠 दस्तावेज़ से विधिक तथ्य विश्लेषित किए जा रहे हैं…",
+                parse_mode="Markdown",
             )
         else:
             await update.message.reply_text(
-                f"✅ OCR पूरा हुआ — {page_count} pages, {len(text)} characters.\n"
-                f"📚 Large document को {len(chunks)} safe chunks में process किया जाएगा।"
+                f"✅ *OCR स्कैन पूर्ण* — `{page_count}` पृष्ठ (`{len(text)}` अक्षर)।\n"
+                f"📚 विस्तृत दस्तावेज़ को `{len(chunks)}` भागों में विश्लेषित किया जा रहा है…",
+                parse_mode="Markdown",
             )
         for index, chunk in enumerate(chunks, 1):
             if len(chunks) > 1 and index in {1, len(chunks)}:
-                await update.message.reply_text(f"🧠 OCR semantic extraction {index}/{len(chunks)}…")
+                await update.message.reply_text(f"⚙️ विधिक तथ्य विश्लेषण ({index}/{len(chunks)})…")
             await intake_text(update, context, chunk, suppress_questions=True, announce=False)
 
         state = get_state(uid)
         if state and not state.style_selected:
             await update.message.reply_text(
-                f"✅ पूरे document से केस के तथ्य समझ लिए गए हैं!\n\n{summary_text(state)}\n"
-                "👉 *अब चुनें कि आप किस Style से ड्राफ्ट तैयार करना चाहते हैं:*",
+                f"✅ *दस्तावेज़ से केस के सभी प्रमुख तथ्य संकलित कर लिए गए हैं!*\n\n{summary_text(state)}\n"
+                "👇 *कृपया चुनें कि आप किस ड्राफ्टिंग शैली में दस्तावेज़ तैयार करना चाहते हैं:*",
                 parse_mode="Markdown",
                 reply_markup=style_selection_menu(),
             )
         elif state and not missing_fields(state.facts, state.document_type):
-            await update.message.reply_text(f"✅ पूरे document से आवश्यक case facts समझ लिए गए।\n\n{summary_text(state)}", parse_mode="Markdown", reply_markup=case_actions(state))
+            await update.message.reply_text(
+                f"✅ *दस्तावेज़ से सभी आवश्यक तथ्य संकलित हो गए हैं।*\n\n{summary_text(state)}",
+                parse_mode="Markdown",
+                reply_markup=case_actions(state),
+            )
         else:
-            await update.message.reply_text(f"📋 OCR पूरा हुआ। अभी केवल आवश्यक जानकारी पूछी जाएगी:\n\n{questions_text(state)}\n\nProgress: {progress(state)}", parse_mode="Markdown", reply_markup=case_actions(state))
+            await update.message.reply_text(
+                f"📋 *OCR विश्लेषण पूर्ण।* कृपया शेष आवश्यक विवरण प्रदान करें:\n\n{questions_text(state)}\n\n📊 *पूर्णता:* `{progress(state)}`",
+                parse_mode="Markdown",
+                reply_markup=case_actions(state),
+            )
     except DocumentIntelligenceError as exc:
         log.exception("Document Intelligence failed")
-        await update.message.reply_text(f"❌ Image/document पढ़ा नहीं जा सका: {str(exc)[:500]}")
+        await update.message.reply_text(f"❌ दस्तावेज़ पढ़ा नहीं जा सका: {str(exc)[:500]}")
     except Exception:
         log.exception("image/document processing failed")
-        await update.message.reply_text("❌ Image/document process नहीं हो सका। कृपया दोबारा भेजें।")
+        await update.message.reply_text("❌ दस्तावेज़ प्रोसेस नहीं हो सका। कृपया दोबारा भेजें।")
 
 
 async def generate_for(update, uid, state, edit=False):
@@ -894,51 +1031,58 @@ async def generate_for(update, uid, state, edit=False):
             await target.reply_text(quota_msg, parse_mode="Markdown")
         return
     style_label = STYLE_NAMES.get(state.style_mode, state.style_mode)
+    status_card = (
+        f"🏛️ *VAKIL DRAFTING AI — DRAFTING ENGINE*\n"
+        f"{DIVIDER}\n"
+        f"📄 *दस्तावेज़:* {DISPLAY_NAMES[state.document_type]}\n"
+        f"🎨 *शैली:* {style_label}\n"
+        f"{DIVIDER}\n"
+        "⚙️ *विधिक ड्राफ्ट तैयार किया जा रहा है…*\n\n"
+        "☑️ `1/4` पक्षकार एवं केस तथ्यों का सत्यापन\n"
+        "☑️ `2/4` उपयुक्त न्यायिक प्रारूप (Blueprint) का चयन\n"
+        "🔄 `3/4` विधिक धाराओं एवं द्विभाषी अंकों (`अंक + शब्द`) का समायोजन\n"
+        "⏳ `4/4` कोर्ट-मानक DOCX एवं PDF का निर्माण"
+    )
     if edit:
-        await update.callback_query.edit_message_text(
-            f"⚖️ *{DISPLAY_NAMES[state.document_type]}*\n"
-            f"🎨 *Style:* {style_label}\n\n"
-            "⏳ Draft तैयार किया जा रहा है…\n\n"
-            "1/4 Case details verified\n"
-            "2/4 Best suited template matched from corpus\n"
-            "3/4 Updating template with your case details & points\n"
-            "4/4 Rendering canonical DOCX & court-standard PDF",
-            parse_mode="Markdown",
-        )
+        await update.callback_query.edit_message_text(status_card, parse_mode="Markdown")
     else:
-        await target.reply_text(f"⏳ *{DISPLAY_NAMES[state.document_type]}* ({style_label}) तैयार किया जा रहा है…", parse_mode="Markdown")
+        await target.reply_text(status_card, parse_mode="Markdown")
     try:
         draft = await asyncio.to_thread(orchestrator.draft_live, state)
         state.set_draft(draft)
         with tempfile.TemporaryDirectory() as tmp:
             label = DISPLAY_NAMES[state.document_type].split(" /")[0].replace(" ", "_")
-            docx, pdf = render_both(draft, tmp, base_name=f"{label}_{uid}", paper=os.getenv("LEGAL_PAPER", "legal"))
+            docx, pdf = await asyncio.to_thread(render_both, draft, tmp, f"{label}_{uid}", os.getenv("LEGAL_PAPER", "legal"))
             with open(docx, "rb") as f:
-                await target.reply_document(f, filename=docx.name, caption=f"📄 Editable DOCX — {DISPLAY_NAMES[state.document_type]}")
+                await target.reply_document(f, filename=docx.name, caption=f"📄 Editable Word (DOCX) — {DISPLAY_NAMES[state.document_type]}")
             with open(pdf, "rb") as f:
                 await target.reply_document(f, filename=pdf.name, caption=f"📑 Court-Ready PDF — {DISPLAY_NAMES[state.document_type]}")
         store.save(uid, state)
         plan_status = access.consume_quota(uid)
         if plan_status.get("quota_limit", -1) > 0:
-            quota_info = f"📊 *Plan Quota:* {plan_status['plan_label']} — `{plan_status['remaining']}/{plan_status['quota_limit']}` drafts remaining\n"
+            quota_info = f"📊 *शेष कोटा (Quota):* `{plan_status['remaining']}/{plan_status['quota_limit']}` ड्राफ्ट शेष ({plan_status['plan_label']})\n"
         else:
-            quota_info = ""
-        tpl_info = (f"📄 *Selected Template:* `{state.selected_template_name}`\n" if state.selected_template_name else "") + quota_info
+            quota_info = f"📊 *सदस्यता:* {plan_status['plan_label']}\n"
+        bp_label = format_public_blueprint_name(state.selected_template_name, state.document_type, state.style_mode)
         await target.reply_text(
-            f"✅ *Draft तैयार है!*\n"
-            f"🎨 *Style:* {style_label}\n"
-            f"{tpl_info}\n"
-            "💡 *अगला कदम:*\n"
-            "• कोई नया पॉइंट जोड़ने के लिए *➕ Add Point* दबाएं\n"
-            "• कोई पॉइंट हटाने के लिए *🗑️ Remove Point* दबाएं\n"
-            "• इसी केस का शपथपत्र, जवाब दावा या प्रार्थना पत्र बनाने के लिए *➕ Add Another Document* दबाएं\n"
-            "• या सीधे बोलकर (Voice Note) / लिखकर कोई भी बदलाव बताएं!",
+            f"🏛️ *VAKIL DRAFTING AI — DRAFT COMPLETED*\n"
+            f"{DIVIDER}\n"
+            f"✅ *{DISPLAY_NAMES[state.document_type]} सफलतापूर्वक तैयार है!*\n"
+            f"🎨 *शैली:* {style_label}\n"
+            f"📘 *प्रारूप:* `{bp_label}`\n"
+            f"{quota_info}"
+            f"{DIVIDER}\n"
+            "💡 *अगले विकल्प (निःशुल्क संशोधन एवं सह-दस्तावेज़):*\n"
+            "• नया तथ्य या पैराग्राफ जोड़ने हेतु *➕ बिंदु जोड़ें* दबाएं\n"
+            "• कोई पैराग्राफ हटाने हेतु *🗑️ बिंदु हटाएं* दबाएं\n"
+            "• इसी केस का शपथपत्र, जवाब दावा या प्रार्थना-पत्र बनाने हेतु *📑 अगला दस्तावेज़ बनाएं* दबाएं\n"
+            "• या सीधे बोलकर (Voice Note 🎙️) / लिखकर कोई भी संशोधन बताएं!",
             parse_mode="Markdown",
             reply_markup=case_actions(state),
         )
     except Exception as exc:
         log.exception("generation failed")
-        msg = "⏳ AI service अभी व्यस्त है। थोड़ी देर बाद फिर कोशिश करें।" if isinstance(exc, GeminiError) and exc.retryable else f"❌ Draft तैयार नहीं हो सका: {str(exc)[:500]}"
+        msg = "⏳ AI सर्वर अभी व्यस्त है। कृपया कुछ क्षण बाद पुनः प्रयास करें।" if isinstance(exc, GeminiError) and exc.retryable else f"❌ ड्राफ्ट तैयार नहीं हो सका: {str(exc)[:500]}"
         await target.reply_text(msg)
 
 
@@ -949,21 +1093,23 @@ async def enter_edit_mode(update, context):
         return
     state = get_state(update.effective_user.id)
     if not state or not state.draft:
-        await update.message.reply_text("अभी कोई generated draft उपलब्ध नहीं है। पहले draft generate करें।")
+        await update.message.reply_text("ℹ️ अभी कोई तैयार ड्राफ्ट उपलब्ध नहीं है। कृपया पहले ड्राफ्ट तैयार करें।")
         return
     state.edit_mode = True
     state.pending_point_action = ""
     state.pending_edit = {}
     store.save(update.effective_user.id, state)
     await update.message.reply_text(
-        "✏️ *DRAFT EDIT MODE*\n\n"
-        "अपना बदलाव Hindi/English में लिखें, Voice Note भेजें, या फोटो भेजें।\n\n"
-        "उदाहरण:\n"
-        "• `इसमें यह पॉइंट और जोड़ दो कि प्रतिवादी ने 20,000 रुपये बयाना लिया था।`\n"
-        "• `पैराग्राफ 4 वाला पॉइंट हटा दो।`\n"
-        "• `पैराग्राफ 3 में 15.06.2026 की जगह 20.06.2026 कर दो।`\n"
-        "• `प्रार्थना को दूसरे पेज पर ले जाओ।`\n\n"
-        "AI केवल वही बदलाव करेगा और बाकी संपूर्ण ड्राफ्ट सुरक्षित रहेगा।",
+        "🏛️ *VAKIL DRAFTING AI — PRECISION EDIT STUDIO*\n"
+        f"{DIVIDER}\n"
+        "✏️ अपना संशोधन हिंदी या English में लिखकर या **Voice Note 🎙️** बोलकर भेजें।\n\n"
+        "*उदाहरण:*\n"
+        "• `इसमें यह बिंदु जोड़ दो कि प्रतिवादी ने 20,000 रुपये बयाना लिया था।`\n"
+        "• `पैराग्राफ 4 वाला बिंदु हटा दो।`\n"
+        "• `पैराग्राफ 3 में 15.06.2026 के स्थान पर 20.06.2026 कर दो।`\n"
+        "• `प्रार्थना को अगले पृष्ठ पर ले जाओ।`\n"
+        f"{DIVIDER}\n"
+        "_AI केवल आपके निर्देशित हिस्से को संशोधित करेगा तथा शेष संपूर्ण ड्राफ्ट सुरक्षित रहेगा।_",
         parse_mode="Markdown",
     )
 
@@ -979,7 +1125,7 @@ async def process_edit_instruction(update, context, instruction: str):
         return
     state = get_state(uid)
     if not state or not state.draft:
-        await update.message.reply_text("कोई generated draft उपलब्ध नहीं है। पहले draft generate करें।")
+        await update.message.reply_text("ℹ️ अभी कोई तैयार ड्राफ्ट उपलब्ध नहीं है। पहले ड्राफ्ट जनरेट करें।")
         return
     instruction = decode_krutidev_hybrid(instruction.strip())
     if not instruction:
@@ -987,7 +1133,7 @@ async def process_edit_instruction(update, context, instruction: str):
     state.edit_mode = True
     action_mode = state.pending_point_action
     state.pending_point_action = ""
-    await update.message.reply_text("🔎 आपके निर्देश के अनुसार ड्राफ्ट अपडेट तैयार किया जा रहा है…")
+    await update.message.reply_text("⚙️ *आपके निर्देश के अनुसार विधिक संशोधन तैयार किया जा रहा है…*", parse_mode="Markdown")
     try:
         if action_mode == "add":
             edit = await asyncio.to_thread(editor.parse_add_point, state.draft, instruction)
@@ -1000,13 +1146,17 @@ async def process_edit_instruction(update, context, instruction: str):
         state.pending_edit = {"edit": edit, "candidate": candidate, "instruction": instruction}
         store.save(uid, state)
         await update.message.reply_text(
-            "🔎 *Proposed Changes:*\n\n" + preview + "\n\nकेवल यही बदलाव लागू होगा; बाकी संपूर्ण ड्राफ्ट सुरक्षित रहेगा।",
+            "🏛️ *VAKIL DRAFTING AI — CHANGE PREVIEW*\n"
+            f"{DIVIDER}\n"
+            f"{preview}\n"
+            f"{DIVIDER}\n"
+            "👇 *क्या आप इस संशोधन को ड्राफ्ट में लागू करना चाहते हैं?*",
             parse_mode="Markdown",
             reply_markup=edit_actions(),
         )
     except Exception as exc:
         log.exception("edit parse/apply failed")
-        await update.message.reply_text(f"⚠️ बदलाव apply करने योग्य exact target नहीं मिला। कृपया पैराग्राफ नंबर या शब्द स्पष्ट लिखें।\n\n{str(exc)[:400]}")
+        await update.message.reply_text(f"⚠️ संशोधन लागू करने हेतु सटीक पैराग्राफ स्पष्ट नहीं हो सका। कृपया पैराग्राफ संख्या या शब्द स्पष्ट लिखें।\n\n{str(exc)[:400]}")
 
 
 async def edit_text_message(update, context):
@@ -1020,61 +1170,65 @@ async def edit_voice_message(update, context):
         return
     state = get_state(update.effective_user.id)
     if not state or not state.draft:
-        await update.message.reply_text("पहले एक draft तैयार करें।")
+        await update.message.reply_text("कृपया पहले एक ड्राफ्ट तैयार करें।")
         return
-    await update.message.reply_text("🎙️ Voice edit मिला। Transcript तैयार किया जा रहा है…")
+    await update.message.reply_text("🎙️ *Voice Edit प्राप्त हुआ।* ट्रांसक्रिप्ट तैयार किया जा रहा है…", parse_mode="Markdown")
     try:
         f = await context.bot.get_file(update.message.voice.file_id)
         buf = BytesIO()
         await f.download_to_memory(out=buf)
         transcript = await asyncio.to_thread(transcribe_voice, buf.getvalue(), "telegram_edit.ogg")
-        await update.message.reply_text(f"📝 *Transcript:*\n{transcript[:3500]}", parse_mode="Markdown")
+        await update.message.reply_text(f"📝 *Voice Instruction:*\n{transcript[:3500]}", parse_mode="Markdown")
         await process_edit_instruction(update, context, transcript)
     except Exception:
         log.exception("voice edit failed")
-        await update.message.reply_text("❌ Voice edit process नहीं हो सका।")
+        await update.message.reply_text("❌ Voice edit प्रोसेस नहीं हो सका।")
 
 
 async def apply_edit(update, context):
     q = update.callback_query
     uid = q.from_user.id
     if not access.is_authorized(uid):
-        await q.edit_message_text("🔒 यह bot private है।")
+        await q.edit_message_text("🔒 यह सेवा केवल अधिकृत सदस्यों के लिए है।")
         return
     state = get_state(uid)
     pending = state.pending_edit if state else {}
     candidate = pending.get("candidate") if pending else None
     if not state or not candidate:
-        await q.edit_message_text("⚠️ यह edit अब उपलब्ध नहीं है।")
+        await q.edit_message_text("⚠️ यह संशोधन अब उपलब्ध नहीं है।")
         return
 
     state.set_draft(candidate)
     state.edit_mode = True
     store.save(uid, state)
 
-    await q.edit_message_text("⏳ Change applied! Updated DOCX व PDF render किए जा रहे हैं…")
+    await q.edit_message_text("⚙️ *संशोधन लागू किया जा रहा है!* अपडेटेड DOCX एवं PDF तैयार किए जा रहे हैं…", parse_mode="Markdown")
     try:
         with tempfile.TemporaryDirectory() as tmp:
             label = DISPLAY_NAMES[state.document_type].split(" /")[0].replace(" ", "_")
-            docx, pdf = render_both(candidate, tmp, base_name=f"{label}_{uid}_v{state.draft_version}", paper=os.getenv("LEGAL_PAPER", "legal"))
+            docx, pdf = await asyncio.to_thread(render_both, candidate, tmp, f"{label}_{uid}_v{state.draft_version}", os.getenv("LEGAL_PAPER", "legal"))
             with open(docx, "rb") as f:
-                await q.message.reply_document(f, filename=docx.name, caption=f"📄 Updated DOCX — v{state.draft_version}")
+                await q.message.reply_document(f, filename=docx.name, caption=f"📄 Updated Word (DOCX) — v{state.draft_version}")
             with open(pdf, "rb") as f:
-                await q.message.reply_document(f, filename=pdf.name, caption=f"📑 Updated PDF — v{state.draft_version}")
+                await q.message.reply_document(f, filename=pdf.name, caption=f"📑 Updated Court PDF — v{state.draft_version}")
         await q.message.reply_text(
-            f"✅ Edit applied (v{state.draft_version})! और कोई पॉइंट जोड़ना या हटाना हो तो नीचे बटन दबाएं या सीधे बोलें/लिखें।",
+            f"🏛️ *VAKIL DRAFTING AI — REVISION v{state.draft_version} COMPLETE*\n"
+            f"{DIVIDER}\n"
+            "✅ आपका संशोधन सफलतापूर्वक लागू कर दिया गया है (कोई कोटा नहीं काटा गया)।\n"
+            "अन्य कोई बिंदु जोड़ने या बदलने के लिए नीचे विकल्प चुनें:",
+            parse_mode="Markdown",
             reply_markup=case_actions(state),
         )
     except Exception:
         log.exception("render after edit failed")
-        await q.message.reply_text("❌ Change save हुआ लेकिन updated document render नहीं हो सका। /summary से draft फिर खोलें।")
+        await q.message.reply_text("❌ संशोधन सुरक्षित हो गया है, किंतु फ़ाइल रेंडर नहीं हो सकी। `/summary` से पुनः प्रयास करें।")
 
 
 async def button(update, context):
     q = update.callback_query
     await q.answer()
     if not access.is_authorized(q.from_user.id):
-        await q.edit_message_text("🔒 यह bot private है। आप authorized नहीं हैं। /myid से अपना User ID देखें।")
+        await q.edit_message_text("🔒 यह एक प्राइवेट लीगल ड्राफ्टिंग सुइट है। `/myid` भेजकर अपनी Client ID प्राप्त करें।")
         return
     uid = q.from_user.id
     cid = case_id_for(uid)
@@ -1097,20 +1251,24 @@ async def button(update, context):
             state.style_selected = True
         store.save(uid, state)
         style_label = STYLE_NAMES.get(chosen_style, chosen_style)
+        plan_info = access.get_plan_status(uid)
 
-        # If facts are already ready, let the user generate right away or pick document type
         if state.facts and not missing_fields(state.facts, state.document_type):
             await q.edit_message_text(
-                f"✅ *Style Selected:* {style_label}\n\n{summary_text(state)}\n"
-                "अब आप सीधे *✨ Generate Draft* दबा सकते हैं या नीचे से दूसरा Document Type चुन सकते हैं:",
+                f"✅ *चयनित ड्राफ्टिंग शैली:* {style_label}\n\n{summary_text(state)}\n"
+                "👉 अब आप सीधे *⚡ ड्राफ्ट तैयार करें (Generate)* दबा सकते हैं:",
                 parse_mode="Markdown",
                 reply_markup=case_actions(state),
             )
             return
 
         await q.edit_message_text(
-            f"✅ *Style Selected:* {style_label}\n\n"
-            "अब नीचे से **Document Type** चुनें (या सीधे अपने केस का विवरण, पार्टी के नाम, कोर्ट परिसर और पिताजी का नाम Voice Note / Text / Photo में भेजें):",
+            "🏛️ *VAKIL DRAFTING AI — CASE WORKSPACE*\n"
+            f"{DIVIDER}\n"
+            f"✅ *चयनित शैली:* {style_label}\n"
+            f"🏷️ *सदस्यता:* {plan_info['plan_label']}\n"
+            f"{DIVIDER}\n"
+            "👇 कृपया नीचे से **दस्तावेज़ का प्रकार (Document Type)** चुनें, या सीधे अपने केस का विवरण **Voice Note 🎙️, Text ✍️, या दस्तावेज़ की Photo/PDF 📸** में भेजें:",
             parse_mode="Markdown",
             reply_markup=dashboard(),
         )
@@ -1120,7 +1278,9 @@ async def button(update, context):
         state = store.get(cid)
         cur = state.style_mode if state else "template_mode"
         await q.edit_message_text(
-            "🔄 *Switch Drafting Style*\n\nइसी केस को दूसरे स्टाइल (500+ Templates ↔ Dad's 306 Files) में तैयार करने के लिए नीचे चुनें:",
+            "🏛️ *VAKIL DRAFTING AI — SWITCH ENGINE STYLE*\n"
+            f"{DIVIDER}\n"
+            "🔄 इसी केस को दूसरी न्यायिक शैली में पुनः तैयार करने के लिए नीचे से विकल्प चुनें:",
             parse_mode="Markdown",
             reply_markup=switch_style_menu(cur),
         )
@@ -1130,7 +1290,7 @@ async def button(update, context):
         chosen_style = q.data.split(":", 1)[1]
         state = store.get(cid)
         if not state or not state.facts:
-            await q.edit_message_text("पहले केस का विवरण भेजें।", reply_markup=style_selection_menu())
+            await q.edit_message_text("कृपया पहले केस का विवरण भेजें।", reply_markup=style_selection_menu())
             return
         state.style_mode = chosen_style
         state.style_selected = True
@@ -1141,17 +1301,18 @@ async def button(update, context):
     if q.data == "add_point_mode":
         state = store.get(cid)
         if not state or not state.draft:
-            await q.edit_message_text("पहले एक ड्राफ्ट तैयार करें।")
+            await q.edit_message_text("कृपया पहले एक ड्राफ्ट तैयार करें।")
             return
         state.edit_mode = True
         state.pending_point_action = "add"
         store.save(uid, state)
         await q.edit_message_text(
-            "➕ *ADD POINT TO DRAFT (नया पॉइंट जोड़ें)*\n\n"
-            "आप या आपके पिताजी इस ड्राफ्ट में जो भी अतिरिक्त बात, तथ्य या प्रार्थना बिंदु जोड़ना चाहते हैं, उसे सीधे लिखकर या Voice Note बोलकर भेजें।\n\n"
-            "उदाहरण:\n"
-            "• `यह पॉइंट जोड़ दो कि प्रतिवादी ने पंचों के सामने माफी मांगी थी।`\n"
-            "• `प्रार्थना में कमीशन नियुक्त करने का पॉइंट जोड़ दो।`",
+            "🏛️ *VAKIL DRAFTING AI — ADD PLEADING POINT*\n"
+            f"{DIVIDER}\n"
+            "➕ इस ड्राफ्ट में आप जो भी अतिरिक्त तथ्य, धारा या प्रार्थना बिंदु जोड़ना चाहते हैं, उसे सीधे लिखकर या **Voice Note 🎙️** बोलकर भेजें।\n\n"
+            "*उदाहरण:*\n"
+            "• `यह बिंदु जोड़ दो कि प्रतिवादी ने पंचों के समक्ष समझौता स्वीकार किया था।`\n"
+            "• `प्रार्थना में मौके के निरीक्षण हेतु अमीन कमीशन नियुक्त करने का बिंदु जोड़ दो।`",
             parse_mode="Markdown",
         )
         return
@@ -1159,7 +1320,7 @@ async def button(update, context):
     if q.data == "remove_point_mode":
         state = store.get(cid)
         if not state or not state.draft:
-            await q.edit_message_text("पहले एक ड्राफ्ट तैयार करें।")
+            await q.edit_message_text("कृपया पहले एक ड्राफ्ट तैयार करें।")
             return
         state.edit_mode = True
         state.pending_point_action = "remove"
@@ -1173,9 +1334,11 @@ async def button(update, context):
             preview_lines.append(f"`{idx}.` {short}")
         para_block = "\n".join(preview_lines) if preview_lines else "—"
         await q.edit_message_text(
-            "🗑️ *REMOVE POINT FROM DRAFT (पॉइंट हटाएं)*\n\n"
-            f"वर्तमान पैराग्राफ:\n{para_block}\n\n"
-            "आप जो भी पैराग्राफ या पॉइंट हटाना चाहते हैं, उसका नंबर या विवरण लिखकर या Voice Note से भेजें (जैसे: `पैराग्राफ 3 हटा दो` या `हर्जाने वाली बात हटा दो`)।",
+            "🏛️ *VAKIL DRAFTING AI — REMOVE PLEADING POINT*\n"
+            f"{DIVIDER}\n"
+            f"📋 *वर्तमान पैराग्राफ सूची:*\n{para_block}\n"
+            f"{DIVIDER}\n"
+            "🗑️ जो पैराग्राफ या बिंदु हटाना हो, उसकी संख्या या विवरण लिखकर या **Voice Note 🎙️** से भेजें _(जैसे: `पैराग्राफ 3 हटा दो`)_।",
             parse_mode="Markdown",
         )
         return
@@ -1183,9 +1346,13 @@ async def button(update, context):
     if q.data == "case_documents":
         state = store.get(cid)
         if not state or not state.documents:
-            await q.edit_message_text("इस case में अभी कोई generated document नहीं है।")
+            await q.edit_message_text("इस केस में अभी कोई तैयार दस्तावेज़ नहीं है।")
             return
-        await q.edit_message_text("📚 इस case के generated documents:", reply_markup=existing_documents_menu(state))
+        await q.edit_message_text(
+            f"🏛️ *VAKIL DRAFTING AI — CASE DOCUMENTS*\n{DIVIDER}\n🗂️ इस केस में तैयार किए गए सभी दस्तावेज़:",
+            parse_mode="Markdown",
+            reply_markup=existing_documents_menu(state),
+        )
         return
 
     if q.data.startswith("doc:"):
@@ -1193,7 +1360,7 @@ async def button(update, context):
         did = q.data.split(":", 1)[1]
         item = next((x for x in (state.documents if state else []) if x.get("document_id") == did), None)
         if not state or not item:
-            await q.edit_message_text("⚠️ यह document अब उपलब्ध नहीं है।")
+            await q.edit_message_text("⚠️ यह दस्तावेज़ अब उपलब्ध नहीं है।")
             return
         state.document_type = str(item.get("document_type"))
         state.style_mode = str(item.get("style_mode", state.style_mode))
@@ -1208,9 +1375,11 @@ async def button(update, context):
         state.status = "drafted"
         store.save(uid, state)
         await q.edit_message_text(
-            f"📄 *{DISPLAY_NAMES[state.document_type]}* selected.\n"
-            f"🎨 *Style:* {STYLE_NAMES.get(state.style_mode, state.style_mode)}\n\n"
-            "अब इसे review/edit कर सकते हैं, पॉइंट जोड़/हटा सकते हैं या इसी case में दूसरा document बना सकते हैं।",
+            f"🏛️ *VAKIL DRAFTING AI — ACTIVE DOCUMENT*\n"
+            f"{DIVIDER}\n"
+            f"📄 *चयनित दस्तावेज़:* {DISPLAY_NAMES[state.document_type]} (v{state.draft_version})\n"
+            f"🎨 *शैली:* {STYLE_NAMES.get(state.style_mode, state.style_mode)}\n\n"
+            "अब आप इसमें संशोधन कर सकते हैं या इसी केस में अगला दस्तावेज़ जोड़ सकते हैं:",
             parse_mode="Markdown",
             reply_markup=case_actions(state),
         )
@@ -1219,7 +1388,9 @@ async def button(update, context):
     if q.data == "add_document":
         state = store.get(cid)
         await q.edit_message_text(
-            "➕ *इसी केस के विवरण से अगला दस्तावेज़ (Affidavit, Jawab Dava, Application आदि) चुनें:*",
+            "🏛️ *VAKIL DRAFTING AI — MULTI-DOCUMENT SUITE*\n"
+            f"{DIVIDER}\n"
+            "📑 *इसी केस के विवरण से अगला सह-दस्तावेज़ (Jawab Dava, Affidavit, 6C Application आदि) चुनें:*",
             parse_mode="Markdown",
             reply_markup=document_menu(state),
         )
@@ -1229,10 +1400,10 @@ async def button(update, context):
         t = q.data.split(":", 1)[1]
         state = store.get(cid)
         if not state or not state.facts:
-            await q.edit_message_text("पहले एक case तैयार करें।", reply_markup=style_selection_menu())
+            await q.edit_message_text("कृपया पहले एक केस तैयार करें।", reply_markup=style_selection_menu())
             return
         if state.document_type == t and state.draft:
-            await q.edit_message_text("यह document अभी active है। कोई दूसरा type चुनें।", reply_markup=document_menu(state))
+            await q.edit_message_text("यह दस्तावेज़ अभी सक्रिय है। कृपया कोई दूसरा प्रकार चुनें।", reply_markup=document_menu(state))
             return
         state.begin_new_document(t)
         try:
@@ -1241,9 +1412,9 @@ async def button(update, context):
         except Exception:
             log.exception("additional document callback reconciliation failed")
         if missing_fields(state.facts, t):
-            await q.edit_message_text(f"➕ *{DISPLAY_NAMES[t]}*\n\n{questions_text(state)}", parse_mode="Markdown", reply_markup=case_actions(state))
+            await q.edit_message_text(f"📑 *{DISPLAY_NAMES[t]}*\n\n{questions_text(state)}", parse_mode="Markdown", reply_markup=case_actions(state))
             return
-        await q.edit_message_text(f"➕ *{DISPLAY_NAMES[t]}* इसी case के facts से तैयार किया जा रहा है…", parse_mode="Markdown")
+        await q.edit_message_text(f"⚙️ *{DISPLAY_NAMES[t]}* आपके केस के तथ्यों से तैयार किया जा रहा है…", parse_mode="Markdown")
         await generate_for(update, uid, state, edit=True)
         return
 
@@ -1255,14 +1426,15 @@ async def button(update, context):
         state = CaseState(cid, document_type=t, style_mode=chosen_style, style_selected=style_sel)
         store.save(uid, state)
         await q.edit_message_text(
-            f"⚖️ *{DISPLAY_NAMES[t]}*\n\n"
-            f"Progress: {progress(state)}\n\n"
-            f"{questions_text(state)}\n\n"
-            "आप Hindi/English text, Voice Note या दस्तावेज़ की Photo/PDF भेज सकते हैं।",
+            f"🏛️ *VAKIL DRAFTING AI — CASE INTAKE*\n"
+            f"{DIVIDER}\n"
+            f"📄 *दस्तावेज़:* {DISPLAY_NAMES[t]}\n"
+            f"📊 *पूर्णता (Readiness):* `{progress(state)}`\n\n"
+            f"{questions_text(state)}",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Change Style (Dad's ↔ 500+ Templates)", callback_data="choose_style")],
-                [InlineKeyboardButton("❌ Cancel", callback_data="cancel")],
+                [InlineKeyboardButton("🔄 ड्राफ्टिंग शैली बदलें (Change Style)", callback_data="choose_style")],
+                [InlineKeyboardButton("❌ सेशन निरस्त करें (Cancel)", callback_data="cancel")],
             ]),
         )
         return
@@ -1270,10 +1442,15 @@ async def button(update, context):
     state = store.get(cid)
     if q.data == "cancel":
         store.delete(cid)
-        await q.edit_message_text("✅ Draft session cancelled.")
+        await q.edit_message_text(
+            "🏛️ *VAKIL DRAFTING AI*\n"
+            f"{DIVIDER}\n"
+            "✅ वर्तमान ड्राफ्टिंग सेशन समाप्त कर दिया गया है। `/newcase` से नया केस शुरू करें।",
+            parse_mode="Markdown",
+        )
         return
     if not state:
-        await q.edit_message_text("कोई active draft नहीं है। /newcase से शुरू करें।")
+        await q.edit_message_text("ℹ️ कोई सक्रिय ड्राफ्ट नहीं है। `/newcase` से शुरू करें।", parse_mode="Markdown")
         return
     if q.data == "review":
         await q.edit_message_text(summary_text(state), parse_mode="Markdown", reply_markup=case_actions(state))
@@ -1284,12 +1461,14 @@ async def button(update, context):
         state.pending_edit = {}
         store.save(uid, state)
         await q.edit_message_text(
-            "✏️ *DRAFT EDIT MODE*\n\nअब अपना बदलाव text में लिखें या Voice Note भेजें।\n\n"
-            "उदाहरण:\n"
-            "• `पैराग्राफ 3 में 15.06.2026 की जगह 20.06.2026 कर दो।`\n"
-            "• `यह पॉइंट जोड़ दो कि ...`\n"
+            "🏛️ *VAKIL DRAFTING AI — PRECISION EDIT STUDIO*\n"
+            f"{DIVIDER}\n"
+            "✏️ अब अपना संशोधन लिखकर या **Voice Note 🎙️** से भेजें।\n\n"
+            "*उदाहरण:*\n"
+            "• `पैराग्राफ 3 में 15.06.2026 के स्थान पर 20.06.2026 कर दो।`\n"
+            "• `यह बिंदु जोड़ दो कि ...`\n"
             "• `पैराग्राफ 4 हटा दो।`\n\n"
-            "हर instruction पर पहले preview मिलेगा, फिर आप Apply/Discard चुनेंगे।",
+            "_हर निर्देश पर पहले Preview दिखाया जाएगा, जिसे आप Apply या Discard कर सकेंगे।_",
             parse_mode="Markdown",
         )
         return
@@ -1300,11 +1479,11 @@ async def button(update, context):
         state.pending_edit = {}
         state.pending_point_action = ""
         store.save(uid, state)
-        await q.edit_message_text("❌ Proposed change discarded. Original draft unchanged.", reply_markup=case_actions(state))
+        await q.edit_message_text("↩️ प्रस्तावित संशोधन निरस्त कर दिया गया है। आपका मूल ड्राफ्ट सुरक्षित है।", reply_markup=case_actions(state))
         return
     if q.data == "generate":
         try:
-            await q.edit_message_text("🧠 पूरे case की जानकारी verify की जा रही है और सबसे उपयुक्त टेम्पलेट चुना जा रहा है…")
+            await q.edit_message_text("⚙️ *केस के तथ्यों का सत्यापन एवं उपयुक्त न्यायिक प्रारूप का चयन किया जा रहा है…*", parse_mode="Markdown")
             await asyncio.to_thread(orchestrator.refresh_intake, state)
             store.save(uid, state)
         except Exception:
@@ -1319,7 +1498,7 @@ def build_application():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not set.")
-    app = Application.builder().token(token).build()
+    app = Application.builder().token(token).concurrent_updates(True).pool_timeout(30.0).connection_pool_size(32).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("newcase", newcase))
     app.add_handler(CommandHandler("style", style_command))

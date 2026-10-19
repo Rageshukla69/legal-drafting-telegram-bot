@@ -146,7 +146,7 @@ class AccessController:
             return {
                 "authorized": False,
                 "plan": "none",
-                "plan_label": "🔒 Not Authorized",
+                "plan_label": "🔒 Inactive / Unregistered",
                 "quota_limit": 0,
                 "used_documents": 0,
                 "remaining": 0,
@@ -155,16 +155,16 @@ class AccessController:
         qlim = int(rec.get("quota_limit", -1))
         used = int(rec.get("used_documents", 0))
         if plan == "owner" or self.is_owner(user_id):
-            label = "👑 Owner / Sudo (Unlimited)"
+            label = "👑 Chamber Admin / Sudo (Unlimited)"
             rem: int | str = "Unlimited"
         elif plan == "trial":
-            label = "🎁 Trial Plan"
+            label = "🎁 Complimentary Trial Pass"
             rem = max(0, qlim - used) if qlim > 0 else "Unlimited"
         elif plan == "paid":
-            label = "💎 Paid Plan"
+            label = "💎 Vakil AI Pro Member"
             rem = max(0, qlim - used) if qlim > 0 else "Unlimited"
         else:
-            label = "✅ Full Access (Unlimited)"
+            label = "💎 Enterprise Unlimited Pass"
             rem = max(0, qlim - used) if qlim > 0 else "Unlimited"
 
         return {
@@ -185,9 +185,11 @@ class AccessController:
         if not status["authorized"]:
             return (
                 False,
-                f"🔒 *Private Legal Drafting Bot*\n\nआप इस bot का उपयोग करने के लिए authorized नहीं हैं।\n"
-                f"Trial (5 Drafts) या Paid Plan लेने के लिए एडमिन से संपर्क करें।\n"
-                f"🆔 आपका Telegram User ID: `{uid}`",
+                "🏛️ *VAKIL DRAFTING AI — ACCESS RESTRICTED*\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                "🔒 आप इस bot का उपयोग करने के लिए अभी authorized नहीं हैं।\n\n"
+                "🎁 *Trial Pass (5 Drafts)* या *💎 Vakil AI Pro Membership* सक्रिय कराने के लिए एडमिन को अपनी Client ID भेजें:\n"
+                f"🆔 *Client ID:* `{uid}`",
             )
         qlim = int(status["quota_limit"])
         used = int(status["used_documents"])
@@ -196,17 +198,21 @@ class AccessController:
             if plan == "trial":
                 return (
                     False,
+                    f"🏛️ *VAKIL DRAFTING AI — QUOTA NOTICE*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"⚠️ *Free Trial Limit Reached ({used}/{qlim} Documents)*\n\n"
-                    f"आपकी 🎁 *Free Trial ({qlim} ड्राफ्ट)* की लिमिट पूरी हो चुकी है।\n"
-                    f"आगे दावा (Dava), जवाब दावा और अन्य कानूनी ड्राफ्ट बनाने के लिए कृपया *💎 Paid Plan* सक्रिय कराएं।\n\n"
-                    f"🆔 आपका Telegram User ID: `{uid}`",
+                    f"आपकी 🎁 *Complimentary Trial Pass ({qlim} ड्राफ्ट)* की सीमा पूर्ण हो चुकी है।\n"
+                    f"आगे वाद-पत्र (Dava), जवाब दावा एवं अन्य विधिक ड्राफ्ट तैयार करने के लिए कृपया *💎 Vakil AI Pro Plan* सक्रिय कराएं।\n\n"
+                    f"🆔 *Client ID:* `{uid}`",
                 )
             return (
                 False,
+                f"🏛️ *VAKIL DRAFTING AI — QUOTA NOTICE*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"⚠️ *Paid Plan Quota Exhausted ({used}/{qlim} Documents)*\n\n"
-                f"आपके 💎 *Paid Plan ({qlim} ड्राफ्ट)* की लिमिट पूरी हो चुकी है।\n"
-                f"कृपया अपना प्लान रिन्यू/रिचार्ज कराने के लिए एडमिन से संपर्क करें।\n\n"
-                f"🆔 आपका Telegram User ID: `{uid}`",
+                f"आपके 💎 *Vakil AI Pro Plan ({qlim} ड्राफ्ट)* की वर्तमान सीमा पूर्ण हो चुकी है।\n"
+                f"कृपया अपना प्लान रिन्यू या अपग्रेड कराने के लिए एडमिन से संपर्क करें।\n\n"
+                f"🆔 *Client ID:* `{uid}`",
             )
         return True, ""
 
