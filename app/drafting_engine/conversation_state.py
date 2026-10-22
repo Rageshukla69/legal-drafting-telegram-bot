@@ -18,6 +18,7 @@ class CaseState:
     document_type: str = "dava_plaint"
     style_mode: str = "template_mode"
     style_selected: bool = False
+    type_selected: bool = False
     selected_template_name: str = ""
     pending_point_action: str = ""
     facts: dict[str, Any] = field(default_factory=dict)
@@ -142,6 +143,7 @@ class CaseState:
         """Keep shared case facts and selected style mode, but start a fresh document of the requested type."""
         self.archive_active_document()
         self.document_type = document_type
+        self.type_selected = True
         self.selected_template_name = ""
         self.draft = {}
         self.draft_versions = []
@@ -190,7 +192,7 @@ REQUIRED_BY_TYPE = {
     "written_statement": [("court_name", "न्यायालय का नाम"), ("plaintiffs", "वादी का नाम"), ("defendants", "प्रतिवादी का नाम व पता"), ("facts", "जवाब दावा / प्रतिरक्षा के मुख्य तथ्य")],
     "application": [("court_name", "न्यायालय का नाम"), ("parties", "पक्षकारों का विवरण"), ("facts", "प्रार्थना पत्र के मुख्य तथ्य"), ("reliefs", "मांगी गई अंतरिम राहत")],
     "evidence_pw_affidavit": [("court_name", "न्यायालय का नाम"), ("deponent", "शपथकर्ता / साक्षी का विवरण"), ("facts", "साक्ष्य के मुख्य बिंदु")],
-    "affidavit": [("deponent", "शपथकर्ता का नाम व पता"), ("facts", "शपथपत्र के कथन"), ("purpose", "शपथपत्र का उद्देश्य")],
+    "affidavit": [("deponent", "शपथकर्ता / शपथग्रहीता का नाम व पता"), ("facts", "शपथपत्र के कथन / विवरण"), ("purpose", "शपथपत्र का उद्देश्य")],
     "legal_notice": [("sender", "नोटिस प्रेषक का नाम व पता"), ("recipient", "नोटिस प्राप्तकर्ता का नाम व पता"), ("facts", "विवाद / लेन-देन का विवरण"), ("demands", "विधिक मांग एवं समयावधि")],
     "other_civil": [("parties", "पक्षकारों का विवरण"), ("facts", "मुख्य तथ्य"), ("purpose", "दस्तावेज़ का उद्देश्य")],
 }

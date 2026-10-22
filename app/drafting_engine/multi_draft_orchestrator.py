@@ -14,7 +14,7 @@ TYPE_META = {
     "dava_plaint": ("dava", "dava_specialist.txt", "Dava / वाद पत्र"),
     "written_statement": ("written_statement", "written_statement_specialist.txt", "Written Statement / जवाब दावा"),
     "application": ("application", "application_specialist.txt", "Application / प्रार्थना पत्र"),
-    "evidence_pw_affidavit": ("evidence_pw_affidavit", "evidence_specialist.txt", "Evidence / PW Affidavit"),
+    "evidence_pw_affidavit": ("evidence_pw_affidavit", "evidence_specialist.txt", "Evidence / साक्ष्य शपथपत्र"),
     "affidavit": ("affidavit", "affidavit_specialist.txt", "Affidavit / शपथपत्र"),
     "legal_notice": ("legal_notice", "legal_notice_specialist.txt", "Legal Notice / विधिक नोटिस"),
     "other_civil": ("other_civil", "other_civil_specialist.txt", "Other Civil Draft / अन्य सिविल ड्राफ्ट"),
@@ -26,10 +26,10 @@ SCHEMA = json.loads((ROOT / "draft_schema.json").read_text(encoding="utf-8"))
 SECTION_DIVIDER_HEADING = "अतिरिक्त कथन एवं विशेष वैधानिक आपत्तियाँ"
 
 BASE_RULES = [
-    "CASE_FACTS are the sole authority for case-specific names, dates, plot/Gata numbers, boundaries, and events. Never copy old party names or unrelated past transactions from retrieved templates.",
+    "CASE_FACTS are the sole authority for case-specific names, dates, plot/Gata numbers, roll/registration numbers, boundaries, and events. Never copy old party names or unrelated past transactions from retrieved templates.",
     "CAUSE-TITLE PARTY FORMATTING (`parties`): Never write 'वादी:', 'वादीगण:', 'प्रतिवादी:', or 'प्रतिवादीगण:' at the start of any party line (the renderer places `.................... वादी` and `.................... प्रतिवादीगण` on the right automatically). Never merge multiple plaintiffs or multiple defendants into a single string—put each person as a separate item in `parties` so they are numbered individually (`1 (एक). ...`, `2 (दो). ...`).",
     "MANDATORY BILINGUAL NUMBER FORMAT: Every factual numerical value (Gata/Khasra/Bhoomi number, area in hectare/biswa/bigha/decimal, age, date, time, money amount, fraction, and Vaad Patra paragraph number) MUST be written in digits followed by its Hindi words in parentheses, e.g., 'वादपत्र की धारा 1 (एक)', 'गाटा संख्या 412 (चार सौ बारह)', 'रकबा 0.250 (शून्य दशमलव दो पाँच शून्य) हेक्टेयर', '2 (दो) बिस्वा', 'उम्र लगभग 52 (बावन) वर्ष', 'दिनांक 12 अक्टूबर 2026 (बारह अक्टूबर दो हजार छब्बीस)', 'प्रातः 10:00 (दस) बजे'. Never write bare number words like 'दो बिस्वा' without the digit '2 (दो) बिस्वा'.",
-    "NEVER write thin, 1-sentence summaries. Every pleading paragraph must be written in rich, authoritative, multi-sentence court Hindi ('यह कि ...') matching the depth and professional articulation of the selected Master Template or Advocate B.D. Shukla's original court drafts.",
+    "NEVER write thin, 1-sentence summaries. Every pleading or affidavit paragraph must be written in rich, authoritative, multi-sentence formal Hindi ('यह कि ...').",
     "FOR WRITTEN STATEMENT (जवाब दावा) TWO-PART STRUCTURE: (1) In Part 1 (para-wise replies to the Vaad Patra), reply strictly 1-to-1 to the numbered paragraphs of the Vaad Patra ('यह कि वादपत्र की धारा 1 (एक) का कथन...', 'यह कि वादपत्र की धारा 2 (दो) का कथन...', etc.) on purely factual grounds—NEVER cite legal Acts or statutory Sections inside the Part 1 para-wise replies, and NEVER put a 'भाग प्रथम' heading before Paragraph 1. (2) Immediately after the para-wise replies, insert the exact section heading item 'अतिरिक्त कथन एवं विशेष वैधानिक आपत्तियाँ', followed by continuously numbered paragraphs setting out the defendants' true factual defense (अतिरिक्त कथन) AND all special statutory objections (विशेष वैधानिक आपत्तियाँ: धारा 34, 38, 39 एवं धारा 41(एच),(आई),(जे) विशिष्ट अनुतोष अधिनियम, 1963; आदेश 7 नियम 3, नियम 11(क) व (घ) एवं नियम 14 सिविल प्रक्रिया संहिता; धारा 24, 134, 144 सपठित धारा 206 उ०प्र० राजस्व संहिता, 2006 एवं धारा 9 सिविल प्रक्रिया संहिता; आदेश 1 नियम 9 व 10 सिविल प्रक्रिया संहिता; धारा 115 साक्ष्य अधिनियम एवं धारा 3 परिसीमा अधिनियम; तथा धारा 35-ए सिविल प्रक्रिया संहिता विशेष हर्जाना).",
     "Preserve event status exactly: attempt is not completion; threat is not dispossession; allegation is not an established fact.",
     "If CASE_FACTS contains custom_add_points, include every requested point as a proper paragraph/clause.",
@@ -40,10 +40,10 @@ BASE_RULES = [
 
 _PARTY_STOPWORDS = {
     "वादी", "वादीगण", "वादिनी", "प्रतिवादी", "प्रतिवादीगण", "प्रतिवादिनी", "विपक्षी", "विपक्षीगण",
-    "प्रार्थी", "प्रार्थीगण", "उम्र", "करीब", "वर्ष", "पुत्र", "पुत्री", "पत्नी", "पति", "विधवा",
-    "स्व", "स्व०", "स्वर्गीय", "श्री", "श्रीमती", "सुश्री", "कुमारी", "निवासी", "निवासीगण",
-    "मूल", "वर्तमान", "पता", "ग्राम", "मौजा", "मौज़ा", "डाकखाना", "पोस्ट", "परगना", "तहसील",
-    "जिला", "थाना", "वार्ड", "संख्या", "मकान", "नंबर", "बनाम",
+    "प्रार्थी", "प्रार्थीगण", "शपथकर्ता", "शपथग्रहीता", "उम्र", "आयु", "करीब", "लगभग", "वर्ष",
+    "पुत्र", "पुत्री", "पत्नी", "पति", "विधवा", "स्व", "स्व०", "स्वर्गीय", "श्री", "श्रीमती",
+    "सुश्री", "कुमारी", "निवासी", "निवासीगण", "मूल", "वर्तमान", "पता", "ग्राम", "मौजा", "मौज़ा",
+    "डाकखाना", "पोस्ट", "परगना", "तहसील", "जिला", "थाना", "वार्ड", "संख्या", "मकान", "नंबर", "बनाम",
     "plaintiff", "plaintiffs", "defendant", "defendants", "respondent", "applicant",
     "petitioner", "deponent", "sender", "recipient", "age", "about", "approx", "years",
     "son", "daughter", "wife", "husband", "widow", "late", "shri", "smt", "resident",
@@ -52,14 +52,14 @@ _PARTY_STOPWORDS = {
 
 _LEADING_ROLE_PREFIX_RE = re.compile(
     r"^\s*(?:(?:\d+(?:\s*\([^)]+\))?\s*[.)\-:]\s*)?"
-    r"(?:प्रतिवादीगण|प्रतिवादिनीगण|प्रतिवादिनी|प्रतिवादी|विपक्षीगण|विपक्षी|वादीगण|वादिनी|वादी|प्रार्थीगण|प्रार्थिनी|प्रार्थी|उत्तरदातागण|उत्तरदाता)"
+    r"(?:प्रतिवादीगण|प्रतिवादिनीगण|प्रतिवादिनी|प्रतिवादी|विपक्षीगण|विपक्षी|वादीगण|वादिनी|वादी|प्रार्थीगण|प्रार्थिनी|प्रार्थी|उत्तरदातागण|उत्तरदाता|शपथग्रहीता|शपथकर्ता)"
     r"(?:\s*(?:संख्या|सं०|सं\.|नं०|नं\.)\s*\d+(?:\s*\([^)]+\))?(?:\s*(?:व|एवं|तथा)\s*\d+(?:\s*\([^)]+\))?)?)?"
     r"\s*[:\-–—]+\s*)+"
 )
 
 _TRAILING_ROLE_SUFFIX_RE = re.compile(
     r"\s*(?:[,;|\-–—.]+\s*)?"
-    r"(?:प्रतिवादीगण|प्रतिवादिनीगण|प्रतिवादिनी|प्रतिवादी|विपक्षीगण|विपक्षी|वादीगण|वादिनी|वादी|प्रार्थीगण|प्रार्थिनी|प्रार्थी|उत्तरदातागण|उत्तरदाता)"
+    r"(?:प्रतिवादीगण|प्रतिवादिनीगण|प्रतिवादिनी|प्रतिवादी|विपक्षीगण|विपक्षी|वादीगण|वादिनी|वादी|प्रार्थीगण|प्रार्थिनी|प्रार्थी|उत्तरदातागण|उत्तरदाता|शपथग्रहीता|शपथकर्ता)"
     r"(?:\s*(?:संख्या|सं०|सं\.|नं०|नं\.)\s*\d+(?:\s*\([^)]+\))?(?:\s*(?:व|एवं|तथा)\s*\d+(?:\s*\([^)]+\))?)?)?"
     r"[।.]?\s*$"
 )
@@ -169,14 +169,35 @@ def _format_cause_title_parties(parties: list[str], facts: dict[str, Any] | None
 
 def _clean_short_name(raw: str) -> str:
     s = _strip_party_role_affixes(str(raw or ""))
-    m = re.split(r"\s+(?:पुत्र|पत्नी|पुत्री|विधवा|उम्र|निवासी)\b|,", s, maxsplit=1)
+    s = re.sub(r"^\s*मैं\s*,?\s*(?:शपथग्रहीता|शपथकर्ता)?\s*", "", s).strip()
+    m = re.split(r"\s+(?:पुत्र|पत्नी|पुत्री|विधवा|उम्र|आयु|निवासी)\b|,", s, maxsplit=1)
     if m and m[0].strip():
-        return re.sub(r"^\s*\d+(?:\s*\([^)]+\))?\s*[.)\-:]\s*", "", m[0].strip())
-    return s.strip()
+        return re.sub(r"^\s*\d+(?:\s*\([^)]+\))?\s*[.)\-:]\s*", "", m[0].strip(" ()"))
+    return s.strip(" ()")
 
 
 def _extract_party_names_for_doc(facts: dict[str, Any], document_type: str = "dava_plaint") -> tuple[str, str]:
     """Return (short_party_names_str, role_label_str) appropriate for the document_type."""
+    if document_type in {"affidavit", "evidence_pw_affidavit"}:
+        dep = facts.get("deponent")
+        if isinstance(dep, list) and dep:
+            dep = dep[0]
+        if isinstance(dep, str) and dep.strip():
+            short = _clean_short_name(dep)
+            if short:
+                return short, "उपरोक्त शपथग्रहीता / शपथकर्ता"
+        for key in ("plaintiffs", "parties", "sender"):
+            val = facts.get(key)
+            if isinstance(val, list) and val:
+                short = _clean_short_name(str(val[0]))
+                if short:
+                    return short, "उपरोक्त शपथग्रहीता / शपथकर्ता"
+            elif isinstance(val, str) and val.strip():
+                short = _clean_short_name(val)
+                if short:
+                    return short, "उपरोक्त शपथग्रहीता / शपथकर्ता"
+        return "शपथग्रहीता", "उपरोक्त शपथग्रहीता / शपथकर्ता"
+
     if document_type == "written_statement":
         defs = facts.get("defendants") or []
         if isinstance(defs, str):
@@ -272,7 +293,6 @@ def _structure_written_statement_two_parts(pleadings: list[str], facts: dict[str
 
         p_no_num = re.sub(r"^\s*\d+\s*(?:\([^)]*\))?\s*[:.\-–—]+\s*", "", p).strip()
 
-        # Drop Part 1 top heading ("भाग प्रथम — वादपत्र की धारावार उत्तर") so Para 1 is never wasted
         if _TOP_HEADING_DROP_RE.match(p_no_num):
             continue
         if not p_no_num.startswith("यह कि") and len(p_no_num.split()) <= 10 and any(
@@ -280,7 +300,6 @@ def _structure_written_statement_two_parts(pleadings: list[str], facts: dict[str
         ):
             continue
 
-        # Detect Part 2 divider heading ("अतिरिक्त कथन एवं विशेष वैधानिक आपत्तियाँ")
         if _PART2_HEADING_MATCH_RE.match(p_no_num):
             in_part2 = True
             continue
@@ -293,7 +312,6 @@ def _structure_written_statement_two_parts(pleadings: list[str], facts: dict[str
         has_statute = any(m in p_body for m in _STATUTORY_CITATION_MARKERS)
 
         if not in_part2 and (is_plaint_para_reply or not has_statute):
-            # In Part 1 (para-wise replies), strip any statutory Act citations so Part 1 remains 100% factual Vaad Patra reply
             sentences = [s.strip() for s in re.split(r"(?<=।)\s*", p_body) if s.strip()]
             kept: list[str] = []
             for sent in sentences:
@@ -326,7 +344,6 @@ def _structure_written_statement_two_parts(pleadings: list[str], facts: dict[str
                 clean_p2 += "।"
             part2_objections.append(clean_p2)
 
-    # Ensure Part 2 (अतिरिक्त कथन एवं विशेष वैधानिक आपत्तियाँ) has the complete factual + statutory objections
     joined_p2 = "\n".join(part2_objections)
     joined_all = "\n".join(part1_replies + part2_objections)
     all_facts_text = json.dumps(facts, ensure_ascii=False)
@@ -335,7 +352,6 @@ def _structure_written_statement_two_parts(pleadings: list[str], facts: dict[str
         for k in ("गाटा", "खसरा", "भूमिधर", "खतौनी", "कृषि", "बिस्वा", "हेक्टेयर", "चकमार्ग", "मेड़")
     )
 
-    # 1. Factual Additional Statement (अतिरिक्त कथन — वास्तविक तथ्य)
     if not any("वास्तविक तथ्य" in x or "पेशबंदी" in x for x in part2_objections):
         part2_objections.insert(
             0,
@@ -344,7 +360,6 @@ def _structure_written_statement_two_parts(pleadings: list[str], facts: dict[str
         )
         joined_p2 = "\n".join(part2_objections)
 
-    # 2. Specific Relief Act Sections 34, 38, 39 & 41(h), 41(i), 41(j)
     if "धारा 41" not in joined_p2 and "41(" not in joined_p2:
         part2_objections.append(
             "यह कि विशेष वैधानिक आपत्ति (अंतर्गत धारा 34, 38, 39 एवं धारा 41(एच), 41(आई) व 41(जे) विशिष्ट अनुतोष अधिनियम, 1963) : "
@@ -353,7 +368,6 @@ def _structure_written_statement_two_parts(pleadings: list[str], facts: dict[str
             "वादी को सक्षम न्यायालय/अधिकारी के समक्ष समान रूप से प्रभावकारी वैकल्पिक उपचार (धारा 41(एच)) उपलब्ध है, वादी स्वच्छ व निर्मल हाथों से माननीय न्यायालय के समक्ष उपस्थित नहीं हुआ है (धारा 41(आई)), तथा कथित विवादित अंश पर वादी का कोई व्यक्तिगत विधिक अधिकार या स्थापित कब्जा नहीं है (धारा 41(जे))।"
         )
 
-    # 3. Order 7 Rule 3, Order 7 Rule 11(a) & (d), and Order 7 Rule 14 CPC
     if "आदेश 7 नियम 3" not in joined_p2 or "आदेश 7 नियम 11" not in joined_p2:
         part2_objections.append(
             "यह कि विशेष वैधानिक आपत्ति (अंतर्गत आदेश 7 नियम 3, आदेश 7 नियम 11(क) व (घ) एवं आदेश 7 नियम 14 सिविल प्रक्रिया संहिता, 1908) : "
@@ -361,7 +375,6 @@ def _structure_written_statement_two_parts(pleadings: list[str], facts: dict[str
             "साथ ही वादपत्र के कथनों से प्रतिवादीगण के विरुद्ध कोई वास्तविक व वैध वाद हेतुक प्रकट नहीं होता है और वाद विधि द्वारा स्पष्ट रूप से बाधित होने के कारण आदेश 7 नियम 11(क) एवं 11(घ) सिविल प्रक्रिया संहिता के अंतर्गत प्रारंभिक स्तर पर ही निरस्त किए जाने योग्य है।"
         )
 
-    # 4. U.P. Revenue Code, 2006 Sections 24, 134, 144 read with Section 206 & Section 9 CPC
     if is_agri_or_gata and "धारा 206" not in joined_p2:
         part2_objections.append(
             "यह कि क्षेत्राधिकार संबंधी विशेष वैधानिक आपत्ति (अंतर्गत धारा 24, 134 एवं 144 सपठित धारा 206 उत्तर प्रदेश राजस्व संहिता, 2006 एवं धारा 9 सिविल प्रक्रिया संहिता, 1908) : "
@@ -369,7 +382,6 @@ def _structure_written_statement_two_parts(pleadings: list[str], facts: dict[str
             "उत्तर प्रदेश राजस्व संहिता, 2006 की धारा 206 सपठित धारा 9 सिविल प्रक्रिया संहिता के अंतर्गत ऐसे राजस्व एवं सीमांकन विवादों के संबंध में दीवानी न्यायालय (सिविल कोर्ट) का क्षेत्राधिकार स्पष्ट रूप से वर्जित एवं बाधित है।"
         )
 
-    # 5. Non-Joinder / Mis-Joinder (Order 1 Rule 9 & 10 CPC), Evidence Act (Section 115), and Limitation Act (Section 3)
     if "आदेश 1 नियम 9" not in joined_p2 and "धारा 115" not in joined_p2:
         part2_objections.append(
             "यह कि विशेष वैधानिक आपत्ति (अंतर्गत आदेश 1 नियम 9 व 10 सिविल प्रक्रिया संहिता, धारा 115 भारतीय साक्ष्य अधिनियम तथा धारा 3 भारतीय परिसीमा अधिनियम, 1963) : "
@@ -377,7 +389,6 @@ def _structure_written_statement_two_parts(pleadings: list[str], facts: dict[str
             "इसके अतिरिक्त दावा वादी भारतीय साक्ष्य अधिनियम की धारा 115 के अंतर्गत विबंधन, परित्याग एवं मौन सहमति के सिद्धांत से तथा भारतीय परिसीमा अधिनियम, 1963 की धारा 3 के अंतर्गत कालबाधित होने के कारण भी निरस्त होने योग्य है।"
         )
 
-    # 6. Suit Valuation Act, 1887 & U.P. Court Fees Act, 1870 + Section 35-A CPC Special Costs
     if "35ए" not in joined_p2 and "35-ए" not in joined_p2 and "35अ" not in joined_p2:
         part2_objections.append(
             "यह कि विशेष वैधानिक आपत्ति (अंतर्गत वाद मूल्यांकन अधिनियम, 1887, धारा 7(iv-ख) उत्तर प्रदेश न्यायालय शुल्क अधिनियम, 1870 एवं धारा 35-ए सिविल प्रक्रिया संहिता, 1908) : "
@@ -389,6 +400,136 @@ def _structure_written_statement_two_parts(pleadings: list[str], facts: dict[str
     part1_count = len(part1_replies)
     total_numbered = len(part1_replies) + len(part2_objections)
     return structured, part1_count, total_numbered
+
+
+def _is_court_suit_affidavit(facts: dict[str, Any]) -> bool:
+    """Return True if an Affidavit belongs to an adversarial court case (Plaintiff vs Defendant),
+    or False if it is an administrative, university, scholarship, revenue, or general notary affidavit."""
+    if facts.get("case_number"):
+        return True
+    if facts.get("plaintiffs") and facts.get("defendants"):
+        return True
+    court = str(facts.get("court_name") or "").strip()
+    if any(k in court for k in ("सिविल जज", "जिला जज", "अपर जिला", "न्यायालय श्रीमान")) and (facts.get("plaintiffs") or facts.get("defendants")):
+        return True
+    return False
+
+
+def _normalize_affidavit_structure(out: dict[str, Any], facts: dict[str, Any], document_type: str = "affidavit") -> dict[str, Any]:
+    """Enforce canonical Indian Affidavit (शपथ-पत्र) structure while preserving GPT-6.0-Luna's domain-specific sworn statements."""
+    is_suit = _is_court_suit_affidavit(facts) or document_type == "evidence_pw_affidavit"
+    party_name, _ = _extract_party_names_for_doc(facts, document_type)
+    deponent_full = str(facts.get("deponent") or party_name or "शपथग्रहीता").strip()
+    deponent_full = re.sub(r"^\s*मैं\s*,?\s*(?:शपथग्रहीता|शपथकर्ता)?\s*", "", deponent_full).strip()
+
+    # 1. Authority / Forum Heading (`court_heading`)
+    ch_forum = str(out.get("court_heading") or facts.get("court_name") or "").strip()
+    if ch_forum:
+        if not is_suit and not ch_forum.startswith(("समक्ष", "न्यायालय")):
+            ch_forum = f"समक्ष : {ch_forum}"
+        out["court_heading"] = ch_forum
+    elif not is_suit:
+        out["court_heading"] = "समक्ष : संबंधित सक्षम प्राधिकारी / नोटरी पब्लिक महोदय"
+
+    # 2. Case Heading & Parties (`case_heading` & `parties`)
+    if not is_suit:
+        # Never put "मूल वाद संख्या ............ सन् 2026" or "वादी बनाम प्रतिवादी" on an Administrative/University/Notary Affidavit
+        raw_ch = str(out.get("case_heading") or "").strip()
+        if "मूल वाद" in raw_ch or "प्रकीर्ण वाद" in raw_ch or "बनाम" in raw_ch or "...." in raw_ch:
+            out["case_heading"] = ""
+        out["parties"] = []
+    else:
+        raw_ch = str(out.get("case_heading") or "").strip()
+        case_no = str(facts.get("case_number") or "............").strip()
+        case_yr = str(facts.get("case_year") or "2026").strip()
+        if not raw_ch or ("बनाम" in raw_ch and "वाद" not in raw_ch):
+            out["case_heading"] = f"मूल वाद संख्या {case_no} सन् {case_yr}"
+        if out.get("parties"):
+            out["parties"] = _format_cause_title_parties(out["parties"], facts)
+
+    # 3. Title (`title`)
+    title = str(out.get("title") or "").strip()
+    if not title or any(w in title for w in ("लिखित कथन", "जवाब दावा", "प्रतिवाद पत्र", "वाद पत्र बाबत")):
+        purpose_short = str(facts.get("purpose") or "").strip()
+        if document_type == "evidence_pw_affidavit":
+            out["title"] = "साक्ष्य शपथ-पत्र (बयान चीफ)"
+        elif purpose_short and len(purpose_short) <= 75 and "प्रस्तुत करने हेतु" not in purpose_short:
+            out["title"] = f"शपथ-पत्र ({purpose_short})"
+        else:
+            out["title"] = "शपथ-पत्र (AFFIDAVIT)"
+
+    # 4. Deponent Introduction (`opening_averment`)
+    opening = str(out.get("opening_averment") or "").strip()
+    if not opening or "प्रतिवादीगण की ओर से" in opening or "वादी निम्न प्रकार" in opening:
+        out["opening_averment"] = (
+            f"मैं शपथग्रहीता / शपथकर्ता {deponent_full}, सत्यनिष्ठा से शपथपूर्वक निम्नलिखित बयान करता/करती हूँ :-"
+        )
+
+    # 5. Sworn Statements (`pleadings`) — merge any stray `prayer` items into the final paragraph of `pleadings`
+    pleadings = [str(p).strip() for p in (out.get("pleadings") or []) if str(p).strip()]
+    cleaned_pleadings: list[str] = []
+    for p in pleadings:
+        p_no_num = re.sub(r"^\s*(?:प्रस्तर|धारा|पैरा)?\s*\d+\s*(?:\([^)]*\))?\s*[:.\-–—]+\s*", "", p).strip()
+        if not p_no_num:
+            continue
+        if not p_no_num.startswith("यह कि"):
+            p_no_num = f"यह कि {p_no_num}"
+        if not p_no_num.endswith(("।", ".", "!", "?")):
+            p_no_num += "।"
+        cleaned_pleadings.append(p_no_num)
+
+    prayer_items = [str(x).strip() for x in (out.get("prayer") or []) if str(x).strip()]
+    if prayer_items and document_type == "affidavit":
+        for pr in prayer_items:
+            pr_clean = re.sub(r"^\s*(?:\([क-ज्ञa-zA-Z0-9]+\)\s*)", "", pr).strip()
+            if pr_clean and not any(pr_clean[:30] in existing for existing in cleaned_pleadings):
+                if not pr_clean.startswith("यह कि"):
+                    pr_clean = f"यह कि शपथग्रहीता विनम्रतापूर्वक निवेदन करता है कि {pr_clean}"
+                if not pr_clean.endswith(("।", ".")):
+                    pr_clean += "।"
+                cleaned_pleadings.append(pr_clean)
+        out["prayer"] = []
+
+    out["pleadings"] = cleaned_pleadings
+
+    # 6. Verification (`verification`) — strictly in the name of `उपरोक्त शपथग्रहीता / शपथकर्ता`
+    total_p = max(1, len(cleaned_pleadings))
+    place_str = str(facts.get("place") or facts.get("court_complex") or "............").strip()
+    date_str = str(facts.get("date") or "............").strip()
+    ver = str(out.get("verification") or "").strip()
+    if ver:
+        ver_lines = [
+            ln.strip() for ln in ver.splitlines()
+            if ln.strip() and not re.match(r"^[\s\-–—:*_]*सत्यापन(?:\s*\(Verification\))?[\s\-–—:*_]*$", ln.strip(), flags=re.I)
+        ]
+        ver = "\n".join(ver_lines).strip()
+
+    needs_aff_ver = (
+        not ver
+        or "वादी" in ver
+        or "प्रतिवादी" in ver
+        or "वाद पत्र" in ver
+        or "वादपत्र" in ver
+        or (total_p > 1 and str(total_p) not in ver)
+    )
+    if needs_aff_ver:
+        ver = (
+            f"मैं, {party_name} (उपरोक्त शपथग्रहीता / शपथकर्ता), सत्यनिष्ठा से सत्यापित करता/करती हूँ कि इस शपथ-पत्र के प्रस्तर/धारा 1 से {total_p} तक में "
+            f"दी गई समस्त जानकारी मेरे निजी ज्ञान एवं उपलब्ध अभिलेखों के अनुसार पूर्णतः सत्य व सही है। इसमें कोई भी तथ्य छिपाया नहीं गया है और न ही कोई तथ्य असत्य है। ईश्वर मेरी मदद करे।"
+        )
+    out["verification"] = ver
+
+    # 7. Deponent Signature Block (`signature_block`)
+    explicit_adv = str(facts.get("advocate_name") or os.getenv("DEFAULT_ADVOCATE_NAME", "")).strip()
+    sig_lines = [
+        f"स्थान : {place_str}",
+        f"दिनांक : {date_str}",
+        f"हस्ताक्षर शपथग्रहीता / शपथकर्ता ({party_name})",
+    ]
+    if explicit_adv:
+        sig_lines.append(f"पहचानकर्ता / अधिवक्ता — {explicit_adv}")
+    out["signature_block"] = sig_lines
+    return out
 
 
 def _normalize_draft_structure(
@@ -425,6 +566,11 @@ def _normalize_draft_structure(
             out[str_key] = _flatten_str_item(val)
         else:
             out[str_key] = str(val or "").strip()
+
+    # Dedicated structural normalizer for all Affidavits (Judicial, University/Scholarship, Administrative, or Notary)
+    if document_type in {"affidavit", "evidence_pw_affidavit"}:
+        out = _normalize_affidavit_structure(out, facts, document_type=document_type)
+        return format_draft_numbers(out)
 
     if not out.get("court_heading") and facts.get("court_name"):
         out["court_heading"] = str(facts["court_name"]).strip()
@@ -503,7 +649,7 @@ def _normalize_draft_structure(
     # Clean Verification: remove duplicate leading "सत्यापन" heading line and ensure correct party role & paragraph ranges
     ver = str(out.get("verification") or "").strip()
     party_name, role_label = _extract_party_names_for_doc(facts, document_type)
-    place_str = str(facts.get("court_complex") or facts.get("place") or "बमुकाम कचहरी बिधूना, औरैया").strip()
+    place_str = str(facts.get("court_complex") or facts.get("place") or "बमुकाम कचहरी").strip()
     total_p = ws_total_numbered if document_type == "written_statement" else len(out.get("pleadings") or [])
 
     if ver:
@@ -615,11 +761,18 @@ class MultiDraftOrchestrator:
     def collect(self, state: CaseState, new_facts: dict[str, Any]):
         state.merge_facts(new_facts)
         if state.document_type in {"affidavit", "evidence_pw_affidavit"} and not state.facts.get("deponent"):
-            plaintiffs = state.facts.get("plaintiffs", [])
-            if isinstance(plaintiffs, list) and len(plaintiffs) == 1:
-                state.facts["deponent"] = plaintiffs[0]
-        if state.document_type == "affidavit" and not state.facts.get("purpose"):
-            state.facts["purpose"] = "प्रस्तुत वाद/विवाद के संबंध में शपथपूर्वक कथन प्रस्तुत करने हेतु"
+            for fallback_key in ("plaintiffs", "parties", "sender"):
+                vals = state.facts.get(fallback_key, [])
+                if isinstance(vals, list) and vals:
+                    state.facts["deponent"] = vals[0]
+                    break
+                elif isinstance(vals, str) and vals.strip():
+                    state.facts["deponent"] = vals.strip()
+                    break
+            if not state.facts.get("deponent") and state.facts.get("facts"):
+                state.facts["deponent"] = "शपथग्रहीता / शपथकर्ता"
+        if state.document_type == "affidavit" and not state.facts.get("purpose") and state.facts.get("facts"):
+            state.facts["purpose"] = "प्रस्तुत प्रकरण / विषय के संबंध में शपथपूर्वक कथन प्रस्तुत करने हेतु"
         missing = missing_fields(state.facts, state.document_type)
         if missing:
             state.status = "collecting"
@@ -673,7 +826,24 @@ class MultiDraftOrchestrator:
                 prior_plaint_paragraphs = [f"वादपत्र की धारा {i}: {p}" for i, p in enumerate(raw_pl, 1)]
                 break
 
-        if style_mode == "template_mode":
+        if state.document_type == "affidavit":
+            is_suit_aff = _is_court_suit_affidavit(state.facts)
+            context_to_send = context if is_suit_aff else (
+                "UNIVERSAL AFFIDAVIT MODE (GPT-6.0-LUNA CONTENT + BOT CANONICAL STRUCTURE):\n"
+                "Draft the substantive Hindi affidavit clauses directly from CASE_FACTS for this exact purpose/authority "
+                "(e.g., University/Scholarship/Administrative/Departmental/Notary/Court Affidavit). Do NOT copy unrelated land/property disputes."
+            )
+            mode_rules = [
+                "UNIVERSAL AFFIDAVIT ENGINE: Let GPT-6.0-Luna craft the exact Hindi sworn statements (`pleadings`) for ANY type of affidavit (University, Scholarship, OTR unblock, Samaj Kalyan Vibhag, Tehsil, SDM, Bank, Name/DOB correction, Gap Year, or Civil Court Affidavit) while strictly adhering to the bot's canonical Affidavit structure.",
+                "In `court_heading`, place the exact Authority or Court (`समक्ष : ...` or `न्यायालय श्रीमान ...`).",
+                "If this is an Administrative / University / Scholarship / Notary Affidavit (not a lawsuit between वादी and प्रतिवादी), leave `case_heading` as '' and `parties` as [].",
+                "In `opening_averment`, write the formal deponent oath introduction ('मैं शपथग्रहीता / शपथकर्ता ... सत्यनिष्ठा से शपथपूर्वक निम्नलिखित बयान करता हूँ :-').",
+                "In `pleadings`, write each sworn statement starting with 'यह कि ...' without numbering them yourself, preserving every specific detail (Roll No., Registration No., OTR No., Course, Session, Dates, Amounts).",
+                "Leave `prayer` as [] (put any final undertaking or humble request to the authority in the final paragraph of `pleadings`).",
+                "Write `verification` in the name of `उपरोक्त शपथग्रहीता / शपथकर्ता` and `signature_block` with `हस्ताक्षर शपथग्रहीता / शपथकर्ता`.",
+            ]
+        elif style_mode == "template_mode":
+            context_to_send = context
             mode_rules = [
                 f"DRAFTING STYLE MODE: PURCHASED 500+ LEGAL TEMPLATES MODE (Selected Master Template: {selected_tpl}).",
                 "Use [MASTER TEMPLATE 1] from CORPUS_REFERENCE as the direct Master Template for this draft.",
@@ -682,12 +852,14 @@ class MultiDraftOrchestrator:
                 "For Written Statement, reply 1-to-1 to each paragraph (वादपत्र की धारा 1, धारा 2, ...) of the Vaad Patra without statutory citations in Part 1, then include 'अतिरिक्त कथन एवं विशेष वैधानिक आपत्तियाँ' followed by the additional factual pleas and special statutory objections.",
             ]
         elif style_mode == "dad_style":
+            context_to_send = context
             mode_rules = [
                 f"DRAFTING STYLE MODE: DAD'S 306 ORIGINAL FILES MODE (Selected Reference: {selected_tpl}).",
                 "Replicate Advocate B.D. Shukla's complete court structure, rich multi-sentence elaboration, and exact vocabulary ('यह कि वादपत्र की धारा 1 (एक) का लेख जिस तरह से लेखबद्ध है स्वीकार नहीं है और इंकार है', 'मालिक काबिज दखील संक्रमणीय भूमिधर', 'नजरी नक्शा', 'चौहद्दी', 'कहा-कहलवाया व समझाया किन्तु प्रतिवादीगण इंकारी हैं', 'अतिरिक्त कथन एवं विशेष वैधानिक आपत्तियाँ') from [DAD ORIGINAL DRAFT 1] and CLEAN_STYLE_ANCHOR.",
                 "Replace all historical case details with the current case details from CASE_FACTS.",
             ]
         else:
+            context_to_send = context
             mode_rules = [
                 f"DRAFTING STYLE MODE: HYBRID MIX (Template Structure + Dad's Language: {selected_tpl}).",
                 "Combine the complete structural clauses and comprehensive prayer of SECTION 1 with Advocate B.D. Shukla's authentic court vocabulary and transition style ('यह कि ...') from SECTION 2.",
@@ -698,22 +870,22 @@ class MultiDraftOrchestrator:
             "SELECTED_STYLE_MODE": STYLE_NAMES.get(style_mode, style_mode),
             "SELECTED_TEMPLATE_FILE": selected_tpl,
             "CASE_FACTS": state.facts,
-            "CORPUS_REFERENCE": context,
-            "CLEAN_STYLE_ANCHOR": style_anchor if style_mode != "template_mode" else "",
+            "CORPUS_REFERENCE": context_to_send,
+            "CLEAN_STYLE_ANCHOR": style_anchor if (style_mode != "template_mode" and state.document_type != "affidavit") else "",
             "SYSTEM_RULES": BASE_RULES + mode_rules + [
                 "Never output legacy-font artifacts or mixed Latin characters inside Hindi words.",
                 "Use standard Unicode Devanagari Hindi in every Hindi sentence.",
             ],
             "OUTPUT_REQUIREMENTS": {
-                "court_heading": "Court heading (e.g. न्यायालय श्रीमान सिविल जज (प्रवर खंड), औरैया).",
-                "case_heading": "Formal suit/case number line ONLY (e.g. 'मूल वाद संख्या ............ सन् 2026 (दो हजार छब्बीस)'). Never put party names here.",
-                "parties": "Each individual plaintiff and each individual defendant as a SEPARATE string item without 'वादी:' or 'प्रतिवादी:' prefixes.",
-                "title": "Formal underlined document title.",
-                "opening_averment": "Formal opening address (e.g. 'श्रीमान जी,\\nवादी निम्न प्रकार सविनय निवेदन करता है :-' or for Written Statement: 'श्रीमान जी,\\nप्रतिवादीगण की ओर से वादपत्र का लिखित कथन / जवाब दावा निम्न प्रकार सविनय प्रस्तुत है :-').",
-                "pleadings": "For Written Statement: Part 1 has pure 1-to-1 factual replies to 'वादपत्र की धारा 1 (एक)' through 'वादपत्र की धारा N' (no statutory Act citations in Part 1), followed by the section heading item 'अतिरिक्त कथन एवं विशेष वैधानिक आपत्तियाँ', followed by Part 2 paragraphs containing the defendants' factual defense and all statutory objections (धारा 34, 38, 39, 41 विशिष्ट अनुतोष अधिनियम, आदेश 7 नियम 3, 11, 14 सी०पी०सी०, धारा 24, 134, 144 सपठित धारा 206 उ०प्र० राजस्व संहिता एवं धारा 9 सी०पी०सी०, आदेश 1 नियम 9 व 10 सी०पी०सी०, धारा 115 साक्ष्य अधिनियम, धारा 3 परिसीमा अधिनियम, तथा धारा 35-ए सी०पी०सी० विशेष हर्जाना); no numbering.",
-                "prayer": "Comprehensive, multi-clause reliefs ((क), (ख), (ग), (घ)); do not repeat 'अतः प्रार्थना है कि' inside individual items.",
-                "verification": "Formal paragraph-split verification body text WITHOUT the heading word 'सत्यापन' (in the name of Defendants for Written Statement, or Plaintiff for Plaint).",
-                "signature_block": "Formal place, date, party signature line(s), and advocate signature block.",
+                "court_heading": "Court or Authority heading (e.g. 'न्यायालय श्रीमान सिविल जज (प्रवर खंड), औरैया' or 'समक्ष : कुलसचिव महोदय, ... / सक्षम प्राधिकारी, ...').",
+                "case_heading": "Formal suit/case number line ONLY for court cases (leave empty '' for non-court/administrative/scholarship affidavits). Never put party names here.",
+                "parties": "Each individual plaintiff and each individual defendant as a SEPARATE string item for court cases (leave empty [] for non-court/administrative affidavits).",
+                "title": "Formal underlined document title (e.g. 'शपथ-पत्र (AFFIDAVIT)' for affidavits).",
+                "opening_averment": "Formal opening address or Deponent oath introduction ('मैं शपथग्रहीता / शपथकर्ता ... सत्यनिष्ठा से शपथपूर्वक निम्नलिखित बयान करता हूँ :-').",
+                "pleadings": "Numbered body paragraphs ('यह कि ...') without leading numbers.",
+                "prayer": "Comprehensive multi-clause reliefs for Plaint/WS/Application; leave empty [] for Affidavit.",
+                "verification": "Formal verification body text WITHOUT the heading word 'सत्यापन' (in the name of Deponent for Affidavit, Defendants for Written Statement, or Plaintiff for Plaint).",
+                "signature_block": "Formal place, date, party/deponent signature line(s), and advocate/identification block.",
                 "layout": "Optional page-layout metadata.",
             },
         }
@@ -722,7 +894,7 @@ class MultiDraftOrchestrator:
 
         system = (
             style
-            + "\n\nYou are the FINAL DRAFTING ENGINE for Indian Civil Court drafting.\n"
+            + "\n\nYou are the FINAL DRAFTING ENGINE for Indian Legal & Judicial Drafting.\n"
             + "\n".join(f"- {x}" for x in (BASE_RULES + mode_rules))
         )
         errors = []

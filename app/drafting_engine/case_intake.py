@@ -23,7 +23,7 @@ TYPE_GUIDANCE = {
     "written_statement": "Written statement/लिखित कथन: plaintiff/defendant, defendant-side narrative, admissions, denials, objections, alternative pleas, documents and counter-relief.",
     "application": "Application/प्रार्थना पत्र: forum, applicant/opposite parties, background, purpose and every requested prayer/interim relief.",
     "evidence_pw_affidavit": "Evidence/PW affidavit: court, witness/deponent, relationship, testimony facts, dates, places and exhibits/documents.",
-    "affidavit": "Affidavit/शपथपत्र: deponent, purpose, sworn factual statements, dates/place and verification.",
+    "affidavit": "Affidavit/शपथपत्र (any judicial, administrative, university, scholarship, revenue, or notary affidavit): authority/forum (समक्ष/न्यायालय), deponent (शपथकर्ता/शपथग्रहीता full details), purpose/subject, all sworn factual statements (प्रस्तर/धारा 1..N), place, date, advocate/registration details, and verification.",
     "legal_notice": "Legal notice/विधिक नोटिस: sender, recipient, chronology, breach/default, demand, deadline and documents.",
     "other_civil": "Other civil document: identify the natural parties, forum, factual narrative, purpose and requested outcome without forcing an unsuitable category.",
 }
@@ -38,18 +38,19 @@ CRITICAL RULES
 1. NEVER require headings or labels. A fact is a fact because of its meaning, not because it says 'Facts'.
 2. Treat the entire supplied user history as evidence. A case may be distributed across many messages.
 3. Extract from user-authored text only. Assistant questions are never evidence.
-4. Preserve material names, dates, addresses, amounts, survey/gata/khasra numbers, quotations, court complex, and advocate name.
+4. Preserve material names, dates, addresses, amounts, survey/gata/khasra numbers, roll/registration numbers, quotations, court complex/authority (समक्ष), and advocate name.
 5. Do not invent anything. Do not infer ownership, title, possession, statute, limitation, jurisdiction, valuation,
    court fee, documents, witnesses or relief merely because such details are common in legal pleadings.
 6. Distinguish semantic roles carefully:
-   - event/allegation/background -> facts;
+   - event/allegation/background/sworn statement -> facts;
    - legally operative events giving rise to the proceeding -> cause_of_action;
-   - what the court/recipient is asked to grant/do -> reliefs or demands;
+   - what the court/authority/recipient is asked to grant/do -> reliefs or demands;
    - temporary order sought pending final disposal -> interim_reliefs;
    - denial/admission/objection/alternative plea -> defence_points;
    - evidence/documents mentioned -> documents;
    - explicit instructions to add an extra point/clause -> custom_add_points;
-   - explicit instructions to omit/remove a point/clause from the template -> custom_remove_points.
+   - explicit instructions to omit/remove a point/clause from the template -> custom_remove_points;
+   - for Affidavit (शपथपत्र), extract the person making the oath into `deponent`, the authority/court (`समक्ष:` or `न्यायालय:`) into `court_name`, the subject/goal into `purpose`, and each sworn point into `facts`.
 7. Threat is not dispossession. Attempt is not completion. Allegation is not an established fact. Keep those statuses.
 8. Recognize legal roles and expressions across languages and beyond any example vocabulary.
 9. If a user provides a complete narrative without labels, reconstruct the structured fields from the narrative.
@@ -67,9 +68,10 @@ AUDIT RULES
 - Read the user evidence semantically; do not search only for headings or exact keywords.
 - Recover facts expressed indirectly, narratively, chronologically, conversationally, in Hindi, English,
   Hinglish, OCR text or copied legal prose.
-- If a statement is clearly a factual event/background, put it in facts.
+- If a statement is clearly a factual event/background or sworn affidavit clause, put it in facts.
 - If it states the legal event(s) giving rise to the proceeding, put those events in cause_of_action.
 - If it asks a court/authority/person to do something, put that requested outcome in reliefs/demands as appropriate.
+- For an Affidavit (शपथपत्र), ensure `deponent` (शपथकर्ता/शपथग्रहीता), `purpose` (विषय/उद्देश्य), `court_name` (समक्ष/न्यायालय), and `facts` are populated whenever present in the user text.
 - Extract advocate_name and court_complex if mentioned anywhere by the user.
 - Extract custom_add_points and custom_remove_points if the user asked to add or remove specific points.
 - Never confuse a request with the event that motivated it.
@@ -79,23 +81,23 @@ AUDIT RULES
 """
 
 LABELS = {
-    "court_name": ["Court", "न्यायालय", "अदालत", "कोर्ट"],
+    "court_name": ["Court", "न्यायालय", "अदालत", "कोर्ट", "समक्ष", "Before"],
     "court_complex": ["Court Complex", "कचहरी", "न्यायालय परिसर", "कोर्ट कम्पाउण्ड"],
     "advocate_name": ["Advocate", "Advocate Name", "अधिवक्ता", "वकील", "एडवोकेट", "Counsel"],
     "plaintiff_intro": ["Plaintiff", "वादी", "दावेदार", "Claimant"],
     "defendant_intro": ["Defendant", "प्रतिवादी", "विपक्षी", "Respondent", "Opposite Party"],
     "property_description": ["Property", "संपत्ति", "विवादित भूमि", "भूमि", "मकान", "विवादित संपत्ति"],
-    "facts": ["Main Facts", "Facts", "मुख्य तथ्य", "तथ्य", "विवरण", "Issue", "Case Details"],
+    "facts": ["Main Facts", "Facts", "मुख्य तथ्य", "तथ्य", "विवरण", "Issue", "Case Details", "शपथपत्र के कथन"],
     "cause_of_action": ["Cause of action", "वाद हेतुक", "वाद हेतु", "वाद हेतुक की तारीख", "कारण वाद"],
     "reliefs": ["Relief", "Reliefs", "राहत", "प्रार्थना", "अनुतोष", "Prayer", "मांगी गई राहत"],
     "demands": ["Demand", "Demands", "मांग", "अनुपालन"],
     "defence_points": ["Defence", "प्रतिरक्षा", "बचाव", "आपत्ति"],
     "custom_add_points": ["Add Point", "Add Points", "अतिरिक्त बिंदु", "जोड़ने योग्य बिंदु"],
     "custom_remove_points": ["Remove Point", "Remove Points", "हटाने योग्य बिंदु"],
-    "purpose": ["Purpose", "उद्देश्य"],
+    "purpose": ["Purpose", "उद्देश्य", "विषय", "Subject"],
     "sender": ["Sender", "प्रेषक", "नोटिसदाता"],
     "recipient": ["Recipient", "प्राप्तकर्ता", "नोटिसी"],
-    "deponent": ["Deponent", "शपथकर्ता"],
+    "deponent": ["Deponent", "शपथकर्ता", "शपथग्रहीता", "हस्ताक्षर शपथग्रहीता", "हस्ताक्षर शपथकर्ता"],
 }
 
 RELIEF_MARKERS = re.compile(
@@ -177,6 +179,70 @@ def _narrative_rescue(message: str, result: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _rescue_affidavit_fields(message: str, result: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+    """Deterministically recover authority (समक्ष/न्यायालय), deponent (शपथकर्ता/शपथग्रहीता), and purpose from any pasted or dictated Affidavit."""
+    out = dict(result or {})
+    text = str(message or "").strip()
+    if not text:
+        return out
+
+    # 1. Recover Forum / Authority ("समक्ष: ..." or "न्यायालय ...")
+    if not out.get("court_name") and not current.get("court_name"):
+        m_samaksh = re.search(r"(?m)^\s*(?:समक्ष|न्यायालय)\s*[:\-–—]?\s*(.+)$", text)
+        if m_samaksh:
+            out["court_name"] = f"समक्ष: {_clean(m_samaksh.group(1))}" if "समक्ष" in m_samaksh.group(0) else _clean(m_samaksh.group(0))
+
+    # 2. Recover Deponent ("मैं, ...", "मैं शपथकर्ता ...", "हस्ताक्षर शपथग्रहीता (नाम)", etc.)
+    if not out.get("deponent") and not current.get("deponent"):
+        m_main = re.search(
+            r"मैं\s*,?\s*(?:शपथकर्ता|शपथग्रहीता)?\s*([^\n।]{3,160}?(?:निवासी|जिला|उत्तर प्रदेश|कानपुर|आगरा|औरैया|लखनऊ)[^\n।]{0,80})",
+            text,
+        )
+        if m_main and "सत्यापित करता" not in m_main.group(1):
+            out["deponent"] = _clean(m_main.group(1))
+        if not out.get("deponent"):
+            m_sig = re.search(
+                r"(?:हस्ताक्षर\s*)?(?:शपथग्रहीता|शपथकर्ता)\s*[:\-–—]?\s*\n?\s*\(?([^\n()]{2,80})\)?",
+                text,
+            )
+            if m_sig:
+                cand = _clean(m_sig.group(1))
+                if cand and not any(w in cand for w in ("सत्यनिष्ठा", "सत्यापित", "उपरोक्त")):
+                    out["deponent"] = cand
+        if not out.get("deponent"):
+            for fallback_key in ("plaintiffs", "parties", "sender"):
+                vals = out.get(fallback_key) or current.get(fallback_key)
+                if isinstance(vals, list) and vals:
+                    out["deponent"] = _clean(vals[0])
+                    break
+                elif isinstance(vals, str) and vals.strip():
+                    out["deponent"] = _clean(vals)
+                    break
+
+    # 3. Recover Advocate / Identification details if present ("अधिवक्ता\nपंजीकरण सं०: UP19878/25...")
+    if not out.get("advocate_name") and not current.get("advocate_name"):
+        m_adv = re.search(
+            r"(?:अधिवक्ता|एडवोकेट)[^\n]*\n\s*(?:पंजीकरण\s*सं[०.]?\s*[:\-]?\s*[A-Za-z0-9/\-]+)(?:\s*\n\s*मो[०.]?\s*[:\-]?\s*\d{10})?",
+            text,
+        )
+        if m_adv:
+            out["advocate_name"] = _clean(m_adv.group(0))
+
+    # 4. Recover Purpose if facts are present so the user is never stuck in a loop after pasting a full affidavit
+    has_facts = bool(out.get("facts") or current.get("facts"))
+    if has_facts and not out.get("purpose") and not current.get("purpose"):
+        m_subj = re.search(r"(?m)^\s*(?:विषय|उद्देश्य|बाबत|वास्ते)\s*[:\-–—]\s*(.+)$", text)
+        if m_subj:
+            out["purpose"] = _clean(m_subj.group(1))
+        elif out.get("court_name") or current.get("court_name"):
+            forum = out.get("court_name") or current.get("court_name")
+            out["purpose"] = f"{forum} के समक्ष प्रस्तुत करने हेतु शपथपूर्वक घोषणा"
+        else:
+            out["purpose"] = "सक्षम प्राधिकारी / न्यायालय के समक्ष शपथपूर्वक कथन प्रस्तुत करने हेतु"
+
+    return out
+
+
 def _normalize(result: dict[str, Any]) -> dict[str, Any]:
     result = dict(result or {})
     for key in (
@@ -251,6 +317,9 @@ def extract_case_facts(
     labelled = _normalize(_extract_labelled(message))
     candidate = _normalize({**first, **labelled})
 
+    if document_type in {"affidavit", "evidence_pw_affidavit"}:
+        candidate = _normalize(_rescue_affidavit_fields(message, candidate, current))
+
     required = {
         "dava_plaint": ("court_name", "plaintiffs", "defendants", "facts", "reliefs"),
         "written_statement": ("court_name", "plaintiffs", "defendants", "facts"),
@@ -291,6 +360,8 @@ def extract_case_facts(
             merged[key] = value
 
     merged = _normalize(_narrative_rescue(message, merged))
+    if document_type in {"affidavit", "evidence_pw_affidavit"}:
+        merged = _normalize(_rescue_affidavit_fields("\n".join(history), merged, current))
     return merged
 
 
