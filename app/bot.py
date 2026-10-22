@@ -2,8 +2,8 @@
 
 Supports multi-style judicial drafting (Standard Judicial Format, Senior Counsel Edition,
 and Vakil AI Pro Hybrid), automatic blueprint matching, multi-document case chaining
-(Vaad Patra, Jawab Dava, Interim Application, Affidavit, Legal Notice), bilingual numerical
-formatting, and voice/text/OCR intake.
+(Vaad Patra, Jawab Dava, Interim Application, Affidavit, Legal Notice), universal GPT-6.0-Luna
+Affidavit engine with canonical structure, bilingual numerical formatting, and voice/text/OCR intake.
 """
 from __future__ import annotations
 import asyncio, json, logging, os, re, tempfile
@@ -62,7 +62,7 @@ BLUEPRINT_LABELS = {
     "written_statement": "Written Statement Defense Blueprint (प्रतिवाद-पत्र / जवाब दावा प्रारूप)",
     "application": "Procedural Court Application Blueprint (न्यायालय प्रार्थना-पत्र प्रारूप)",
     "evidence_pw_affidavit": "Examination-in-Chief Blueprint (साक्ष्य बयान चीफ प्रारूप)",
-    "affidavit": "Judicial Affidavit Blueprint (न्यायिक शपथपत्र प्रारूप)",
+    "affidavit": "Universal Judicial & Executive Affidavit Blueprint (शपथ-पत्र मानक प्रारूप)",
     "legal_notice": "Statutory Legal Notice Blueprint (विधिक नोटिस प्रारूप)",
     "other_civil": "Civil Judicial Proceeding Blueprint (सिविल न्यायिक प्रारूप)",
 }
@@ -80,6 +80,8 @@ def format_public_blueprint_name(raw_name: str, document_type: str = "dava_plain
     """Convert internal corpus filenames into confidential, professional judicial blueprint identifiers."""
     prefix = "VD-STD" if style_mode == "template_mode" else ("VD-SR" if style_mode == "dad_style" else "VD-PRO")
     base_label = BLUEPRINT_LABELS.get(document_type, BLUEPRINT_LABELS["other_civil"])
+    if document_type == "affidavit":
+        return f"{prefix} • {base_label}"
     raw = str(raw_name or "").strip()
     if not raw or "@" in raw or "shukla" in raw.lower() or "शुक्ला" in raw or "+" in raw:
         return f"{prefix} • {base_label}"
@@ -189,14 +191,35 @@ def existing_documents_menu(state):
     return InlineKeyboardMarkup(rows)
 
 
+# Ordered so specific document types (Evidence Affidavit, Affidavit, Legal Notice, Application, Written Statement)
+# are checked cleanly without short-token false positives like 'ws' inside English words or 'लिखित बयान' inside affidavits.
 _TYPE_KEYWORDS = {
-    "written_statement": ("written statement", "लिखित कथन", "जवाब दावा", "जवाब-दावा", "प्रतिवादपत्र", "प्रतिवाद पत्र", "लिखित बयान", "ws", "jawab dava"),
-    "application": ("application", "प्रार्थना पत्र", "प्रार्थना-पत्र", "प्रार्थनापत्र", "आवेदन", "कमीशन", "6ग", "संशोधन", "39 नियम 1", "7 नियम 11", "स्टे प्रार्थना पत्र"),
-    "evidence_pw_affidavit": ("evidence affidavit", "pw affidavit", "साक्ष्य शपथपत्र", "साक्ष्य का शपथपत्र", "बयान चीफ", "पी डब्लू", "डी डब्लू", "pw-1", "dw-1", "pw1"),
-    "affidavit": ("affidavit", "शपथपत्र", "हलफनामा", "शपथ पत्र", "shapath patra"),
-    "legal_notice": ("legal notice", "कानूनी नोटिस", "विधिक नोटिस", "रजिस्टर्ड नोटिस", "138 ni", "धारा 138"),
-    "other_civil": ("other civil", "अन्य सिविल", "सिविल ड्राफ्ट", "कैवियट", "केवियट", "caveat", "तलाशपता", "इकरारनामा"),
-    "dava_plaint": ("dava", "दावा", "वाद पत्र", "वाद-पत्र", "वादपत्र", "plaint", "plaintiff suit", "स्थायी निषेधाज्ञा", "बंटवारा", "विशिष्ट अनुपालन"),
+    "evidence_pw_affidavit": (
+        "evidence affidavit", "pw affidavit", "साक्ष्य शपथपत्र", "साक्ष्य का शपथपत्र",
+        "बयान चीफ", "पी डब्लू", "डी डब्लू", "pw-1", "dw-1", "pw1",
+    ),
+    "affidavit": (
+        "affidavit", "शपथपत्र", "शपथ पत्र", "शपथ-पत्र", "हलफनामा", "हल्फ़नामा",
+        "शपथग्रहीता", "शपथकर्ता", "shapath patra", "shapathpatra", "halafnama",
+    ),
+    "written_statement": (
+        "written statement", "जवाब दावा", "जवाब-दावा", "प्रतिवादपत्र", "प्रतिवाद पत्र",
+        "जवाबदावा", "लिखित कथन", "jawab dava", "jawabdava",
+    ),
+    "application": (
+        "application", "प्रार्थना पत्र", "प्रार्थना-पत्र", "प्रार्थनापत्र", "आवेदन",
+        "कमीशन", "6ग", "संशोधन", "39 नियम 1", "7 नियम 11", "स्टे प्रार्थना पत्र",
+    ),
+    "legal_notice": (
+        "legal notice", "कानूनी नोटिस", "विधिक नोटिस", "रजिस्टर्ड नोटिस", "138 ni", "धारा 138",
+    ),
+    "other_civil": (
+        "other civil", "अन्य सिविल", "सिविल ड्राफ्ट", "कैवियट", "केवियट", "caveat", "तलाशपता", "इकरारनामा",
+    ),
+    "dava_plaint": (
+        "dava", "दावा", "वाद पत्र", "वाद-पत्र", "वादपत्र", "plaint", "plaintiff suit",
+        "स्थायी निषेधाज्ञा", "बंटवारा", "विशिष्ट अनुपालन",
+    ),
 }
 
 
@@ -205,6 +228,9 @@ def infer_document_type(text: str, default: str = "dava_plaint") -> str:
     low = re.sub(r"\s+", " ", str(text or "").strip().casefold())
     if not low:
         return default
+    # Explicit Written Statement check first ONLY if unambiguous WS markers appear
+    if any(m in low for m in ("written statement", "जवाब दावा", "जवाब-दावा", "प्रतिवादपत्र", "प्रतिवाद पत्र", "jawab dava", "jawabdava")):
+        return "written_statement"
     for typ, markers in _TYPE_KEYWORDS.items():
         if any(m in low for m in markers):
             return typ
@@ -222,10 +248,7 @@ def detect_additional_document_type(text: str):
     )
     if not any(x in low for x in create_markers):
         return None
-    for typ, markers in _TYPE_KEYWORDS.items():
-        if any(m in low for m in markers):
-            return typ
-    return None
+    return infer_document_type(low, default="") or None
 
 
 def detect_edit_intent(text: str) -> bool:
@@ -274,6 +297,16 @@ def questions_text(state):
             "✅ *सभी आवश्यक तथ्य प्राप्त हो चुके हैं।*\n"
             "ड्राफ्ट तैयार करने के लिए नीचे *⚡ ड्राफ्ट तैयार करें (Generate)* बटन दबाएँ।"
         )
+    if state.document_type == "affidavit":
+        return (
+            f"🎨 *ड्राफ्टिंग शैली:* {style_label}\n"
+            f"{DIVIDER}\n"
+            "📥 *कृपया शपथ-पत्र (Affidavit) का विवरण भेजें*\n"
+            "_(आप किसी भी प्रकार का शपथ-पत्र — न्यायालय, विश्वविद्यालय/CSJMU, छात्रवृत्ति/OTR, समाज कल्याण, तहसील या नोटरी शपथ-पत्र Voice Note 🎙️, Text ✍️, या Photo/PDF 📸 से भेज सकते हैं)_:\n\n"
+            + "\n".join(f"🔹 *{label}*" for _, label in qs)
+            + "\n🔹 *समक्ष प्राधिकारी / न्यायालय का नाम* _(जैसे: कुलसचिव महोदय / समाज कल्याण विभाग / सिविल जज)_"
+            + "\n🔹 *अधिवक्ता / पहचानकर्ता का विवरण* _(यदि अंकित करना हो)_"
+        )
     return (
         f"🎨 *ड्राफ्टिंग शैली:* {style_label}\n"
         f"{DIVIDER}\n"
@@ -294,13 +327,29 @@ def summary_text(state):
         return "\n".join(f"  • {x}" for x in v) if isinstance(v, list) else str(v)
 
     extra = ""
-    if state.selected_template_name:
+    if state.selected_template_name or state.document_type == "affidavit":
         bp_label = format_public_blueprint_name(state.selected_template_name, state.document_type, state.style_mode)
         extra += f"📘 *न्यायिक प्रारूप:* `{bp_label}`\n"
     if facts.get("advocate_name") or facts.get("court_complex"):
         adv_display = facts.get("advocate_name") or "अधिवक्ता"
         complex_display = f" ({facts.get('court_complex')})" if facts.get("court_complex") else ""
         extra += f"🎓 *अधिवक्ता / चैम्बर:* {adv_display}{complex_display}\n"
+
+    if state.document_type in {"affidavit", "evidence_pw_affidavit"}:
+        forum_str = facts.get("court_name") or "संबंधित सक्षम प्राधिकारी / न्यायालय"
+        return (
+            f"🏛️ *VAKIL DRAFTING AI — AFFIDAVIT DOSSIER*\n"
+            f"{DIVIDER}\n"
+            f"📄 *दस्तावेज़:* {DISPLAY_NAMES[state.document_type]}\n"
+            f"🎨 *शैली:* {style_label}\n"
+            f"{extra}"
+            f"📊 *पूर्णता (Readiness):* `{progress(state)}`\n"
+            f"{DIVIDER}\n"
+            f"🏛️ *समक्ष / न्यायालय:* {forum_str}\n"
+            f"👤 *शपथग्रहीता / शपथकर्ता:* {val('deponent')}\n"
+            f"🎯 *उद्देश्य / विषय:* {val('purpose')}\n"
+            f"📋 *शपथपूर्वक कथन (Statements):*\n{val('facts')}\n"
+        )
 
     return (
         f"🏛️ *VAKIL DRAFTING AI — CASE DOSSIER*\n"
@@ -419,9 +468,9 @@ async def help_command(update, context):
         "• `/cancel` — वर्तमान सेशन समाप्त करें\n"
         f"{DIVIDER}\n"
         "🚀 *ड्राफ्ट तैयार करने की प्रक्रिया (3 आसान चरण):*\n"
-        "1️⃣ `/newcase` दबाकर अपनी पसंदीदा **Drafting Style** चुनें।\n"
-        "2️⃣ अपने केस के तथ्य **Voice Note 🎙️ बोलकर**, **Text ✍️ लिखकर**, या **दस्तावेज़ की Photo/PDF 📸** भेजकर बताएं।\n"
-        "3️⃣ **⚡ ड्राफ्ट तैयार करें** दबाते ही कोर्ट में दाखिल करने योग्य **Editable DOCX** एवं **Court-Ready PDF** प्राप्त करें!"
+        "1️⃣ `/newcase` दबाकर अपनी पसंदीदा **Drafting Style** और **Document Type** चुनें।\n"
+        "2️⃣ अपने केस या शपथ-पत्र के तथ्य **Voice Note 🎙️ बोलकर**, **Text ✍️ लिखकर**, या **दस्तावेज़ की Photo/PDF 📸** भेजकर बताएं।\n"
+        "3️⃣ **⚡ ड्राफ्ट तैयार करें** दबाते ही कोर्ट/प्राधिकारी में दाखिल करने योग्य **Editable DOCX** एवं **Court-Ready PDF** प्राप्त करें!"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -667,7 +716,13 @@ async def start(update, context):
     if not await require_access(update):
         return
     uid = update.effective_user.id
-    state = CaseState(case_id_for(uid), document_type="dava_plaint", style_mode="template_mode", style_selected=False)
+    state = CaseState(
+        case_id_for(uid),
+        document_type="dava_plaint",
+        style_mode="template_mode",
+        style_selected=False,
+        type_selected=False,
+    )
     store.save(uid, state)
     await update.message.reply_text(
         STYLE_PROMPT_TEXT,
@@ -682,7 +737,13 @@ async def newcase(update, context):
     if not await require_access(update):
         return
     uid = update.effective_user.id
-    state = CaseState(case_id_for(uid), document_type="dava_plaint", style_mode="template_mode", style_selected=False)
+    state = CaseState(
+        case_id_for(uid),
+        document_type="dava_plaint",
+        style_mode="template_mode",
+        style_selected=False,
+        type_selected=False,
+    )
     store.save(uid, state)
     await update.message.reply_text(
         STYLE_PROMPT_TEXT,
@@ -747,16 +808,23 @@ async def intake_text(update, context, text=None, *, suppress_questions=False, a
     state = get_state(uid)
     if not state:
         inferred_type = infer_document_type(text, default="dava_plaint")
-        state = CaseState(case_id_for(uid), document_type=inferred_type, style_mode="template_mode", style_selected=False)
+        state = CaseState(
+            case_id_for(uid),
+            document_type=inferred_type,
+            style_mode="template_mode",
+            style_selected=False,
+            type_selected=False,
+        )
         store.save(uid, state)
-    elif not state.facts:
+    elif not state.facts and not getattr(state, "type_selected", False):
+        # Only auto-infer document_type when the user has NOT explicitly selected a document type button!
         inferred_type = infer_document_type(text, default=state.document_type)
         state.document_type = inferred_type
 
     state.record("user", text)
     if announce:
         await update.message.reply_text(
-            f"⚙️ *{DISPLAY_NAMES[state.document_type]}* — आपके केस के तथ्यों का विधिक विश्लेषण किया जा रहा है…",
+            f"⚙️ *{DISPLAY_NAMES[state.document_type]}* — आपके विवरण का विधिक विश्लेषण किया जा रहा है…",
             parse_mode="Markdown",
         )
     try:
@@ -771,7 +839,7 @@ async def intake_text(update, context, text=None, *, suppress_questions=False, a
 
     if not state.style_selected:
         await update.message.reply_text(
-            f"✅ *केस के तथ्य सफलतापूर्वक दर्ज कर लिए गए हैं!*\n\n{summary_text(state)}\n"
+            f"✅ *विवरण सफलतापूर्वक दर्ज कर लिया गया है!*\n\n{summary_text(state)}\n"
             "👇 *कृपया चुनें कि आप किस ड्राफ्टिंग शैली में दस्तावेज़ तैयार करना चाहते हैं:*",
             parse_mode="Markdown",
             reply_markup=style_selection_menu(),
@@ -786,7 +854,7 @@ async def intake_text(update, context, text=None, *, suppress_questions=False, a
         )
         return result
     await update.message.reply_text(
-        f"✅ *सभी आवश्यक विधिक तथ्य प्राप्त हो गए हैं।*\n\n{summary_text(state)}",
+        f"✅ *सभी आवश्यक तथ्य प्राप्त हो गए हैं।*\n\n{summary_text(state)}",
         parse_mode="Markdown",
         reply_markup=case_actions(state),
     )
@@ -910,7 +978,13 @@ async def image_document_message(update, context):
     state = get_state(uid)
     if not state:
         inferred = infer_document_type(caption, default="dava_plaint")
-        state = CaseState(case_id_for(uid), document_type=inferred, style_mode="template_mode", style_selected=False)
+        state = CaseState(
+            case_id_for(uid),
+            document_type=inferred,
+            style_mode="template_mode",
+            style_selected=False,
+            type_selected=False,
+        )
         store.save(uid, state)
 
     file_bytes = None
@@ -996,7 +1070,7 @@ async def image_document_message(update, context):
         state = get_state(uid)
         if state and not state.style_selected:
             await update.message.reply_text(
-                f"✅ *दस्तावेज़ से केस के सभी प्रमुख तथ्य संकलित कर लिए गए हैं!*\n\n{summary_text(state)}\n"
+                f"✅ *दस्तावेज़ से सभी प्रमुख तथ्य संकलित कर लिए गए हैं!*\n\n{summary_text(state)}\n"
                 "👇 *कृपया चुनें कि आप किस ड्राफ्टिंग शैली में दस्तावेज़ तैयार करना चाहते हैं:*",
                 parse_mode="Markdown",
                 reply_markup=style_selection_menu(),
@@ -1206,7 +1280,7 @@ async def apply_edit(update, context):
     try:
         with tempfile.TemporaryDirectory() as tmp:
             label = DISPLAY_NAMES[state.document_type].split(" /")[0].replace(" ", "_")
-            docx, pdf = await asyncio.to_thread(render_both, candidate, tmp, f"{label}_{uid}_v{state.draft_version}", os.getenv("LEGAL_PAPER", "legal"))
+            docx, pdf = await asyncio.to_thread(render_both, draft=candidate, output_dir=tmp, stem=f"{label}_{uid}_v{state.draft_version}", paper=os.getenv("LEGAL_PAPER", "legal"))
             with open(docx, "rb") as f:
                 await q.message.reply_document(f, filename=docx.name, caption=f"📄 Updated Word (DOCX) — v{state.draft_version}")
             with open(pdf, "rb") as f:
@@ -1245,7 +1319,13 @@ async def button(update, context):
         chosen_style = q.data.split(":", 1)[1]
         state = store.get(cid)
         if not state:
-            state = CaseState(cid, document_type="dava_plaint", style_mode=chosen_style, style_selected=True)
+            state = CaseState(
+                cid,
+                document_type="dava_plaint",
+                style_mode=chosen_style,
+                style_selected=True,
+                type_selected=False,
+            )
         else:
             state.style_mode = chosen_style
             state.style_selected = True
@@ -1363,6 +1443,7 @@ async def button(update, context):
             await q.edit_message_text("⚠️ यह दस्तावेज़ अब उपलब्ध नहीं है।")
             return
         state.document_type = str(item.get("document_type"))
+        state.type_selected = True
         state.style_mode = str(item.get("style_mode", state.style_mode))
         state.selected_template_name = str(item.get("selected_template_name", ""))
         state.active_document_id = did
@@ -1423,7 +1504,13 @@ async def button(update, context):
         existing = store.get(cid)
         chosen_style = existing.style_mode if existing else "template_mode"
         style_sel = existing.style_selected if existing else True
-        state = CaseState(cid, document_type=t, style_mode=chosen_style, style_selected=style_sel)
+        state = CaseState(
+            cid,
+            document_type=t,
+            style_mode=chosen_style,
+            style_selected=style_sel,
+            type_selected=True,
+        )
         store.save(uid, state)
         await q.edit_message_text(
             f"🏛️ *VAKIL DRAFTING AI — CASE INTAKE*\n"
@@ -1483,7 +1570,7 @@ async def button(update, context):
         return
     if q.data == "generate":
         try:
-            await q.edit_message_text("⚙️ *केस के तथ्यों का सत्यापन एवं उपयुक्त न्यायिक प्रारूप का चयन किया जा रहा है…*", parse_mode="Markdown")
+            await q.edit_message_text("⚙️ *तथ्यों का सत्यापन एवं उपयुक्त न्यायिक प्रारूप का चयन किया जा रहा है…*", parse_mode="Markdown")
             await asyncio.to_thread(orchestrator.refresh_intake, state)
             store.save(uid, state)
         except Exception:
