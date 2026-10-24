@@ -9,6 +9,7 @@ STYLE_NAMES = {
     "template_mode": "🏛️ मानक न्यायिक प्रारूप (Standard Judicial)",
     "dad_style": "⚖️ वरिष्ठ अधिवक्ता शैली (Senior Counsel)",
     "hybrid_mode": "✨ Vakil AI Pro — हाइब्रिड संस्करण",
+    "as_is_mode": "📄 हूबहू / हस्तलिखित → लीगल पेपर (As-It-Is / Handwritten)",
 }
 
 
@@ -41,6 +42,15 @@ class CaseState:
     def record(self, role: str, text: str) -> None:
         self.history.append({"role": role, "text": text})
         self.history = self.history[-120:]
+        if role == "user" and str(text or "").strip():
+            clean_txt = str(text).strip()
+            existing_raw = self.facts.get("raw_source_pages", [])
+            if not isinstance(existing_raw, list):
+                existing_raw = [str(existing_raw)] if existing_raw else []
+            if not existing_raw or existing_raw[-1] != clean_txt:
+                existing_raw.append(clean_txt)
+            self.facts["raw_source_pages"] = existing_raw[-30:]
+            self.facts["raw_source_text"] = "\n\n".join(self.facts["raw_source_pages"])
 
     def user_messages(self, limit: int = 40) -> list[str]:
         return [str(x.get("text", "")) for x in self.history if x.get("role") == "user"][-limit:]
@@ -50,7 +60,7 @@ class CaseState:
         list_fields = {
             "plaintiffs", "defendants", "parties", "facts", "reliefs",
             "interim_reliefs", "demands", "defence_points", "documents",
-            "custom_add_points", "custom_remove_points",
+            "custom_add_points", "custom_remove_points", "raw_source_pages",
         }
         for key, value in (new_facts or {}).items():
             if value is None or value == "" or value == [] or value == {}:
@@ -198,10 +208,22 @@ REQUIRED_BY_TYPE = {
 }
 
 
-def missing_fields(facts, document_type="dava_plaint"):
+def missing_fields(facts, document_type="dava_plaint", style_mode: str = "template_mode"):
+    facts = facts or {}
+    # In As-It-Is / Handwritten Legal Formatting mode, never block generation with missing-field questions
+    # as long as any source text or facts have been provided by the user.
+    if style_mode == "as_is_mode" or facts.get("as_is_mode"):
+        if facts.get("raw_source_text") or facts.get("facts"):
+            return []
+        return ["facts"]
     return [key for key, _ in REQUIRED_BY_TYPE.get(document_type, REQUIRED_BY_TYPE["other_civil"]) if not facts.get(key)]
 
 
-def next_questions(facts, document_type="dava_plaint", max_questions=5):
+def next_questions(facts, document_type="dava_plaint", max_questions=5, style_mode: str = "template_mode"):
+    facts = facts or {}
+    if style_mode == "as_is_mode" or facts.get("as_is_mode"):
+        if facts.get("raw_source_text") or facts.get("facts"):
+            return []
+        return [("facts", "दस्तावेज़ की Photo/PDF, हस्तलिखित पन्ना, या Text")]
     labels = REQUIRED_BY_TYPE.get(document_type, REQUIRED_BY_TYPE["other_civil"])
     return [(key, label) for key, label in labels if not facts.get(key)][:max_questions]
