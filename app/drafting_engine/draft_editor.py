@@ -65,18 +65,23 @@ EDIT_SCHEMA = {
 }
 
 SYSTEM = """You are a precise legal-document edit parser for an Indian advocate's Hindi drafting bot.
-Convert the lawyer's natural-language or voice-dictated edit instruction (including requests to add a point, remove a point, or update case details) into a structured edit operation against the supplied structured draft.
+Convert the lawyer's natural-language or voice-dictated edit instruction (including requests to add a point, remove a point, remove/edit party names, or update headings/titles) into a structured edit operation against the supplied structured draft.
 
 Rules:
 - Never rewrite unrelated parts of the document.
 - Select the target `section` and zero-based `index` (use 0 for scalar sections or when using `append` / `replace_all`).
+- Voice Dictation (STT) Phonetic Awareness:
+  * Instructions often come from Hindi speech-to-text, which may have phonetic spellings such as "साक्षेतु शपथपत्र" for "साक्ष्य हेतु शपथपत्र", "वादीगढ़" for "वादीगण", or "वीरेंद्र" (with anusvara ं) when the draft has "वीरेन्द्र" (with half-ना न्).
+  * Always inspect `CURRENT DRAFT` carefully and copy `old_text` CHARACTER-FOR-CHARACTER as it actually appears in `CURRENT DRAFT` (not the noisy STT spelling).
+  * Write `new_text` in clean, formal Unicode Devanagari legal Hindi (e.g. if the user says "साक्षेतु शपथपत्र PW-6 कोष्ठक में मुनेश कुमार लिख दो", set `new_text` to "साक्ष्य हेतु शपथपत्र PW-6 (मुनेश कुमार)").
+  * Whenever the user says "कोष्ठक में X" or "ब्रैकेट में X", format it with parentheses `(X)` instead of writing the words "कोष्ठक में".
 - Supported operations:
-  * `replace`: replace `old_text` with `new_text` in the selected section/index. `old_text` MUST be an exact contiguous substring of the selected item.
-  * `replace_all`: when the lawyer wants a name, Gata/Khasra number, date, or term corrected everywhere it appears across the entire document, set `operation="replace_all"`, `old_text` to the exact existing text, and `new_text` to replacement.
-  * `delete`: delete `old_text` from the selected item, OR if the lawyer wants an entire point/paragraph removed (e.g. 'पैराग्राफ 4 हटा दो' or 'यह पॉइंट हटा दो'), set `old_text` to the ENTIRE text of that item in `pleadings` or `prayer` so the whole item is removed cleanly.
+  * `replace`: replace `old_text` with `new_text` in the selected section/index. `old_text` MUST be copied verbatim from the selected item in `CURRENT DRAFT`.
+  * `replace_all`: when the lawyer wants a name, Gata/Khasra number, date, or term corrected or removed everywhere it appears across the entire document, set `operation="replace_all"`, `old_text` to the exact existing text, and `new_text` to replacement (or `""` if deleting everywhere).
+  * `delete`: delete `old_text` from the selected item, OR if the lawyer wants an entire point/paragraph/party line removed, set `old_text` to the ENTIRE text of that item in `pleadings`, `prayer`, or `parties` so the whole item is removed cleanly. When removing one person's name from a multi-party line, include any trailing comma or connector in `old_text` so the remaining party text reads cleanly.
   * `insert_before` / `insert_after`: insert a new point/paragraph `new_text` before or after `index` in list sections (`pleadings`, `prayer`, `parties`, `signature_block`).
   * `append`: add a new point/paragraph/clause `new_text` to the end of `pleadings`, `prayer`, `parties`, or `signature_block` (`old_text` should be empty).
-  * `batch`: if the lawyer gave multiple distinct changes in one message, set `operation="batch"` and put each change in `edits`.
+  * `batch`: if the lawyer gave multiple distinct changes in one message (for example, removing a name from both वादीगण and प्रतिवादीगण in `parties`, AND updating `title`), set `operation="batch"` and put each individual change in `edits`.
 - Layout operations: `page_break_before`, `page_break_after`, `remove_page_break_before`, `remove_page_break_after`.
 - Always write Hindi legal additions/replacements in clean Unicode Devanagari Hindi (starting new pleading paragraphs with "यह कि " where natural, without numbering).
 - Return JSON only matching the schema.
@@ -89,8 +94,80 @@ def _normalize_hindi_punct(text: str) -> str:
     return t
 
 
+def _build_phonetic_skeleton(text: str) -> tuple[str, list[int]]:
+    """Build a normalized Devanagari skeleton and a char-index map back to `text`.
+
+    Unifies:
+    - Anusvara (ं), Chandrabindu (ँ), and half-nasals (न्, म्, ण्, ञ्, ङ्) -> 'N'
+    - Nukta (\u093c) -> stripped
+    - Multiple spaces, hyphens, and punctuation separators
+    - Common STT contractions like 'साक्षेतु' <-> 'साक्ष्यहेतु' and 'वादीगढ़' <-> 'वादीगण'
+    """
+    skel_chars: list[str] = []
+    idx_map: list[int] = []
+    n = len(text)
+    i = 0
+    while i < n:
+        ch = text[i]
+        # Skip nukta or zero-width joiners
+        if ch in {"\u093c", "\u200c", "\u200d"}:
+            i += 1
+            continue
+        # Half-nasal consonant (न/म/ण/ञ/ङ + हलन्त ्) -> 'N'
+        if ch in {"न", "म", "ण", "ञ", "ङ"} and i + 1 < n and text[i + 1] == "\u094d":
+            skel_chars.append("N")
+            idx_map.append(i)
+            i += 2
+            continue
+        # Anusvara / Chandrabindu -> 'N'
+        if ch in {"\u0902", "\u0901"}:
+            skel_chars.append("N")
+            idx_map.append(i)
+            i += 1
+            continue
+        # Normalize 'ढ़' / 'ढ' -> 'ण' only for plural suffix 'गढ़' -> 'गण'
+        if ch == "ढ" and i > 0 and text[i - 1] in {"ग", "ण"}:
+            skel_chars.append("ण")
+            idx_map.append(i)
+            i += 1
+            continue
+        # Skip hyphens and spaces so 'शपथ-पत्र', 'शपथ पत्र', 'शपथपत्र' unify
+        if ch.isspace() or ch in {"-", "–", "—"}:
+            i += 1
+            continue
+        if ch == "०":
+            ch = "0"
+        elif ch == "।":
+            ch = "."
+        skel_chars.append(ch.casefold())
+        idx_map.append(i)
+        i += 1
+    return "".join(skel_chars), idx_map
+
+
+def _cleanup_party_or_sentence_punctuation(text: str) -> str:
+    """Clean up dangling commas, double spaces, or empty serial markers left after deleting a substring."""
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    # Remove orphan serial numbers whose name was deleted, e.g. ", 2. —" or "1. ,"
+    cleaned = re.sub(r"(?:,\s*)?\b\d+\s*(?:\([^)]+\))?\s*[.)]\s*(?=[,;:\-–—]|$)", "", cleaned)
+    cleaned = re.sub(r",\s*(?=[\-–—])", " ", cleaned)
+    cleaned = re.sub(r",\s*,+", ", ", cleaned)
+    cleaned = re.sub(r"\(\s*\)", "", cleaned)
+    cleaned = re.sub(r"^\s*[,;:\-–—]+\s*", "", cleaned)
+    cleaned = re.sub(r"\s*[,;]+\s*$", "", cleaned)
+    cleaned = re.sub(r"\b(?:व|तथा|एवं)\s*(?:व|तथा|एवं)\b", "व", cleaned)
+    cleaned = re.sub(r",\s*(?:व|तथा|एवं)\s*,", ", ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    # If only a bare role label remains (e.g. "— वादीगण" or "वादी"), treat as empty so item is popped
+    if re.match(r"^[\-–—.\s]*(?:वादीगण|वादी|प्रतिवादीगण|प्रतिवादी|विपक्षीगण|विपक्षी)[\-–—.\s]*$", cleaned):
+        return ""
+    return cleaned
+
+
 def _flex_replace_once(source: str, old: str, new: str) -> str | None:
-    """Replace `old` in `source`, with whitespace, punctuation, and zero-normalization flexibility."""
+    """Replace `old` in `source`, with whitespace, punctuation, and Devanagari nasal/phonetic flexibility."""
+    if not old:
+        return None
     if old in source:
         return source.replace(old, new, 1)
 
@@ -108,10 +185,40 @@ def _flex_replace_once(source: str, old: str, new: str) -> str | None:
 
     norm_source = _normalize_hindi_punct(source)
     norm_old = _normalize_hindi_punct(clean_old)
-    if norm_old in norm_source:
+    if norm_old and norm_old in norm_source:
         start_idx = norm_source.find(norm_old)
         end_idx = start_idx + len(norm_old)
         return source[:start_idx] + new + source[end_idx:]
+
+    # Devanagari phonetic/orthographic skeleton match (e.g. वीरेंद्र <-> वीरेन्द्र, शपथ-पत्र <-> शपथपत्र)
+    src_skel, src_map = _build_phonetic_skeleton(source)
+    old_skel, _ = _build_phonetic_skeleton(clean_old)
+    # Also handle STT contraction 'साक्षेतु' -> 'साक्ष्यहेतु'
+    alt_old_skels = [old_skel]
+    if "साक्षेतु" in old_skel:
+        alt_old_skels.append(old_skel.replace("साक्षेतु", "साक्ष्यहेतु"))
+        alt_old_skels.append(old_skel.replace("साक्षेतु", "साक्ष्यका"))
+    # Also try without leading honorific 'श्री' if draft omitted 'श्री' or vice versa
+    if old_skel.startswith("श्री") and len(old_skel) > 4:
+        alt_old_skels.append(old_skel[len("श्री"):])
+
+    for cand_skel in alt_old_skels:
+        if not cand_skel:
+            continue
+        pos = src_skel.find(cand_skel)
+        if pos != -1:
+            start_orig = src_map[pos]
+            last_mapped = src_map[pos + len(cand_skel) - 1]
+            end_orig = last_mapped + 1
+            # Include any trailing combining marks / halant / matras belonging to the last character
+            while end_orig < len(source) and (
+                "\u0900" <= source[end_orig] <= "\u0903"
+                or "\u093a" <= source[end_orig] <= "\u094f"
+                or "\u0951" <= source[end_orig] <= "\u0957"
+                or "\u0962" <= source[end_orig] <= "\u0963"
+            ):
+                end_orig += 1
+            return source[:start_orig] + new + source[end_orig:]
 
     return None
 
@@ -205,15 +312,17 @@ class DraftEditor:
     def parse_add_point(self, draft: dict[str, Any], instruction: str) -> dict[str, Any]:
         """Dedicated parser when the user explicitly clicked 'Add Point'."""
         clean = instruction.strip()
-        # Strip leading command phrases if present
+        # If the user actually gave a general edit/delete/replace instruction while in add_point mode, route to general parser
+        low = clean.casefold()
+        if any(k in low for k in ("हटा दो", "हटाओ", "के स्थान पर", "की जगह", "लिख दो", "बदल दो", "कोष्ठक में")):
+            return self.parse(draft, clean)
+
         clean_body = re.sub(
             r"^(?:यह\s*पॉइंट\s*जोड़\s*दो\s*(?:कि)?|पॉइंट\s*जोड़ो\s*:?|इसमें\s*यह\s*जोड़ो\s*(?:कि)?|add\s*point\s*:?)\s*",
             "",
             clean,
             flags=re.IGNORECASE,
         ).strip()
-        # Check if user specified a specific paragraph position or prayer section
-        low = clean.casefold()
         if any(k in low for k in ("के पहले", "के बाद", "प्रार्थना में", "सत्यापन में", "before", "after", "in prayer")):
             return self.parse(draft, f"Add this point to the draft: {clean}")
 
@@ -225,7 +334,6 @@ class DraftEditor:
             formatted += "।"
 
         pleadings = draft.get("pleadings") or []
-        # Insert before canonical closing clauses (कारण वाद / क्षेत्राधिकार / मूल्यांकन) when possible
         insert_idx = len(pleadings)
         for i, p in enumerate(pleadings):
             if any(k in str(p) for k in ("कारण वाद", "क्षेत्राधिकार", "मूल्यांकन", "न्यायालय शुल्क")):
@@ -255,7 +363,8 @@ class DraftEditor:
         direct = self._deterministic_remove_paragraph(draft, instruction)
         if direct:
             return direct
-        return self.parse(draft, f"Remove/delete this point or paragraph from the draft: {instruction}")
+        # Pass the instruction directly to parse() so multi-part edits (e.g. delete party + update title) work seamlessly
+        return self.parse(draft, instruction)
 
     def parse(self, draft: dict[str, Any], instruction: str) -> dict[str, Any]:
         direct = self._deterministic_layout_intent(instruction)
@@ -287,6 +396,10 @@ class DraftEditor:
         old = str(edit.get("old_text", ""))
         new = str(edit.get("new_text", ""))
         index = int(edit.get("index", -1))
+
+        # Auto-convert spoken "कोष्ठक में X" inside new_text if the LLM left it literal
+        new = re.sub(r"\s*कोष्ठक\s+में\s+([^\n,।()]+)", r" (\1)", new).strip()
+        edit["new_text"] = new
 
         if not self._valid_section(section):
             raise ValueError(f"Invalid edit section: {section}")
@@ -323,8 +436,15 @@ class DraftEditor:
             changed = 0
             for sec_key in ("court_heading", "case_heading", "title", "opening_averment", "verification"):
                 val = str(out.get(sec_key, "") or "")
-                if old in val:
-                    out[sec_key] = val.replace(old, new)
+                replaced = _flex_replace_once(val, old, new)
+                if replaced is not None and replaced != val:
+                    # Replace all occurrences in scalar if multiple exist
+                    while True:
+                        nxt = _flex_replace_once(replaced, old, new)
+                        if nxt is None or nxt == replaced:
+                            break
+                        replaced = nxt
+                    out[sec_key] = _cleanup_party_or_sentence_punctuation(replaced) if not new else replaced
                     changed += 1
             for list_key in ("parties", "pleadings", "prayer", "signature_block"):
                 items = out.get(list_key, [])
@@ -332,10 +452,17 @@ class DraftEditor:
                     new_items = []
                     for it in items:
                         s_it = str(it)
-                        if old in s_it:
-                            s_it = s_it.replace(old, new)
+                        replaced = _flex_replace_once(s_it, old, new)
+                        if replaced is not None and replaced != s_it:
+                            while True:
+                                nxt = _flex_replace_once(replaced, old, new)
+                                if nxt is None or nxt == replaced:
+                                    break
+                                replaced = nxt
+                            s_it = _cleanup_party_or_sentence_punctuation(replaced) if not new else replaced
                             changed += 1
-                        new_items.append(s_it)
+                        if s_it.strip():
+                            new_items.append(s_it)
                     out[list_key] = new_items
             if not changed:
                 raise ValueError(f"Target text '{old}' not found across draft; no change applied.")
@@ -353,13 +480,19 @@ class DraftEditor:
                 replacement = "" if operation == "delete" else new
                 updated = _flex_replace_once(current, old, replacement)
                 if updated is None:
-                    raise ValueError(f"Target text '{old}' not found in {section}.")
-                out[section] = updated
+                    # Fallback for short scalar headings (`title`, `court_heading`, `case_heading`):
+                    # if replacing the title/heading and `new` is provided, replace the scalar value cleanly
+                    if operation == "replace" and section in {"title", "court_heading", "case_heading"} and new.strip():
+                        updated = new.strip()
+                    else:
+                        raise ValueError(f"Target text '{old}' not found in {section}.")
+                out[section] = _cleanup_party_or_sentence_punctuation(updated) if operation == "delete" else updated
             elif operation == "append":
                 out[section] = (current + " " + new).strip()
             else:
                 repl = (new + old) if operation == "insert_before" else (old + new)
-                out[section] = current.replace(old, repl, 1)
+                updated = _flex_replace_once(current, old, repl)
+                out[section] = updated if updated is not None else (current + " " + new).strip()
         else:
             items = out.get(section, [])
             if not isinstance(items, list):
@@ -376,12 +509,32 @@ class DraftEditor:
 
             current = str(items[index]) if items else ""
             if operation in {"replace", "delete"}:
-                # If delete is requested and old_text is empty or matches the whole item, pop the item
                 if operation == "delete" and (not old.strip() or old.strip() == current.strip()):
                     items.pop(index)
                     out[section] = items
                     return sanitize_draft_unicode(out)
                 replacement = "" if operation == "delete" else new
+
+                # Special handling for `parties`: if a party name is being deleted/replaced and appears
+                # across multiple party entries (e.g. both वादीगण and प्रतिवादीगण), update all matching entries.
+                if section == "parties" and old.strip():
+                    matched_any = False
+                    updated_parties: list[str] = []
+                    for i, party_line in enumerate(items):
+                        s_line = str(party_line)
+                        cand = _flex_replace_once(s_line, old, replacement)
+                        if cand is not None and cand != s_line:
+                            matched_any = True
+                            if operation == "delete":
+                                cand = _cleanup_party_or_sentence_punctuation(cand)
+                            if cand.strip():
+                                updated_parties.append(cand.strip())
+                        else:
+                            updated_parties.append(s_line)
+                    if matched_any:
+                        out[section] = updated_parties
+                        return sanitize_draft_unicode(out)
+
                 updated = _flex_replace_once(current, old, replacement)
                 if updated is None:
                     found_idx = next((i for i, it in enumerate(items) if _flex_replace_once(str(it), old, replacement) is not None), None)
@@ -391,6 +544,8 @@ class DraftEditor:
                     edit["index"] = found_idx
                     updated = _flex_replace_once(str(items[found_idx]), old, replacement)
 
+                if operation == "delete":
+                    updated = _cleanup_party_or_sentence_punctuation(updated)
                 if operation == "delete" and not updated.strip():
                     items.pop(index)
                 else:
@@ -408,13 +563,20 @@ class DraftEditor:
         if operation == "batch" and isinstance(edit.get("edits"), list):
             current = deepcopy(draft)
             descriptions = []
+            errors = []
             for sub_edit in edit["edits"]:
-                current = self._apply_single_op(current, sub_edit)
-                descriptions.append(self.describe(sub_edit))
-            return current, "\n".join(descriptions)
+                try:
+                    current = self._apply_single_op(current, sub_edit)
+                    descriptions.append(self.describe(sub_edit))
+                except Exception as exc:
+                    log.warning("Batch sub-edit skipped (%s): %s", sub_edit, exc)
+                    errors.append(str(exc))
+            if not descriptions and errors:
+                raise ValueError("; ".join(errors))
+            return format_draft_numbers(sanitize_draft_unicode(current)), "\n".join(descriptions)
 
         updated = self._apply_single_op(draft, edit)
-        return format_draft_numbers(updated), self.describe(edit)
+        return format_draft_numbers(sanitize_draft_unicode(updated)), self.describe(edit)
 
     @staticmethod
     def describe(edit: dict[str, Any]) -> str:
@@ -454,7 +616,7 @@ class DraftEditor:
         if op == "append":
             return f"➕ {target} के अंत में नया बिंदु जोड़ा जाएगा:\n{new}"
         if op == "delete":
-            return f"🗑️ {target} से यह बिंदु हटाया जाएगा:\n{old}"
+            return f"🗑️ {target} से यह अंश हटाया जाएगा:\n{old}"
         if op == "replace":
             return f"✏️ {target} में बदलाव:\nBefore: {old}\nAfter: {new}"
         if op == "insert_before":
