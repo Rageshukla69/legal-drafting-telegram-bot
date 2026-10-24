@@ -1,9 +1,12 @@
+```python
 """Vakil Drafting AI — Enterprise Hindi Legal Drafting & Judicial Pleading Suite.
 
 Supports multi-style judicial drafting (Standard Judicial Format, Senior Counsel Edition,
-and Vakil AI Pro Hybrid), automatic blueprint matching, multi-document case chaining
-(Vaad Patra, Jawab Dava, Interim Application, Affidavit, Legal Notice), universal GPT-6.0-Luna
-Affidavit engine with canonical structure, bilingual numerical formatting, and voice/text/OCR intake.
+Vakil AI Pro Hybrid, and As-It-Is / Handwritten-to-Legal-Size Conversion Mode), automatic
+blueprint matching, multi-document case chaining (Vaad Patra, Jawab Dava, Interim Application,
+Affidavit, Legal Notice), universal GPT-6.0-Luna Affidavit engine with canonical structure,
+strict Order VI Rule 2 CPC section-free pleadings/Jawab Dava, bilingual numerical formatting,
+and voice/text/OCR/DOCX intake.
 """
 from __future__ import annotations
 import asyncio, json, logging, os, re, tempfile
@@ -102,6 +105,8 @@ async def _safe_edit_text(query, text: str, **kwargs):
 
 def format_public_blueprint_name(raw_name: str, document_type: str = "dava_plaint", style_mode: str = "template_mode") -> str:
     """Convert internal corpus filenames into confidential, professional judicial blueprint identifiers."""
+    if style_mode == "as_is_mode":
+        return "VD-ASIS • Verbatim Legal Size Format (हूबहू / हस्तलिखित लीगल पेपर प्रारूप)"
     prefix = "VD-STD" if style_mode == "template_mode" else ("VD-SR" if style_mode == "dad_style" else "VD-PRO")
     base_label = BLUEPRINT_LABELS.get(document_type, BLUEPRINT_LABELS["other_civil"])
     if document_type == "affidavit":
@@ -133,6 +138,7 @@ def style_selection_menu():
         [InlineKeyboardButton("🏛️ मानक न्यायिक प्रारूप (Standard Judicial)", callback_data="style:template_mode")],
         [InlineKeyboardButton("⚖️ वरिष्ठ अधिवक्ता शैली (Senior Counsel)", callback_data="style:dad_style")],
         [InlineKeyboardButton("✨ Vakil AI Pro — हाइब्रिड संस्करण", callback_data="style:hybrid_mode")],
+        [InlineKeyboardButton("📄 हूबहू / हस्तलिखित → लीगल पेपर (As-It-Is)", callback_data="style:as_is_mode")],
     ])
 
 
@@ -152,6 +158,7 @@ def dashboard():
         for t in TYPE_ORDER[i:i + 2]:
             row.append(InlineKeyboardButton(f"{TYPE_ICONS[t]} {DISPLAY_NAMES[t]}", callback_data=f"type:{t}"))
         rows.append(row)
+    rows.append([InlineKeyboardButton("📄 हूबहू / हस्तलिखित → लीगल पेपर (As-It-Is)", callback_data="style:as_is_mode")])
     rows.append([InlineKeyboardButton("🔄 ड्राफ्टिंग शैली बदलें (Change Style)", callback_data="choose_style")])
     return InlineKeyboardMarkup(rows)
 
@@ -178,10 +185,19 @@ def case_actions(state):
             InlineKeyboardButton("📋 केस विवरण (Review)", callback_data="review"),
         ])
     else:
+        gen_label = (
+            "⚡ हूबहू लीगल ड्राफ्ट तैयार करें (Generate Legal)"
+            if state.style_mode == "as_is_mode"
+            else "⚡ ड्राफ्ट तैयार करें (Generate)"
+        )
         rows.append([
-            InlineKeyboardButton("⚡ ड्राफ्ट तैयार करें (Generate)", callback_data="generate"),
+            InlineKeyboardButton(gen_label, callback_data="generate"),
             InlineKeyboardButton("📋 केस विवरण (Review)", callback_data="review"),
         ])
+        if state.style_mode != "as_is_mode" and (state.facts.get("raw_source_text") or state.facts.get("facts")):
+            rows.append([
+                InlineKeyboardButton("📄 हूबहू लीगल पेपर में बनाएं (As-It-Is Legal)", callback_data="generate_as_is")
+            ])
         rows.append([
             InlineKeyboardButton("🔄 ड्राफ्टिंग शैली बदलें (Switch Style)", callback_data="choose_style")
         ])
@@ -226,7 +242,7 @@ def existing_documents_menu(state):
 _TYPE_KEYWORDS = {
     "evidence_pw_affidavit": (
         "evidence affidavit", "pw affidavit", "साक्ष्य शपथपत्र", "साक्ष्य का शपथपत्र",
-        "बयान चीफ", "पी डब्लू", "डी डब्लू", "pw-1", "dw-1", "pw1",
+        "साक्ष्य हेतु शपथ", "बयान चीफ", "पी डब्लू", "डी डब्लू", "pw-1", "dw-1", "pw1",
     ),
     "affidavit": (
         "affidavit", "शपथपत्र", "शपथ पत्र", "शपथ-पत्र", "हलफनामा", "हल्फ़नामा",
@@ -264,6 +280,19 @@ def infer_document_type(text: str, default: str = "dava_plaint") -> str:
         if any(m in low for m in markers):
             return typ
     return default
+
+
+def detect_as_is_intent(text: str) -> bool:
+    """Detect when a user explicitly asks to reproduce an A4 or handwritten document as-it-is in Legal size format."""
+    low = re.sub(r"\s+", " ", str(text or "").strip().casefold())
+    if not low:
+        return False
+    as_is_markers = (
+        "as it is", "as-it-is", "हूबहू", "ज्यों का त्यों", "सेम टू सेम", "same to same",
+        "लीगल साइज में", "लीगल पेपर में", "legal size", "legal paper",
+        "हस्तलिखित", "हाथ से लिखा", "handwritten", "handwriting", "retype", "verbatim",
+    )
+    return any(m in low for m in as_is_markers)
 
 
 def detect_additional_document_type(text: str):
@@ -307,18 +336,36 @@ def edit_actions():
 
 
 def progress(state):
-    missing = missing_fields(state.facts, state.document_type)
-    total = len(missing_fields({}, state.document_type))
+    missing = missing_fields(state.facts, state.document_type, style_mode=state.style_mode)
+    total = len(missing_fields({}, state.document_type, style_mode="template_mode"))
     done = max(0, total - len(missing))
-    pct = int(done / total * 100) if total else 100
+    pct = 100 if not missing else (int(done / total * 100) if total else 100)
     filled = "█" * max(1, pct // 10)
     empty = "░" * (10 - len(filled))
     return f"{filled}{empty} {pct}%"
 
 
 def questions_text(state):
-    qs = next_questions(state.facts, state.document_type)
     style_label = STYLE_NAMES.get(state.style_mode, state.style_mode)
+    if state.style_mode == "as_is_mode":
+        if state.facts.get("raw_source_text") or state.facts.get("facts"):
+            return (
+                f"🎨 *ड्राफ्टिंग मोड:* {style_label}\n"
+                f"{DIVIDER}\n"
+                "✅ *आपका दस्तावेज़ प्राप्त हो चुका है!*\n"
+                "• यदि कोई और पेज बाकी हो तो उसकी Photo/PDF भेजें,\n"
+                "• या सीधे नीचे *⚡ हूबहू लीगल ड्राफ्ट तैयार करें (Generate Legal)* बटन दबाएँ।"
+            )
+        return (
+            f"🎨 *ड्राफ्टिंग मोड:* {style_label}\n"
+            f"{DIVIDER}\n"
+            "📥 *कृपया अपने A4 कागज़ या हस्तलिखित (Handwritten) दस्तावेज़ को भेजें:*\n"
+            "• अपने छपे हुए A4 ड्राफ्ट या हाथ से लिखे पन्नों की **Photo 📸 / PDF 📄 / Word (.docx)** भेजें,\n"
+            "• या **Text ✍️ / Voice Note 🎙️** भेजें।\n\n"
+            "_Bot आपके दस्तावेज़ की मूल भाषा व क्रम को सुरक्षित रखते हुए उसे उचित विधिक ढांचे एवं कोर्ट-मानक **Legal Size Paper (DOCX + PDF)** में तैयार कर देगा, जिसके बाद आप उसमें कोई भी संशोधन कर सकेंगे।_"
+        )
+
+    qs = next_questions(state.facts, state.document_type, style_mode=state.style_mode)
     if not qs:
         return (
             f"🎨 *ड्राफ्टिंग शैली:* {style_label}\n"
@@ -356,7 +403,7 @@ def summary_text(state):
         return "\n".join(f"  • {x}" for x in v) if isinstance(v, list) else str(v)
 
     extra = ""
-    if state.selected_template_name or state.document_type == "affidavit":
+    if state.selected_template_name or state.document_type == "affidavit" or state.style_mode == "as_is_mode":
         bp_label = format_public_blueprint_name(state.selected_template_name, state.document_type, state.style_mode)
         extra += f"📘 *न्यायिक प्रारूप:* `{bp_label}`\n"
     if facts.get("advocate_name") or facts.get("court_complex"):
@@ -407,7 +454,9 @@ STYLE_PROMPT_TEXT = (
     "⚖️ *2. वरिष्ठ अधिवक्ता शैली (Senior Counsel Edition)*\n"
     "वरिष्ठ अधिवक्ताओं की पारंपरिक एवं प्रभावशाली अदालती भाषा, मजबूत विधिक शब्दावली तथा विस्तृत पैराग्राफ संरचना में ड्राफ्ट तैयार करता है।\n\n"
     "✨ *3. Vakil AI Pro — हाइब्रिड संस्करण (Recommended)*\n"
-    "प्रमाणित न्यायिक ढांचे और वरिष्ठ अधिवक्ता की प्रभावशाली कानूनी भाषा का सर्वोत्तम संयोजन।\n"
+    "प्रमाणित न्यायिक ढांचे और वरिष्ठ अधिवक्ता की प्रभावशाली कानूनी भाषा का सर्वोत्तम संयोजन।\n\n"
+    "📄 *4. हूबहू / हस्तलिखित → लीगल पेपर (As-It-Is / Handwritten)*\n"
+    "आपके पास पहले से मौजूद A4 कागज़ या हाथ से लिखे (Handwritten) दावा, जवाब दावा, शपथ-पत्र, कानूनी नोटिस आदि को बिना किसी मनमाने बदलाव के **ज्यों का त्यों (As-It-Is) उचित विधिक ढांचे एवं कोर्ट-मानक Legal Size Paper (DOCX + PDF)** में तैयार करता है।\n"
     f"{DIVIDER}\n"
     "👇 *नीचे दिए गए बटन से अपनी ड्राफ्टिंग शैली चुनें:*"
 )
@@ -468,15 +517,16 @@ async def corpus_info(update, context):
     msg = (
         "🏛️ *VAKIL DRAFTING AI — SYSTEM ARCHITECTURE*\n"
         f"{DIVIDER}\n"
-        "⚡ *Drafting Core:* `Vakil Neural Legal Engine v4.2`\n"
-        "🛡️ *Statutory Guard:* `CPC • Specific Relief • UP Revenue Code`\n"
+        "⚡ *Drafting Core:* `Vakil Neural Legal Engine v4.3`\n"
+        "🛡️ *Pleading Guard:* `Order VI Rule 2 CPC (Pure Factual Pleadings)`\n"
         "🔢 *Bilingual Formatter:* `Active (अंक + हिंदी शब्द)`\n"
         f"📚 *Indexed Judicial Precedents:* `{max(total_docs, 800)}+ Verified Formats`\n"
         f"{DIVIDER}\n"
-        "🎨 *उपलब्ध ड्राफ्टिंग इंजन मोड्स (/newcase या /style):*\n"
+        "🎨 *उपलब्ध ड्राफ्टिंग इंजन मोड्स (/newcase, /style या /asis):*\n"
         "• *🏛️ मानक न्यायिक प्रारूप:* प्रमाणित सिविल एवं राजस्व न्यायालय ब्लूप्रिंट।\n"
         "• *⚖️ वरिष्ठ अधिवक्ता शैली:* पारंपरिक एवं प्रभावशाली सीनियर काउंसिल कोर्ट भाषा।\n"
-        "• *✨ Vakil AI Pro हाइब्रिड:* न्यायिक ढांचे और वरिष्ठ अधिवक्ता शब्दावली का संयुक्त संस्करण।"
+        "• *✨ Vakil AI Pro हाइब्रिड:* न्यायिक ढांचे और वरिष्ठ अधिवक्ता शब्दावली का संयुक्त संस्करण।\n"
+        "• *📄 हूबहू / हस्तलिखित → लीगल पेपर (/asis):* A4 या हाथ से लिखे दस्तावेज़ को ज्यों का त्यों Legal Size DOCX व PDF में बदलें।"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -491,7 +541,8 @@ async def help_command(update, context):
         f"{DIVIDER}\n"
         "📌 *प्रमुख कमांड्स (Quick Commands):*\n"
         "• `/newcase` — नया केस या विधिक ड्राफ्ट शुरू करें\n"
-        "• `/style` — ड्राफ्टिंग इंजन शैली (Standard / Senior Counsel / Pro Hybrid) बदलें\n"
+        "• `/asis` — A4 कागज़ या हस्तलिखित (Handwritten) ड्राफ्ट को हूबहू Legal Size पेपर में बनाएं\n"
+        "• `/style` — ड्राफ्टिंग इंजन शैली (Standard / Senior Counsel / Pro Hybrid / As-It-Is) बदलें\n"
         "• `/adddocument` — उसी केस के तथ्यों से जवाब दावा, शपथपत्र या प्रार्थना पत्र बनाएं\n"
         "• `/edit` — तैयार ड्राफ्ट में कोई भी धारा या बिंदु जोड़ें, हटाएं या संशोधित करें\n"
         "• `/download` — वर्तमान तैयार/संशोधित ड्राफ्ट की DOCX व PDF फ़ाइलें प्राप्त करें\n"
@@ -500,11 +551,41 @@ async def help_command(update, context):
         "• `/cancel` — वर्तमान सेशन समाप्त करें\n"
         f"{DIVIDER}\n"
         "🚀 *ड्राफ्ट तैयार करने की प्रक्रिया (3 आसान चरण):*\n"
-        "1️⃣ `/newcase` दबाकर अपनी पसंदीदा **Drafting Style** और **Document Type** चुनें।\n"
-        "2️⃣ अपने केस या शपथ-पत्र के तथ्य **Voice Note 🎙️ बोलकर**, **Text ✍️ लिखकर**, या **दस्तावेज़ की Photo/PDF 📸** भेजकर बताएं।\n"
-        "3️⃣ **⚡ ड्राफ्ट तैयार करें** दबाते ही कोर्ट/प्राधिकारी में दाखिल करने योग्य **Editable DOCX** एवं **Court-Ready PDF** प्राप्त करें!"
+        "1️⃣ `/newcase` (या हूबहू/हस्तलिखित मोड हेतु `/asis`) दबाकर अपनी पसंदीदा शैली और दस्तावेज़ का प्रकार चुनें।\n"
+        "2️⃣ अपने केस या दस्तावेज़ का विवरण **Voice Note 🎙️ बोलकर**, **Text ✍️ लिखकर**, या **दस्तावेज़ की Photo/PDF/DOCX 📸** भेजकर बताएं।\n"
+        "3️⃣ **⚡ ड्राफ्ट तैयार करें** दबाते ही कोर्ट में दाखिल करने योग्य **Legal Size Editable DOCX** एवं **Court-Ready PDF** प्राप्त करें!"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def asis_command(update, context):
+    """Quick command `/asis` to activate As-It-Is / Handwritten to Legal Paper mode."""
+    if not update.message or not update.effective_user:
+        return
+    if not await require_access(update):
+        return
+    uid = update.effective_user.id
+    existing = get_state(uid)
+    doc_type = existing.document_type if existing else "dava_plaint"
+    state = CaseState(
+        case_id_for(uid),
+        document_type=doc_type,
+        style_mode="as_is_mode",
+        style_selected=True,
+        type_selected=bool(existing and existing.type_selected),
+    )
+    store.save(uid, state)
+    await update.message.reply_text(
+        "🏛️ *VAKIL DRAFTING AI — AS-IT-IS & HANDWRITTEN LEGAL STUDIO*\n"
+        f"{DIVIDER}\n"
+        "✅ **📄 हूबहू / हस्तलिखित → लीगल पेपर मोड सक्रिय है!**\n\n"
+        "• यदि आपके पास **A4 कागज़ पर छपा हुआ** कोई दावा, जवाब दावा, शपथ-पत्र, कानूनी नोटिस या प्रार्थना-पत्र है, या\n"
+        "• यदि आपने **हाथ से कोई ड्राफ्ट (Handwritten Draft)** लिखा है जिसे आप उचित विधिक ढांचे (Proper Legal Structure) में ढालना चाहते हैं,\n\n"
+        "तो नीचे से दस्तावेज़ का प्रकार चुनें या सीधे उसकी **Photo 📸, PDF 📄, Word (.docx), Text ✍️, या Voice Note 🎙️** भेजें। "
+        "Bot उसे **Legal Size Paper (`8.5\" × 14\"`)** में तैयार कर देगा जिसके बाद आप उसमें कोई भी छोटा-बड़ा संशोधन (Edit) कर सकेंगे:",
+        parse_mode="Markdown",
+        reply_markup=dashboard(),
+    )
 
 
 async def trial_command(update, context):
@@ -548,7 +629,7 @@ async def trial_command(update, context):
                 f"{DIVIDER}\n"
                 f"🎁 *आपका Complimentary Trial Pass ({limit} Legal Documents) सक्रिय कर दिया गया है!*\n\n"
                 f"• *उपलब्ध कोटा:* `{limit}` ड्राफ्ट (वाद-पत्र, जवाब दावा, प्रार्थना-पत्र, शपथपत्र आदि)\n"
-                "• *ड्राफ्टिंग मोड्स:* Standard Judicial • Senior Counsel • Vakil AI Pro Hybrid\n"
+                "• *ड्राफ्टिंग मोड्स:* Standard Judicial • Senior Counsel • Vakil AI Pro Hybrid • As-It-Is Legal\n"
                 "• *निःशुल्क संशोधन:* तैयार ड्राफ्ट में बिंदु जोड़ना या सुधार करना पूरी तरह निःशुल्क है।\n"
                 f"{DIVIDER}\n"
                 "👉 नया केस शुरू करने के लिए अभी `/start` या `/newcase` दबाएँ।"
@@ -614,7 +695,7 @@ async def paid_command(update, context):
                 "💎 *आपकी Vakil AI Pro Membership सफलतापूर्वक सक्रिय कर दी गई है!*\n\n"
                 f"• *सदस्यता स्तर:* 💎 Vakil AI Pro Member\n"
                 f"• *ड्राफ्ट कोटा:* {user_limit_str}\n"
-                "• *उपलब्ध सुविधाएं:* Voice Dictation • Document OCR • Multi-Document Case Suite • DOCX & Court PDF\n"
+                "• *उपलब्ध सुविधाएं:* Voice Dictation • Document OCR • As-It-Is/Handwritten Legal Mode • Multi-Document Suite • DOCX & Court PDF\n"
                 f"{DIVIDER}\n"
                 "👉 ड्राफ्टिंग शुरू करने के लिए `/start` या `/newcase` दबाएँ तथा कोटा देखने के लिए `/myplan` भेजें।"
             ),
@@ -890,25 +971,30 @@ async def intake_text(update, context, text=None, *, suppress_questions=False, a
     uid = update.effective_user.id
     text = decode_krutidev_hybrid((text or update.message.text or "").strip())
     state = get_state(uid)
+    auto_as_is = detect_as_is_intent(text)
     if not state:
         inferred_type = infer_document_type(text, default="dava_plaint")
         state = CaseState(
             case_id_for(uid),
             document_type=inferred_type,
-            style_mode="template_mode",
-            style_selected=False,
+            style_mode="as_is_mode" if auto_as_is else "template_mode",
+            style_selected=auto_as_is,
             type_selected=False,
         )
         store.save(uid, state)
-    elif not state.facts and not getattr(state, "type_selected", False):
-        # Only auto-infer document_type when the user has NOT explicitly selected a document type button!
-        inferred_type = infer_document_type(text, default=state.document_type)
-        state.document_type = inferred_type
+    else:
+        if auto_as_is:
+            state.style_mode = "as_is_mode"
+            state.style_selected = True
+        if not state.facts and not getattr(state, "type_selected", False):
+            inferred_type = infer_document_type(text, default=state.document_type)
+            state.document_type = inferred_type
 
     state.record("user", text)
     if announce:
+        mode_note = " (📄 हूबहू / हस्तलिखित लीगल मोड)" if state.style_mode == "as_is_mode" else ""
         await update.message.reply_text(
-            f"⚙️ *{DISPLAY_NAMES[state.document_type]}* — आपके विवरण का विधिक विश्लेषण किया जा रहा है…",
+            f"⚙️ *{DISPLAY_NAMES[state.document_type]}*{mode_note} — आपके विवरण का विधिक विश्लेषण किया जा रहा है…",
             parse_mode="Markdown",
         )
     try:
@@ -916,8 +1002,12 @@ async def intake_text(update, context, text=None, *, suppress_questions=False, a
         store.save(uid, state)
     except Exception:
         log.exception("Intake failed")
-        await update.message.reply_text("❌ जानकारी प्रोसेस नहीं हो सकी। कृपया दोबारा भेजें।")
-        return
+        if state.style_mode == "as_is_mode":
+            store.save(uid, state)
+            result = {"status": "ready", "facts": state.facts}
+        else:
+            await update.message.reply_text("❌ जानकारी प्रोसेस नहीं हो सकी। कृपया दोबारा भेजें।")
+            return
     if suppress_questions:
         return result
 
@@ -963,7 +1053,7 @@ async def start_additional_document(update, context, document_type: str):
         store.save(uid, state)
     except Exception:
         log.exception("additional document intake reconciliation failed")
-    missing = missing_fields(state.facts, document_type)
+    missing = missing_fields(state.facts, document_type, style_mode=state.style_mode)
     if missing:
         msg = (
             f"📑 *नया सह-दस्तावेज़: {DISPLAY_NAMES[document_type]}*\n"
@@ -1056,23 +1146,28 @@ async def voice_message(update, context):
 
 
 async def image_document_message(update, context):
-    """OCR a Telegram photo/image/PDF and feed extracted text + caption into semantic intake or edit mode."""
+    """OCR a Telegram photo/image/PDF/DOCX/TXT and feed extracted text + caption into semantic intake, As-It-Is mode, or edit mode."""
     if not update.message or not update.effective_user:
         return
     if not await require_access(update):
         return
     uid = update.effective_user.id
     caption = (update.message.caption or "").strip()
+    auto_as_is = detect_as_is_intent(caption)
     state = get_state(uid)
     if not state:
         inferred = infer_document_type(caption, default="dava_plaint")
         state = CaseState(
             case_id_for(uid),
             document_type=inferred,
-            style_mode="template_mode",
-            style_selected=False,
+            style_mode="as_is_mode" if auto_as_is else "template_mode",
+            style_selected=auto_as_is,
             type_selected=False,
         )
+        store.save(uid, state)
+    elif auto_as_is:
+        state.style_mode = "as_is_mode"
+        state.style_selected = True
         store.save(uid, state)
 
     file_bytes = None
@@ -1093,12 +1188,12 @@ async def image_document_message(update, context):
             filename = doc.file_name or filename
             supported = (
                 content_type.startswith("image/")
-                or content_type == "application/pdf"
-                or filename.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".heif", ".pdf"))
+                or content_type in {"application/pdf", "text/plain", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+                or filename.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".heif", ".pdf", ".docx", ".txt"))
             )
             if not supported:
                 await update.message.reply_text(
-                    "⚠️ केवल Image फ़ाइलें (JPG/PNG/BMP/TIFF/HEIF) और PDF दस्तावेज़ समर्थित हैं।"
+                    "⚠️ केवल Image फ़ाइलें (JPG/PNG/TIFF/HEIF), PDF दस्तावेज़, और Word (.docx) / Text (.txt) फ़ाइलें समर्थित हैं।"
                 )
                 return
             tg_file = await context.bot.get_file(doc.file_id)
@@ -1109,6 +1204,10 @@ async def image_document_message(update, context):
                 lower = filename.lower()
                 if lower.endswith(".pdf"):
                     content_type = "application/pdf"
+                elif lower.endswith(".docx"):
+                    content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                elif lower.endswith(".txt"):
+                    content_type = "text/plain"
                 elif lower.endswith(".png"):
                     content_type = "image/png"
                 elif lower.endswith((".jpg", ".jpeg")):
@@ -1120,10 +1219,10 @@ async def image_document_message(update, context):
         else:
             return
 
-        await update.message.reply_text("📸 *Judicial OCR Scanner सक्रिय है…* दस्तावेज़ से पाठ और तथ्य निकाले जा रहे हैं…", parse_mode="Markdown")
+        await update.message.reply_text("📸 *Judicial OCR & Document Scanner सक्रिय है…* दस्तावेज़ से पाठ और संरचना निकाली जा रही है…", parse_mode="Markdown")
         extracted = await asyncio.to_thread(analyze_document_bytes, file_bytes, content_type, filename)
         text = extracted.text.strip()
-        if caption:
+        if caption and not detect_as_is_intent(caption):
             text = f"{caption}\n\n{text}".strip()
         if not text:
             await update.message.reply_text("⚠️ दस्तावेज़ से पठनीय पाठ नहीं मिला। कृपया साफ़ फोटो या PDF भेजें।")
@@ -1135,18 +1234,23 @@ async def image_document_message(update, context):
             await process_edit_instruction(update, context, caption or text)
             return
 
+        if not state.type_selected:
+            inferred_doc_type = infer_document_type(f"{caption}\n{text[:1500]}", default=state.document_type)
+            state.document_type = inferred_doc_type
+            store.save(uid, state)
+
         page_count = extracted.page_count
         chunk_size = max(20000, int(os.getenv("IMAGE_INTAKE_CHUNK_CHARS", "60000")))
         chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
         if len(chunks) == 1:
             await update.message.reply_text(
-                f"✅ *OCR स्कैन पूर्ण* — `{page_count}` पृष्ठ (`{len(text)}` अक्षर)।\n"
-                "🧠 दस्तावेज़ से विधिक तथ्य विश्लेषित किए जा रहे हैं…",
+                f"✅ *स्कैन पूर्ण* — `{page_count}` पृष्ठ (`{len(text)}` अक्षर)।\n"
+                "🧠 दस्तावेज़ से विधिक तथ्य एवं संरचना संकलित की जा रही है…",
                 parse_mode="Markdown",
             )
         else:
             await update.message.reply_text(
-                f"✅ *OCR स्कैन पूर्ण* — `{page_count}` पृष्ठ (`{len(text)}` अक्षर)।\n"
+                f"✅ *स्कैन पूर्ण* — `{page_count}` पृष्ठ (`{len(text)}` अक्षर)।\n"
                 f"📚 विस्तृत दस्तावेज़ को `{len(chunks)}` भागों में विश्लेषित किया जा रहा है…",
                 parse_mode="Markdown",
             )
@@ -1156,15 +1260,25 @@ async def image_document_message(update, context):
             await intake_text(update, context, chunk, suppress_questions=True, announce=False)
 
         state = get_state(uid)
-        if state and not state.style_selected:
+        if state and state.style_mode == "as_is_mode":
+            await _safe_reply_text(
+                update.message,
+                f"✅ *दस्तावेज़ सफलतापूर्वक पढ़ लिया गया है!*\n\n{summary_text(state)}\n"
+                "💡 *अगला कदम:*\n"
+                "• यदि इस दस्तावेज़ का कोई अगला पन्ना (Page 2, Page 3...) बाकी है, तो उसकी Photo अभी भेजें।\n"
+                "• यदि सभी पन्ने आ गए हैं, तो नीचे **⚡ हूबहू लीगल ड्राफ्ट तैयार करें (Generate Legal)** दबाएं!",
+                parse_mode="Markdown",
+                reply_markup=case_actions(state),
+            )
+        elif state and not state.style_selected:
             await _safe_reply_text(
                 update.message,
                 f"✅ *दस्तावेज़ से सभी प्रमुख तथ्य संकलित कर लिए गए हैं!*\n\n{summary_text(state)}\n"
-                "👇 *कृपया चुनें कि आप किस ड्राफ्टिंग शैली में दस्तावेज़ तैयार करना चाहते हैं:*",
+                "👇 *कृपया चुनें कि आप इसे किस रूप में तैयार करना चाहते हैं (यदि हूबहू / हस्तलिखित लीगल पेपर में चाहिए तो चौथा विकल्प चुनें):*",
                 parse_mode="Markdown",
                 reply_markup=style_selection_menu(),
             )
-        elif state and not missing_fields(state.facts, state.document_type):
+        elif state and not missing_fields(state.facts, state.document_type, style_mode=state.style_mode):
             await _safe_reply_text(
                 update.message,
                 f"✅ *दस्तावेज़ से सभी आवश्यक तथ्य संकलित हो गए हैं।*\n\n{summary_text(state)}",
@@ -1174,7 +1288,7 @@ async def image_document_message(update, context):
         else:
             await _safe_reply_text(
                 update.message,
-                f"📋 *OCR विश्लेषण पूर्ण।* कृपया शेष आवश्यक विवरण प्रदान करें:\n\n{questions_text(state)}\n\n📊 *पूर्णता:* `{progress(state)}`",
+                f"📋 *OCR विश्लेषण पूर्ण।* कृपया शेष आवश्यक विवरण प्रदान करें (या सीधे हूबहू लीगल पेपर में बनाने के लिए **📄 हूबहू लीगल पेपर में बनाएं** दबाएं):\n\n{questions_text(state)}\n\n📊 *पूर्णता:* `{progress(state)}`",
                 parse_mode="Markdown",
                 reply_markup=case_actions(state),
             )
@@ -1196,6 +1310,11 @@ async def generate_for(update, uid, state, edit=False):
             await target.reply_text(quota_msg, parse_mode="Markdown")
         return
     style_label = STYLE_NAMES.get(state.style_mode, state.style_mode)
+    step2_text = (
+        "☑️ `2/4` मूल/हस्तलिखित दस्तावेज़ को उचित विधिक ढांचे में व्यवस्थित करना"
+        if state.style_mode == "as_is_mode"
+        else "☑️ `2/4` उपयुक्त न्यायिक प्रारूप (Blueprint) का चयन"
+    )
     status_card = (
         f"🏛️ *VAKIL DRAFTING AI — DRAFTING ENGINE*\n"
         f"{DIVIDER}\n"
@@ -1204,9 +1323,9 @@ async def generate_for(update, uid, state, edit=False):
         f"{DIVIDER}\n"
         "⚙️ *विधिक ड्राफ्ट तैयार किया जा रहा है…*\n\n"
         "☑️ `1/4` पक्षकार एवं केस तथ्यों का सत्यापन\n"
-        "☑️ `2/4` उपयुक्त न्यायिक प्रारूप (Blueprint) का चयन\n"
-        "🔄 `3/4` विधिक धाराओं एवं द्विभाषी अंकों (`अंक + शब्द`) का समायोजन\n"
-        "⏳ `4/4` कोर्ट-मानक DOCX एवं PDF का निर्माण"
+        f"{step2_text}\n"
+        "🔄 `3/4` द्विभाषी अंकों (`अंक + शब्द`) एवं शुद्ध कोर्ट भाषा का समायोजन\n"
+        "⏳ `4/4` कोर्ट-मानक Legal Size DOCX एवं PDF का निर्माण"
     )
     if edit:
         await _safe_edit_text(update.callback_query, status_card, parse_mode="Markdown")
@@ -1219,9 +1338,9 @@ async def generate_for(update, uid, state, edit=False):
             label = DISPLAY_NAMES[state.document_type].split(" /")[0].replace(" ", "_")
             docx, pdf = await asyncio.to_thread(render_both, draft, tmp, f"{label}_{uid}", os.getenv("LEGAL_PAPER", "legal"))
             with open(docx, "rb") as f:
-                await target.reply_document(f, filename=docx.name, caption=f"📄 Editable Word (DOCX) — {DISPLAY_NAMES[state.document_type]}")
+                await target.reply_document(f, filename=docx.name, caption=f"📄 Editable Legal Word (DOCX) — {DISPLAY_NAMES[state.document_type]}")
             with open(pdf, "rb") as f:
-                await target.reply_document(f, filename=pdf.name, caption=f"📑 Court-Ready PDF — {DISPLAY_NAMES[state.document_type]}")
+                await target.reply_document(f, filename=pdf.name, caption=f"📑 Court-Ready Legal PDF — {DISPLAY_NAMES[state.document_type]}")
         store.save(uid, state)
         plan_status = access.consume_quota(uid)
         if plan_status.get("quota_limit", -1) > 0:
@@ -1233,7 +1352,7 @@ async def generate_for(update, uid, state, edit=False):
             target,
             f"🏛️ *VAKIL DRAFTING AI — DRAFT COMPLETED*\n"
             f"{DIVIDER}\n"
-            f"✅ *{DISPLAY_NAMES[state.document_type]} सफलतापूर्वक तैयार है!*\n"
+            f"✅ *{DISPLAY_NAMES[state.document_type]} (Legal Size) सफलतापूर्वक तैयार है!*\n"
             f"🎨 *शैली:* {style_label}\n"
             f"📘 *प्रारूप:* `{bp_label}`\n"
             f"{quota_info}"
@@ -1242,7 +1361,7 @@ async def generate_for(update, uid, state, edit=False):
             "• नया तथ्य या पैराग्राफ जोड़ने हेतु *➕ बिंदु जोड़ें* दबाएं\n"
             "• कोई पैराग्राफ हटाने हेतु *🗑️ बिंदु हटाएं* दबाएं\n"
             "• इसी केस का शपथपत्र, जवाब दावा या प्रार्थना-पत्र बनाने हेतु *📑 अगला दस्तावेज़ बनाएं* दबाएं\n"
-            "• या सीधे बोलकर (Voice Note 🎙️) / लिखकर कोई भी संशोधन बताएं!",
+            "• या सीधे बोलकर (Voice Note 🎙️) / लिखकर कोई भी छोटा-बड़ा संशोधन बताएं!",
             parse_mode="Markdown",
             reply_markup=case_actions(state),
         )
@@ -1438,13 +1557,27 @@ async def button(update, context):
         style_label = STYLE_NAMES.get(chosen_style, chosen_style)
         plan_info = access.get_plan_status(uid)
 
-        if state.facts and not missing_fields(state.facts, state.document_type):
+        if (state.facts or state.facts.get("raw_source_text")) and not missing_fields(state.facts, state.document_type, style_mode=chosen_style):
             await _safe_edit_text(
                 q,
                 f"✅ *चयनित ड्राफ्टिंग शैली:* {style_label}\n\n{summary_text(state)}\n"
                 "👉 अब आप सीधे *⚡ ड्राफ्ट तैयार करें (Generate)* दबा सकते हैं:",
                 parse_mode="Markdown",
                 reply_markup=case_actions(state),
+            )
+            return
+
+        if chosen_style == "as_is_mode":
+            await _safe_edit_text(
+                q,
+                "🏛️ *VAKIL DRAFTING AI — AS-IT-IS & HANDWRITTEN LEGAL STUDIO*\n"
+                f"{DIVIDER}\n"
+                f"✅ *चयनित मोड:* {style_label}\n"
+                f"🏷️ *सदस्यता:* {plan_info['plan_label']}\n"
+                f"{DIVIDER}\n"
+                "👇 कृपया नीचे से **दस्तावेज़ का प्रकार (Document Type)** चुनें, या सीधे अपने **A4 कागज़ / हस्तलिखित ड्राफ्ट (Handwritten Draft)** की **Photo 📸, PDF 📄, Word (.docx), Text ✍️, या Voice Note 🎙️** भेजें:",
+                parse_mode="Markdown",
+                reply_markup=dashboard(),
             )
             return
 
@@ -1477,10 +1610,21 @@ async def button(update, context):
     if q.data.startswith("regen_style:"):
         chosen_style = q.data.split(":", 1)[1]
         state = store.get(cid)
-        if not state or not state.facts:
+        if not state or not (state.facts or state.facts.get("raw_source_text")):
             await q.edit_message_text("कृपया पहले केस का विवरण भेजें।", reply_markup=style_selection_menu())
             return
         state.style_mode = chosen_style
+        state.style_selected = True
+        store.save(uid, state)
+        await generate_for(update, uid, state, edit=True)
+        return
+
+    if q.data == "generate_as_is":
+        state = store.get(cid)
+        if not state or not (state.facts or state.facts.get("raw_source_text")):
+            await q.edit_message_text("कृपया पहले दस्तावेज़ की Photo, PDF या Text भेजें।", reply_markup=style_selection_menu())
+            return
+        state.style_mode = "as_is_mode"
         state.style_selected = True
         store.save(uid, state)
         await generate_for(update, uid, state, edit=True)
@@ -1604,13 +1748,16 @@ async def button(update, context):
         if state.document_type == t and state.draft:
             await q.edit_message_text("यह दस्तावेज़ अभी सक्रिय है। कृपया कोई दूसरा प्रकार चुनें।", reply_markup=document_menu(state))
             return
+        # When creating a follow-up companion document (like Jawab Dava from a Plaint), switch from as_is_mode to template_mode if needed
+        if state.style_mode == "as_is_mode":
+            state.style_mode = "template_mode"
         state.begin_new_document(t)
         try:
             await asyncio.to_thread(orchestrator.refresh_intake, state)
             store.save(uid, state)
         except Exception:
             log.exception("additional document callback reconciliation failed")
-        if missing_fields(state.facts, t):
+        if missing_fields(state.facts, t, style_mode=state.style_mode):
             await _safe_edit_text(q, f"📑 *{DISPLAY_NAMES[t]}*\n\n{questions_text(state)}", parse_mode="Markdown", reply_markup=case_actions(state))
             return
         await _safe_edit_text(q, f"⚙️ *{DISPLAY_NAMES[t]}* आपके केस के तथ्यों से तैयार किया जा रहा है…", parse_mode="Markdown")
@@ -1639,8 +1786,9 @@ async def button(update, context):
             f"{questions_text(state)}",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 ड्राफ्टिंग शैली बदलें (Change Style)", callback_data="choose_style")],
-                [InlineKeyboardButton("❌ सेशन निरस्त करें (Cancel)", callback_data="cancel")],
+                [InlineKeyboardButton("📄 हूबहू / हस्तलिखित मोड (As-It-Is Mode)", callback_data="style:as_is_mode")] if chosen_style != "as_is_mode" else [InlineKeyboardButton("🔄 ड्राफ्टिंग शैली बदलें (Change Style)", callback_data="choose_style")],
+                [InlineKeyboardButton("🔄 ड्राफ्टिंग शैली बदलें (Change Style)", callback_data="choose_style")] if chosen_style != "as_is_mode" else [InlineKeyboardButton("❌ सेशन निरस्त करें (Cancel)", callback_data="cancel")],
+                *([[InlineKeyboardButton("❌ सेशन निरस्त करें (Cancel)", callback_data="cancel")]] if chosen_style != "as_is_mode" else []),
             ]),
         )
         return
@@ -1690,13 +1838,14 @@ async def button(update, context):
         await q.edit_message_text("↩️ प्रस्तावित संशोधन निरस्त कर दिया गया है। आपका मूल ड्राफ्ट सुरक्षित है।", reply_markup=case_actions(state))
         return
     if q.data == "generate":
-        try:
-            await _safe_edit_text(q, "⚙️ *तथ्यों का सत्यापन एवं उपयुक्त न्यायिक प्रारूप का चयन किया जा रहा है…*", parse_mode="Markdown")
-            await asyncio.to_thread(orchestrator.refresh_intake, state)
-            store.save(uid, state)
-        except Exception:
-            log.exception("pre-generation intake reconciliation failed")
-        if missing_fields(state.facts, state.document_type):
+        if state.style_mode != "as_is_mode":
+            try:
+                await _safe_edit_text(q, "⚙️ *तथ्यों का सत्यापन एवं उपयुक्त न्यायिक प्रारूप का चयन किया जा रहा है…*", parse_mode="Markdown")
+                await asyncio.to_thread(orchestrator.refresh_intake, state)
+                store.save(uid, state)
+            except Exception:
+                log.exception("pre-generation intake reconciliation failed")
+        if missing_fields(state.facts, state.document_type, style_mode=state.style_mode):
             await _safe_edit_text(q, questions_text(state), parse_mode="Markdown", reply_markup=case_actions(state))
             return
         await generate_for(update, uid, state, edit=True)
@@ -1709,6 +1858,8 @@ def build_application():
     app = Application.builder().token(token).concurrent_updates(True).pool_timeout(30.0).connection_pool_size(32).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("newcase", newcase))
+    app.add_handler(CommandHandler("asis", asis_command))
+    app.add_handler(CommandHandler("retype", asis_command))
     app.add_handler(CommandHandler("style", style_command))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("summary", summary))
@@ -1741,3 +1892,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
