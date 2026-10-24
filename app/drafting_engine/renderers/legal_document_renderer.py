@@ -706,14 +706,16 @@ def _signature_lines(draft: dict[str, Any]) -> list[str]:
     lines = [str(x).strip() for x in draft.get("signature_block", []) or [] if str(x).strip()]
     if lines:
         return lines
+    if "शपथ" in _title_text(draft):
+        return ["हस्ताक्षर शपथग्रहीता / शपथकर्ता"]
     plaintiff = ""
     for party in draft.get("parties", []) or []:
         if "वादी" in str(party):
             plaintiff = str(party).strip()
             break
     if plaintiff:
-        return [f"वादी\n{plaintiff}", "द्वारा अधिवक्ता-", "वी०डी० शुक्ला एडवोकेट", "बिधूना, औरैया"]
-    return ["वादी", "द्वारा अधिवक्ता-", "वी०डी० शुक्ला एडवोकेट", "बिधूना, औरैया"]
+        return [f"वादी\n{plaintiff}", "द्वारा अधिवक्ता"]
+    return ["वादी", "द्वारा अधिवक्ता"]
 
 
 def _prepare_draft(draft: dict[str, Any]) -> dict[str, Any]:
@@ -724,6 +726,17 @@ def _prepare_draft(draft: dict[str, Any]) -> dict[str, Any]:
 def _is_right_role_line(line: str) -> bool:
     s = line.strip()
     return bool(re.match(r"^(?:[.\-–—]+\s*)?(?:प्रतिवादीगण|प्रतिवादिनीगण|प्रतिवादिनी|प्रतिवादी|विपक्षीगण|विपक्षी|वादीगण|वादिनी|वादी|प्रार्थीगण|प्रार्थिनी|प्रार्थी)$", s))
+
+
+def _is_pleading_section_heading(text: str) -> bool:
+    s = re.sub(r"^\s*\d+\s*(?:\([^)]*\))?\s*[:.\-–—]+\s*", "", str(text or "").strip())
+    return bool(
+        re.match(
+            r"^(?:अतिरिक्त\s*कथन(?:\s*एवं\s*विशेष\s*वैधानिक\s*आपत्तियाँ|\s*एवं\s*विशेष\s*वैधानिक\s*आपत्तियां|\s*\(\s*उजरात\s*मजीद\s*\))?|"
+            r"विशेष\s*(?:वैधानिक\s*)?(?:कथन|आपत्तियाँ|आपत्तियां))(?:\s*\(\s*उजरात\s*मजीद\s*\))?[\s:\-–—]*$",
+            s,
+        )
+    )
 
 
 def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "legal"):
@@ -773,8 +786,14 @@ def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "le
                 _add_docx_para(doc, op_line.strip(), align=WD_ALIGN_PARAGRAPH.LEFT, size=14, first_indent=False, after=6)
 
     _docx_page_break_if_needed(doc, draft, "pleadings")
-    for idx, paragraph in enumerate(_ordered_pleading_items(draft), 1):
-        _add_docx_para(doc, numbered(paragraph, idx), align=WD_ALIGN_PARAGRAPH.JUSTIFY, size=14, first_indent=True, after=12)
+    para_num = 0
+    for paragraph in _ordered_pleading_items(draft):
+        if _is_pleading_section_heading(paragraph):
+            heading_txt = re.sub(r"^\s*\d+\s*(?:\([^)]*\))?\s*[:.\-–—]+\s*", "", paragraph).strip(" :-–—")
+            _add_docx_para(doc, heading_txt, align=WD_ALIGN_PARAGRAPH.CENTER, size=15, bold=True, underline=True, first_indent=False, after=10)
+        else:
+            para_num += 1
+            _add_docx_para(doc, numbered(paragraph, para_num), align=WD_ALIGN_PARAGRAPH.JUSTIFY, size=14, first_indent=True, after=12)
 
     prayer = [str(x).strip() for x in draft.get("prayer", []) or [] if str(x).strip()]
     if prayer:
@@ -799,6 +818,9 @@ def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "le
             ver_lines = ver_lines[1:]
         for line in ver_lines:
             _add_docx_para(doc, line, align=WD_ALIGN_PARAGRAPH.JUSTIFY, size=14, first_indent=True, after=10)
+        if "शपथ" in _title_text(draft) and signatures:
+            for line in signatures:
+                _add_docx_para(doc, line, align=WD_ALIGN_PARAGRAPH.RIGHT, size=14, first_indent=False, after=4)
 
     doc.save(output_path)
     return output_path
@@ -871,8 +893,19 @@ def _pdf_story(draft: dict[str, Any], font: str, bold_font: str, latin_font: str
 
     if _layout_break(draft, "page_break_before", "pleadings"):
         story.append(PageBreak())
-    for idx, paragraph in enumerate(_ordered_pleading_items(draft), 1):
-        story.append(Paragraph(_pdf_inline_font_markup(numbered(paragraph, idx), font, latin_font, symbol_font), body))
+    para_num = 0
+    for paragraph in _ordered_pleading_items(draft):
+        if _is_pleading_section_heading(paragraph):
+            heading_txt = re.sub(r"^\s*\d+\s*(?:\([^)]*\))?\s*[:.\-–—]+\s*", "", paragraph).strip(" :-–—")
+            story.append(
+                Paragraph(
+                    _pdf_inline_font_markup(heading_txt, bold_font, latin_bold, symbol_font),
+                    ParagraphStyle("PleadingSubHeading", parent=center16, fontSize=15, leading=21, underline=True, spaceBefore=6, spaceAfter=10),
+                )
+            )
+        else:
+            para_num += 1
+            story.append(Paragraph(_pdf_inline_font_markup(numbered(paragraph, para_num), font, latin_font, symbol_font), body))
 
     prayer = [str(x).strip() for x in draft.get("prayer", []) or [] if str(x).strip()]
     if prayer:
@@ -898,6 +931,9 @@ def _pdf_story(draft: dict[str, Any], font: str, bold_font: str, latin_font: str
             ver_lines = ver_lines[1:]
         for line in ver_lines:
             story.append(Paragraph(_pdf_inline_font_markup(line, font, latin_font, symbol_font), body))
+        if "शपथ" in _title_text(draft):
+            for line in _signature_lines(draft):
+                story.append(Paragraph(_pdf_inline_font_markup(line, font, latin_font, symbol_font), right))
     return story
 
 
@@ -1036,8 +1072,12 @@ def render_both(
     output_dir: str | Path,
     base_name: str = "Dava_Draft",
     paper: str = "legal",
+    *,
+    stem: str | None = None,
 ) -> tuple[Path, Path]:
     """Render the DOCX and the PDF, with the PDF converted from that DOCX."""
+    if stem:
+        base_name = stem
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     safe = re.sub(r"[^A-Za-z0-9_-]+", "_", base_name).strip("_") or "Dava_Draft"
