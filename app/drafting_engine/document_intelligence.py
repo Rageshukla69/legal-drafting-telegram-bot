@@ -1,4 +1,4 @@
-"""Azure AI Document Intelligence v4 REST integration with Microsoft Foundry (gpt-6.0-luna) & Gemini Vision OCR fallback."""
+"""Azure AI Document Intelligence v4 REST integration with Microsoft Foundry (gpt-6.0-luna), Gemini Vision OCR fallback, and direct DOCX/TXT/PDF extraction."""
 from __future__ import annotations
 import base64, io, logging, os, time
 from dataclasses import dataclass
@@ -19,6 +19,18 @@ class OCRResult:
     text: str
     page_count: int
     model_id: str
+
+
+VISION_OCR_PROMPT = (
+    "You are an expert Indian Judicial & Handwritten Document Transcriber.\n"
+    "Extract ALL readable text and structure from this Indian legal document/image (which may be a printed A4 document, "
+    "a court notice/affidavit/plaint, OR a handwritten Hindi/English legal draft) accurately in clean Unicode Devanagari Hindi and English.\n"
+    "- Preserve every court/authority heading, case number, party name, parentage, age, address, Gata/Khasra number, "
+    "area, boundary (चौहद्दी), numbered paragraph, prayer clause, verification, date, and signature line in its exact original order.\n"
+    "- If the document is handwritten in Hindi, carefully decipher cursive Devanagari strokes and matras using Indian legal context "
+    "(e.g., यह कि, वादी, प्रतिवादी, शपथग्रहीता, गाटा संख्या, रकबा, बैनामा, प्रार्थना, सत्यापन) without inventing new paragraphs.\n"
+    "- Return ONLY the extracted document text."
+)
 
 
 def _endpoint() -> str:
@@ -42,6 +54,48 @@ def _json_error(resp: requests.Response) -> str:
         return str(err.get("message") or err)[:1200] if isinstance(err, dict) else str(err)[:1200]
     except Exception:
         return resp.text[:1200]
+
+
+def _extract_docx_or_txt_direct(data: bytes, filename: str, content_type: str = "") -> OCRResult | None:
+    """Directly extract text from uploaded Word (.docx) or plain text (.txt) files."""
+    low = (filename or "").lower()
+    ct = (content_type or "").lower()
+    if low.endswith(".docx") or "wordprocessingml" in ct:
+        try:
+            from docx import Document
+
+            doc = Document(io.BytesIO(data))
+            lines: list[str] = []
+            for p in doc.paragraphs:
+                s = (p.text or "").strip()
+                if s:
+                    lines.append(s)
+            for table in doc.tables:
+                for row in table.rows:
+                    row_vals = [(cell.text or "").strip() for cell in row.cells if (cell.text or "").strip()]
+                    if row_vals:
+                        lines.append(" | ".join(row_vals))
+            joined = "\n".join(lines).strip()
+            if joined:
+                return OCRResult(
+                    text=decode_krutidev_hybrid(joined),
+                    page_count=max(1, len(lines) // 25),
+                    model_id="docx-direct",
+                )
+        except Exception as exc:
+            log.warning("Direct DOCX extraction failed: %s", exc)
+    if low.endswith(".txt") or ct.startswith("text/plain"):
+        try:
+            txt = data.decode("utf-8", errors="replace").strip()
+            if txt:
+                return OCRResult(
+                    text=decode_krutidev_hybrid(txt),
+                    page_count=1,
+                    model_id="txt-direct",
+                )
+        except Exception:
+            pass
+    return None
 
 
 def _extract_pdf_text_direct(data: bytes) -> OCRResult | None:
@@ -84,19 +138,13 @@ def _ocr_with_azure_foundry(data: bytes, content_type: str, filename: str) -> OC
     if filename.lower().endswith(".png"):
         mime = "image/png"
     b64 = base64.b64encode(data).decode("ascii")
-    prompt = (
-        "Extract all readable text and structure from this Indian legal document/image accurately in clean "
-        "Unicode Devanagari Hindi and English. Preserve all party names, father/husband names, ages, addresses, "
-        "Gata/Khasra numbers, areas, boundaries (चौहद्दी), dates, amounts, court headings, and prayers verbatim. "
-        "Return only the extracted text."
-    )
     payload: dict = {
         "model": model,
         "messages": [
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": prompt},
+                    {"type": "text", "text": VISION_OCR_PROMPT},
                     {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
                 ],
             }
@@ -134,18 +182,12 @@ def _ocr_with_gemini(data: bytes, content_type: str, filename: str) -> OCRResult
         mime = "application/pdf"
     elif filename.lower().endswith(".png"):
         mime = "image/png"
-    prompt = (
-        "Extract all readable text and structure from this Indian legal document/image accurately in clean "
-        "Unicode Devanagari Hindi and English. Preserve all party names, father/husband names, ages, addresses, "
-        "Gata/Khasra numbers, areas, boundaries (चौहद्दी), dates, amounts, court headings, and prayers verbatim. "
-        "Return only the extracted text."
-    )
     payload = {
         "contents": [
             {
                 "role": "user",
                 "parts": [
-                    {"text": prompt},
+                    {"text": VISION_OCR_PROMPT},
                     {"inlineData": {"mimeType": mime, "data": base64.b64encode(data).decode("ascii")}},
                 ],
             }
@@ -171,6 +213,12 @@ def analyze_document_bytes(
 ) -> OCRResult:
     if not data:
         raise DocumentIntelligenceError("The uploaded document is empty.")
+
+    # Fast path for Word (.docx) or text (.txt) files (e.g. A4 Word document uploaded for Legal-size conversion)
+    direct_doc = _extract_docx_or_txt_direct(data, filename, content_type)
+    if direct_doc is not None:
+        return direct_doc
+
     model = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_MODEL", "prebuilt-layout").strip() or "prebuilt-layout"
     if model != "prebuilt-layout":
         raise DocumentIntelligenceError("AZURE_DOCUMENT_INTELLIGENCE_MODEL must be prebuilt-layout.")
@@ -242,5 +290,16 @@ def analyze_document_bytes(
                 if c:
                     chunks.append(str(c))
         text = "\n".join(chunks).strip()
+
+    # If Azure prebuilt-layout returned almost nothing on a cursive Hindi handwritten image, try multimodal Vision fallback
+    if len(text.strip()) < 25 and not filename.lower().endswith(".pdf"):
+        try:
+            if os.getenv("AZURE_AI_KEY", "").strip() or os.getenv("FOUNDRY_API_KEY", "").strip():
+                return _ocr_with_azure_foundry(data, content_type, filename)
+            if os.getenv("GEMINI_API_KEY", "").strip():
+                return _ocr_with_gemini(data, content_type, filename)
+        except Exception:
+            pass
+
     pages = analyze.get("pages") or []
     return OCRResult(text=decode_krutidev_hybrid(text), page_count=len(pages) or 1, model_id=model)
