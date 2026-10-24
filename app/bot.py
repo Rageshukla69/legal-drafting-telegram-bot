@@ -1,4 +1,3 @@
-```python
 """Vakil Drafting AI — Enterprise Hindi Legal Drafting & Judicial Pleading Suite.
 
 Supports multi-style judicial drafting (Standard Judicial Format, Senior Counsel Edition,
@@ -1892,4 +1891,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
