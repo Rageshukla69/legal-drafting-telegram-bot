@@ -269,8 +269,9 @@ _TYPE_KEYWORDS = {
         "साक्ष्य हेतु शपथ", "बयान चीफ", "पी डब्लू", "डी डब्लू", "pw-1", "dw-1", "pw1",
     ),
     "affidavit": (
-        "affidavit", "शपथपत्र", "शपथ पत्र", "शपथ-पत्र", "हलफनामा", "हल्फ़नामा",
-        "शपथग्रहीता", "शपथकर्ता", "shapath patra", "shapathpatra", "halafnama",
+        "affidavit", "शपथपत्र", "शपथ पत्र", "शपथ-पत्र", "हलफनामा", "हल्फ़नामा", "हलफ़नामा",
+        "शपथग्रहीता", "शपथग्रहीत्री", "शपथकर्ता", "शपथकर्त्री", "शपथपूर्वक", "तस्दीक",
+        "shapath patra", "shapathpatra", "halafnama",
     ),
     "application": (
         "application", "प्रार्थना पत्र", "प्रार्थना-पत्र", "प्रार्थनापत्र", "आपत्ति पत्र",
@@ -1314,7 +1315,7 @@ async def image_document_message(update, context):
             if state.draft and (state.pending_point_action or state.edit_mode or (caption and detect_edit_intent(caption)) or detect_edit_intent(text[:500])):
                 state.edit_mode = True
                 store.save(uid, state)
-                await process_edit_instruction(update, context, caption or text)
+                await process_document_sansodhan(update, context, ocr_text=text, caption=caption, model_id=extracted.model_id)
                 return
 
             if not state.type_selected:
@@ -1470,14 +1471,14 @@ async def enter_edit_mode(update, context):
     await update.message.reply_text(
         "🏛️ *VAKIL DRAFTING AI — PRECISION EDIT STUDIO*\n"
         f"{DIVIDER}\n"
-        "✏️ अपना संशोधन हिंदी या English में लिखकर या **Voice Note 🎙️** बोलकर भेजें।\n\n"
+        "✏️ अपना संशोधन **Text ✍️ लिखकर**, **Voice Note 🎙️ बोलकर**, या **संशोधन पन्ने की Photo / PDF / DOCX 📸** भेजकर बताएं (Document Intelligence + GPT-6.0-Luna इंजन सक्रिय है)।\n\n"
         "*उदाहरण:*\n"
         "• `इसमें यह बिंदु जोड़ दो कि प्रतिवादी ने 20,000 रुपये बयाना लिया था।`\n"
-        "• `पैराग्राफ 4 वाला बिंदु हटा दो।`\n"
+        "• `पैराग्राफ 4 को और मजबूत कानूनी भाषा में विस्तृत कर दो।`\n"
         "• `पैराग्राफ 3 में 15.06.2026 के स्थान पर 20.06.2026 कर दो।`\n"
-        "• `प्रार्थना को अगले पृष्ठ पर ले जाओ।`\n"
+        "• `हाथ से लिखे संशोधन या खतौनी/कागज की Photo/PDF भेजें।`\n"
         f"{DIVIDER}\n"
-        "_AI केवल आपके निर्देशित हिस्से को संशोधित करेगा तथा शेष संपूर्ण ड्राफ्ट सुरक्षित रहेगा।_",
+        "_GPT-6.0-Luna केवल आपके निर्देशित हिस्से को उच्च-स्तरीय कोर्ट भाषा में संशोधित करेगा तथा शेष संपूर्ण ड्राफ्ट सुरक्षित रहेगा।_",
         parse_mode="Markdown",
     )
 
@@ -1526,6 +1527,62 @@ async def process_edit_instruction(update, context, instruction: str):
     except Exception as exc:
         log.exception("edit parse/apply failed")
         await update.message.reply_text(f"⚠️ संशोधन लागू करने हेतु सटीक पैराग्राफ स्पष्ट नहीं हो सका। कृपया पैराग्राफ संख्या या शब्द स्पष्ट लिखें।\n\n{str(exc)[:400]}")
+
+
+async def process_document_sansodhan(update, context, ocr_text: str, caption: str = "", model_id: str = ""):
+    """Apply Document Intelligence OCR + GPT-6.0-Luna precision sansodhan when a user uploads a Photo/PDF/DOCX while editing a draft."""
+    uid = update.effective_user.id
+    if not access.is_authorized(uid):
+        await deny(update)
+        return
+    state = get_state(uid)
+    if not state or not state.draft:
+        await update.message.reply_text("ℹ️ अभी कोई तैयार ड्राफ्ट उपलब्ध नहीं है। पहले ड्राफ्ट जनरेट करें।")
+        return
+    ocr_clean = decode_krutidev_hybrid((ocr_text or "").strip())
+    caption_clean = decode_krutidev_hybrid((caption or "").strip())
+    if not ocr_clean and not caption_clean:
+        return
+    state.edit_mode = True
+    action_mode = state.pending_point_action
+    state.pending_point_action = ""
+    await update.message.reply_text(
+        "🧠 *Document Intelligence + GPT-6.0-Luna Sansodhan सक्रिय है…*\n"
+        "दस्तावेज़ से प्राप्त तथ्यों के अनुसार आपके ड्राफ्ट में विधिक संशोधन तैयार किया जा रहा है…",
+        parse_mode="Markdown",
+    )
+    try:
+        if action_mode == "add":
+            combined_inst = f"{caption_clean}\n\n{ocr_clean}".strip() if caption_clean else ocr_clean
+            edit = await asyncio.to_thread(editor.parse_add_point, state.draft, combined_inst)
+        elif action_mode == "remove":
+            combined_inst = f"{caption_clean}\n\n{ocr_clean}".strip() if caption_clean else ocr_clean
+            edit = await asyncio.to_thread(editor.parse_remove_point, state.draft, combined_inst)
+        else:
+            edit = await asyncio.to_thread(editor.parse_document_sansodhan, state.draft, ocr_clean, caption_clean)
+
+        candidate, preview = await asyncio.to_thread(editor.apply, state.draft, edit)
+        state.pending_edit = {
+            "edit": edit,
+            "candidate": candidate,
+            "instruction": caption_clean or ocr_clean[:300],
+        }
+        store.save(uid, state)
+        await _safe_reply_text(
+            update.message,
+            "🏛️ *VAKIL DRAFTING AI — DOCUMENT INTELLIGENCE SANSODHAN PREVIEW*\n"
+            f"{DIVIDER}\n"
+            f"{preview}\n"
+            f"{DIVIDER}\n"
+            "👇 *क्या आप इस संशोधन को ड्राफ्ट में लागू करना चाहते हैं?*",
+            parse_mode="Markdown",
+            reply_markup=edit_actions(),
+        )
+    except Exception as exc:
+        log.exception("document sansodhan failed")
+        await update.message.reply_text(
+            f"⚠️ दस्तावेज़ से संशोधन लागू करने में त्रुटि हुई। कृपया स्पष्ट निर्देश लिखें।\n\n{str(exc)[:400]}"
+        )
 
 
 async def edit_text_message(update, context):
