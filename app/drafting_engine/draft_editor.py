@@ -2,7 +2,7 @@ from __future__ import annotations
 import json, logging, os, re
 from copy import deepcopy
 from typing import Any
-from .gemini_client import GeminiClient
+from .gemini_client import LunaClient
 from .krutidev_converter import sanitize_draft_unicode
 from .legal_number_formatter import format_draft_numbers
 
@@ -16,6 +16,7 @@ EDIT_SCHEMA = {
             "enum": [
                 "replace",
                 "replace_all",
+                "rewrite_paragraph",
                 "delete",
                 "insert_before",
                 "insert_after",
@@ -64,27 +65,57 @@ EDIT_SCHEMA = {
     "required": ["operation", "section", "index", "old_text", "new_text", "reason"],
 }
 
-SYSTEM = """You are a precise legal-document edit parser for an Indian advocate's Hindi drafting bot.
-Convert the lawyer's natural-language or voice-dictated edit instruction (including requests to add a point, remove a point, remove/edit party names, or update headings/titles) into a structured edit operation against the supplied structured draft.
+SYSTEM = """You are the Senior Judicial Sansodhan (संशोधन) & Precision Legal Revision Engine powered by Microsoft Foundry GPT-6.0-Luna.
 
-Rules:
-- Never rewrite unrelated parts of the document.
-- Select the target `section` and zero-based `index` (use 0 for scalar sections or when using `append` / `replace_all`).
-- Voice Dictation (STT) Phonetic Awareness:
-  * Instructions often come from Hindi speech-to-text, which may have phonetic spellings such as "साक्षेतु शपथपत्र" for "साक्ष्य हेतु शपथपत्र", "वादीगढ़" for "वादीगण", or "वीरेंद्र" (with anusvara ं) when the draft has "वीरेन्द्र" (with half-ना न्).
-  * Always inspect `CURRENT DRAFT` carefully and copy `old_text` CHARACTER-FOR-CHARACTER as it actually appears in `CURRENT DRAFT` (not the noisy STT spelling).
-  * Write `new_text` in clean, formal Unicode Devanagari legal Hindi (e.g. if the user says "साक्षेतु शपथपत्र PW-6 कोष्ठक में मुनेश कुमार लिख दो", set `new_text` to "साक्ष्य हेतु शपथपत्र PW-6 (मुनेश कुमार)").
-  * Whenever the user says "कोष्ठक में X" or "ब्रैकेट में X", format it with parentheses `(X)` instead of writing the words "कोष्ठक में".
-- Supported operations:
-  * `replace`: replace `old_text` with `new_text` in the selected section/index. `old_text` MUST be copied verbatim from the selected item in `CURRENT DRAFT`.
-  * `replace_all`: when the lawyer wants a name, Gata/Khasra number, date, or term corrected or removed everywhere it appears across the entire document, set `operation="replace_all"`, `old_text` to the exact existing text, and `new_text` to replacement (or `""` if deleting everywhere).
-  * `delete`: delete `old_text` from the selected item, OR if the lawyer wants an entire point/paragraph/party line removed, set `old_text` to the ENTIRE text of that item in `pleadings`, `prayer`, or `parties` so the whole item is removed cleanly. When removing one person's name from a multi-party line, include any trailing comma or connector in `old_text` so the remaining party text reads cleanly.
-  * `insert_before` / `insert_after`: insert a new point/paragraph `new_text` before or after `index` in list sections (`pleadings`, `prayer`, `parties`, `signature_block`).
-  * `append`: add a new point/paragraph/clause `new_text` to the end of `pleadings`, `prayer`, `parties`, or `signature_block` (`old_text` should be empty).
-  * `batch`: if the lawyer gave multiple distinct changes in one message (for example, removing a name from both वादीगण and प्रतिवादीगण in `parties`, AND updating `title`), set `operation="batch"` and put each individual change in `edits`.
-- Layout operations: `page_break_before`, `page_break_after`, `remove_page_break_before`, `remove_page_break_after`.
-- Always write Hindi legal additions/replacements in clean Unicode Devanagari Hindi (starting new pleading paragraphs with "यह कि " where natural, without numbering).
-- Return JSON only matching the schema.
+Your job is to convert the advocate's natural-language, voice-dictated, or Document-Intelligence-scanned edit instruction (`USER EDIT INSTRUCTION`) into a precise, high-quality structured edit operation against `CURRENT DRAFT`.
+
+CRITICAL RULES FOR GPT-6.0-LUNA LEGAL SANSODHAN:
+1. **Senior Counsel Legal Quality (`new_text`)**:
+   - Whenever the advocate asks to add a new point, expand/strengthen an existing paragraph, or rewrite a clause, do NOT write thin, informal 1-line text. Draft `new_text` in authoritative, court-ready Unicode Devanagari Hindi starting with `"यह कि ..."` (for `pleadings`), matching the exact party roles (`वादी`, `प्रतिवादीगण`, `आपत्तिकर्त्री`, `शपथग्रहीता`) of `CURRENT DRAFT`.
+   - Write all numerical values in bilingual court format (digits followed by Hindi words in parentheses, e.g., `20,000 (बीस हजार)`, `गाटा संख्या 412 (चार सौ बारह)`).
+   - If `CURRENT DRAFT` is a Dava (`वाद-पत्र`) or Written Statement (`जवाब दावा`), NEVER insert statutory sections (`धारा`), CPC (`सिविल प्रक्रिया संहिता`), or BNSS (`भारतीय नागरिक सुरक्षा संहिता`) into `pleadings` (Order VI Rule 2 CPC).
+2. **Voice Dictation (STT) & Document Intelligence OCR Awareness**:
+   - Instructions often come from Hindi speech-to-text or Azure Document Intelligence OCR of handwritten/printed notes, which may have phonetic spellings such as `"साक्षेतु शपथपत्र"` for `"साक्ष्य हेतु शपथपत्र"`, `"वादीगढ़"` for `"वादीगण"`, or `"वीरेंद्र"` (with anusvara `ं`) when the draft has `"वीरेन्द्र"` (with half-ना `न्`).
+   - Always inspect `CURRENT DRAFT` carefully and copy `old_text` CHARACTER-FOR-CHARACTER as it actually appears in `CURRENT DRAFT`.
+   - Whenever the user says `"कोष्ठक में X"` or `"ब्रैकेट में X"`, format it with parentheses `(X)`.
+3. **Supported Operations**:
+   - `replace`: Replace `old_text` with `new_text` in the selected `section` and zero-based `index`. `old_text` MUST be copied verbatim from `CURRENT DRAFT`.
+   - `rewrite_paragraph`: When the advocate asks to rewrite, elaborate, improve, or completely replace paragraph `index` in `pleadings` or `prayer` (or replace an entire scalar section like `title` or `verification`), set `operation="rewrite_paragraph"`, `section`, zero-based `index`, `old_text` to the current paragraph text, and `new_text` to the newly drafted paragraph (without leading paragraph numbers).
+   - `replace_all`: When the advocate wants a name, Gata/Khasra number, date, village, or term corrected everywhere across the entire document (`court_heading`, `parties`, `title`, `pleadings`, `prayer`, `verification`, `signature_block`), set `operation="replace_all"`, `old_text` to the exact existing text, and `new_text` to the replacement.
+   - `delete`: Delete `old_text` from the selected item, OR if the advocate wants an entire paragraph/point/party line removed, set `old_text` to the ENTIRE text of that item in `pleadings`, `prayer`, or `parties`.
+   - `insert_before` / `insert_after`: Insert a newly drafted point/paragraph `new_text` before or after `index` in `pleadings`, `prayer`, `parties`, or `signature_block`.
+   - `append`: Add a newly drafted point/paragraph/clause `new_text` to the end of `pleadings`, `prayer`, `parties`, or `signature_block`.
+   - `batch`: Whenever the advocate's instruction or scanned Document Intelligence note contains multiple changes (or when a change to a party/fact requires updating both `parties` and `pleadings`/`title`/`verification`), set `operation="batch"` and place all operations in `edits`.
+   - Layout operations: `page_break_before`, `page_break_after`, `remove_page_break_before`, `remove_page_break_after`.
+4. Return JSON only matching the supplied schema.
+"""
+
+ADD_POINT_LUNA_SYSTEM = """You are the Senior Judicial Paragraph Composer powered by Microsoft Foundry GPT-6.0-Luna.
+
+The advocate clicked '➕ बिंदु जोड़ें (Add Point)' and provided raw facts, voice dictation, or Document Intelligence text to add to `CURRENT DRAFT`.
+
+Your task:
+1. Transform the advocate's raw input into a rich, formal, court-ready Hindi legal paragraph starting with `"यह कि ..."` (without leading paragraph numbers) that seamlessly matches the tone, party terminology (`वादी`, `प्रतिवादीगण`, `आपत्तिकर्त्री`, `शपथग्रहीता`), and context of `CURRENT DRAFT`.
+2. Format every numerical value in bilingual court format (digits + Hindi words in parentheses, e.g., `10,000 (दस हजार) रुपये`). Preserve all specific numbers, dates, names, and Gata/Khasra details from the advocate's instruction.
+3. If `CURRENT DRAFT` is a Dava (`वाद-पत्र`) or Written Statement (`जवाब दावा`), do NOT add any legal sections (`धारा`), CPC, or BNSS citations.
+4. Choose the best insertion point in `pleadings` (usually `insert_before` the formal closing clauses like `कारण वाद` / `क्षेत्राधिकार` / `मूल्यांकन`, or `append` if there are no closing clauses; or `append` to `prayer` if the user explicitly asked to add a prayer/relief clause).
+5. If the advocate provided multiple distinct points, use `operation="batch"` and add each point as its own formal paragraph.
+6. Return JSON only matching the schema.
+"""
+
+DOCUMENT_SANSODHAN_LUNA_SYSTEM = """You are the Azure Document Intelligence + Microsoft Foundry GPT-6.0-Luna Legal Revision Engine.
+
+The advocate has uploaded a document/image (e.g., a handwritten correction note, a marked-up printed page, an order sheet, or a reference PDF/DOCX) while editing `CURRENT DRAFT`.
+Azure Document Intelligence has extracted `DOCUMENT_INTELLIGENCE_EXTRACTED_TEXT` from their upload, along with optional `USER_CAPTION_INSTRUCTION`.
+
+Your task:
+1. Analyze `DOCUMENT_INTELLIGENCE_EXTRACTED_TEXT` and `USER_CAPTION_INSTRUCTION` against `CURRENT DRAFT`.
+2. Determine whether the uploaded document contains:
+   - Specific corrections (names, parentage, Gata/Khasra numbers, areas, dates, case numbers, court name) -> apply via `replace_all` or `batch` of `replace` operations.
+   - New factual points or handwritten paragraphs to incorporate into `CURRENT DRAFT` -> draft them in authoritative court Hindi (`"यह कि ..."`) and insert via `insert_before` / `append` (or `batch`).
+   - A revised version of specific paragraphs, prayer, or title -> apply via `rewrite_paragraph` or `batch`.
+3. Never drop unrelated paragraphs from `CURRENT DRAFT` unless explicitly instructed to remove them.
+4. Return JSON only matching the schema.
 """
 
 
@@ -95,43 +126,31 @@ def _normalize_hindi_punct(text: str) -> str:
 
 
 def _build_phonetic_skeleton(text: str) -> tuple[str, list[int]]:
-    """Build a normalized Devanagari skeleton and a char-index map back to `text`.
-
-    Unifies:
-    - Anusvara (ं), Chandrabindu (ँ), and half-nasals (न्, म्, ण्, ञ्, ङ्) -> 'N'
-    - Nukta (\u093c) -> stripped
-    - Multiple spaces, hyphens, and punctuation separators
-    - Common STT contractions like 'साक्षेतु' <-> 'साक्ष्यहेतु' and 'वादीगढ़' <-> 'वादीगण'
-    """
+    """Build a normalized Devanagari skeleton and a char-index map back to `text`."""
     skel_chars: list[str] = []
     idx_map: list[int] = []
     n = len(text)
     i = 0
     while i < n:
         ch = text[i]
-        # Skip nukta or zero-width joiners
         if ch in {"\u093c", "\u200c", "\u200d"}:
             i += 1
             continue
-        # Half-nasal consonant (न/म/ण/ञ/ङ + हलन्त ्) -> 'N'
         if ch in {"न", "म", "ण", "ञ", "ङ"} and i + 1 < n and text[i + 1] == "\u094d":
             skel_chars.append("N")
             idx_map.append(i)
             i += 2
             continue
-        # Anusvara / Chandrabindu -> 'N'
         if ch in {"\u0902", "\u0901"}:
             skel_chars.append("N")
             idx_map.append(i)
             i += 1
             continue
-        # Normalize 'ढ़' / 'ढ' -> 'ण' only for plural suffix 'गढ़' -> 'गण'
         if ch == "ढ" and i > 0 and text[i - 1] in {"ग", "ण"}:
             skel_chars.append("ण")
             idx_map.append(i)
             i += 1
             continue
-        # Skip hyphens and spaces so 'शपथ-पत्र', 'शपथ पत्र', 'शपथपत्र' unify
         if ch.isspace() or ch in {"-", "–", "—"}:
             i += 1
             continue
@@ -148,7 +167,6 @@ def _build_phonetic_skeleton(text: str) -> tuple[str, list[int]]:
 def _cleanup_party_or_sentence_punctuation(text: str) -> str:
     """Clean up dangling commas, double spaces, or empty serial markers left after deleting a substring."""
     cleaned = re.sub(r"\s+", " ", text).strip()
-    # Remove orphan serial numbers whose name was deleted, e.g. ", 2. —" or "1. ,"
     cleaned = re.sub(r"(?:,\s*)?\b\d+\s*(?:\([^)]+\))?\s*[.)]\s*(?=[,;:\-–—]|$)", "", cleaned)
     cleaned = re.sub(r",\s*(?=[\-–—])", " ", cleaned)
     cleaned = re.sub(r",\s*,+", ", ", cleaned)
@@ -158,8 +176,7 @@ def _cleanup_party_or_sentence_punctuation(text: str) -> str:
     cleaned = re.sub(r"\b(?:व|तथा|एवं)\s*(?:व|तथा|एवं)\b", "व", cleaned)
     cleaned = re.sub(r",\s*(?:व|तथा|एवं)\s*,", ", ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    # If only a bare role label remains (e.g. "— वादीगण" or "वादी"), treat as empty so item is popped
-    if re.match(r"^[\-–—.\s]*(?:वादीगण|वादी|प्रतिवादीगण|प्रतिवादी|विपक्षीगण|विपक्षी)[\-–—.\s]*$", cleaned):
+    if re.match(r"^[\-–—.\s]*(?:वादीगण|वादी|प्रतिवादीगण|प्रतिवादी|विपक्षीगण|विपक्षी|प्रार्थीगण|प्रार्थी|आपत्तिकर्त्री)[\-–—.\s]*$", cleaned):
         return ""
     return cleaned
 
@@ -190,15 +207,12 @@ def _flex_replace_once(source: str, old: str, new: str) -> str | None:
         end_idx = start_idx + len(norm_old)
         return source[:start_idx] + new + source[end_idx:]
 
-    # Devanagari phonetic/orthographic skeleton match (e.g. वीरेंद्र <-> वीरेन्द्र, शपथ-पत्र <-> शपथपत्र)
     src_skel, src_map = _build_phonetic_skeleton(source)
     old_skel, _ = _build_phonetic_skeleton(clean_old)
-    # Also handle STT contraction 'साक्षेतु' -> 'साक्ष्यहेतु'
     alt_old_skels = [old_skel]
     if "साक्षेतु" in old_skel:
         alt_old_skels.append(old_skel.replace("साक्षेतु", "साक्ष्यहेतु"))
         alt_old_skels.append(old_skel.replace("साक्षेतु", "साक्ष्यका"))
-    # Also try without leading honorific 'श्री' if draft omitted 'श्री' or vice versa
     if old_skel.startswith("श्री") and len(old_skel) > 4:
         alt_old_skels.append(old_skel[len("श्री"):])
 
@@ -210,7 +224,6 @@ def _flex_replace_once(source: str, old: str, new: str) -> str | None:
             start_orig = src_map[pos]
             last_mapped = src_map[pos + len(cand_skel) - 1]
             end_orig = last_mapped + 1
-            # Include any trailing combining marks / halant / matras belonging to the last character
             while end_orig < len(source) and (
                 "\u0900" <= source[end_orig] <= "\u0903"
                 or "\u093a" <= source[end_orig] <= "\u094f"
@@ -223,13 +236,38 @@ def _flex_replace_once(source: str, old: str, new: str) -> str | None:
     return None
 
 
+def _sync_verification_paragraph_count(draft: dict[str, Any], old_count: int) -> dict[str, Any]:
+    """Automatically update paragraph count references in `verification` when paragraphs are added or removed."""
+    ver = str(draft.get("verification") or "").strip()
+    if not ver:
+        return draft
+    pleadings = [
+        str(p).strip()
+        for p in (draft.get("pleadings") or [])
+        if str(p).strip() and not str(p).strip().startswith("अतिरिक्त कथन")
+    ]
+    new_count = len(pleadings)
+    if new_count <= 0 or new_count == old_count:
+        return draft
+
+    # Update patterns like "धारा 1 (एक) से 6 (छह) तक" or "कंडिका 1 से 6" or "प्रस्तर 1 लगायत 6"
+    updated_ver = re.sub(
+        rf"((?:धारा|पैरा|प्रस्तर|कंडिका)\s*\d+(?:\s*\([^)]+\))?\s*(?:से|लगायत)\s*){old_count}(?:\s*\([^)]+\))?",
+        rf"\g<1>{new_count}",
+        ver,
+    )
+    if updated_ver != ver:
+        draft["verification"] = updated_ver
+    return draft
+
+
 class DraftEditor:
     def __init__(self):
-        self.client = None
+        self.client: LunaClient | None = None
 
-    def _get_client(self) -> GeminiClient:
+    def _get_client(self) -> LunaClient:
         if self.client is None:
-            self.client = GeminiClient()
+            self.client = LunaClient()
         return self.client
 
     @staticmethod
@@ -288,7 +326,7 @@ class DraftEditor:
         """Fast-path for unambiguous paragraph removal like 'पैराग्राफ 3 हटा दो' or 'paragraph 2 delete'."""
         text = re.sub(r"\s+", " ", str(instruction or "").strip().casefold())
         m = re.match(
-            r"^(?:पैराग्राफ|पैरा|पॉइंट|बिंदु|दावा पैरा|paragraph|para|point)?\s*(\d+)\s*(?:को\s*)?(?:हटा\s*दो|हटाओ|डिलीट\s*करो|हटाना\s*है|delete|remove)?$",
+            r"^(?:पैराग्राफ|पैरा|पॉइंट|बिंदु|दावा पैरा|धारा|कंडिका|प्रस्तर|paragraph|para|point)?\s*(\d+)\s*(?:को\s*|वाला\s*बिंदु\s*|वाला\s*पैराग्राफ\s*)?(?:हटा\s*दो|हटाओ|डिलीट\s*करो|हटाना\s*है|delete|remove)?$",
             text,
         )
         if not m:
@@ -309,23 +347,14 @@ class DraftEditor:
             }
         return None
 
-    def parse_add_point(self, draft: dict[str, Any], instruction: str) -> dict[str, Any]:
-        """Dedicated parser when the user explicitly clicked 'Add Point'."""
-        clean = instruction.strip()
-        # If the user actually gave a general edit/delete/replace instruction while in add_point mode, route to general parser
-        low = clean.casefold()
-        if any(k in low for k in ("हटा दो", "हटाओ", "के स्थान पर", "की जगह", "लिख दो", "बदल दो", "कोष्ठक में")):
-            return self.parse(draft, clean)
-
+    @staticmethod
+    def _fallback_add_point_deterministic(draft: dict[str, Any], clean: str) -> dict[str, Any]:
         clean_body = re.sub(
-            r"^(?:यह\s*पॉइंट\s*जोड़\s*दो\s*(?:कि)?|पॉइंट\s*जोड़ो\s*:?|इसमें\s*यह\s*जोड़ो\s*(?:कि)?|add\s*point\s*:?)\s*",
+            r"^(?:यह\s*पॉइंट\s*जोड़\s*दो\s*(?:कि)?|यह\s*बिंदु\s*जोड़\s*दो\s*(?:कि)?|पॉइंट\s*जोड़ो\s*:?|इसमें\s*यह\s*जोड़ो\s*(?:कि)?|add\s*point\s*:?)\s*",
             "",
             clean,
             flags=re.IGNORECASE,
         ).strip()
-        if any(k in low for k in ("के पहले", "के बाद", "प्रार्थना में", "सत्यापन में", "before", "after", "in prayer")):
-            return self.parse(draft, f"Add this point to the draft: {clean}")
-
         if clean_body and not clean_body.startswith("यह कि") and any("\u0900" <= c <= "\u097f" for c in clean_body):
             formatted = f"यह कि {clean_body}"
         else:
@@ -358,13 +387,54 @@ class DraftEditor:
             "reason": "Append new point to pleadings.",
         }
 
+    def parse_add_point(self, draft: dict[str, Any], instruction: str) -> dict[str, Any]:
+        """Use GPT-6.0-Luna to craft a formal, court-grade Hindi pleading/prayer paragraph when the user adds a point."""
+        clean = instruction.strip()
+        low = clean.casefold()
+        if any(k in low for k in ("हटा दो", "हटाओ", "के स्थान पर", "की जगह", "बदल दो", "कोष्ठक में")):
+            return self.parse(draft, clean)
+
+        client = self._get_client()
+        if client.has_active_key():
+            try:
+                context = json.dumps({"draft": draft, "editable_sections": self._sections(draft)}, ensure_ascii=False, indent=2)
+                res = client.generate_json(
+                    system=ADD_POINT_LUNA_SYSTEM,
+                    prompt=f"ADVOCATE POINT TO ADD:\n{clean}\n\nCURRENT DRAFT:\n{context}",
+                    schema=EDIT_SCHEMA,
+                    thinking_level=os.getenv("GEMINI_EDIT_THINKING_LEVEL", "medium"),
+                )
+                parsed = sanitize_draft_unicode(res)
+                if parsed and parsed.get("operation"):
+                    return parsed
+            except Exception as exc:
+                log.warning("GPT-6.0-Luna parse_add_point fallback to deterministic: %s", exc)
+
+        return self._fallback_add_point_deterministic(draft, clean)
+
     def parse_remove_point(self, draft: dict[str, Any], instruction: str) -> dict[str, Any]:
         """Dedicated parser when the user explicitly clicked 'Remove Point'."""
         direct = self._deterministic_remove_paragraph(draft, instruction)
         if direct:
             return direct
-        # Pass the instruction directly to parse() so multi-part edits (e.g. delete party + update title) work seamlessly
         return self.parse(draft, instruction)
+
+    def parse_document_sansodhan(self, draft: dict[str, Any], ocr_text: str, caption: str = "") -> dict[str, Any]:
+        """Use Azure Document Intelligence OCR text + GPT-6.0-Luna to apply revisions from an uploaded Photo/PDF/DOCX."""
+        context = json.dumps({"draft": draft, "editable_sections": self._sections(draft)}, ensure_ascii=False, indent=2)
+        prompt = (
+            f"USER_CAPTION_INSTRUCTION:\n{(caption or 'Apply the corrections/additions from the uploaded document to the current draft.').strip()}\n\n"
+            f"DOCUMENT_INTELLIGENCE_EXTRACTED_TEXT:\n{ocr_text.strip()}\n\n"
+            f"CURRENT DRAFT:\n{context}"
+        )
+        res = self._get_client().generate_json(
+            system=DOCUMENT_SANSODHAN_LUNA_SYSTEM,
+            prompt=prompt,
+            schema=EDIT_SCHEMA,
+            thinking_level=os.getenv("GEMINI_EDIT_THINKING_LEVEL", "high"),
+            max_output_tokens=8192,
+        )
+        return sanitize_draft_unicode(res)
 
     def parse(self, draft: dict[str, Any], instruction: str) -> dict[str, Any]:
         direct = self._deterministic_layout_intent(instruction)
@@ -378,7 +448,8 @@ class DraftEditor:
             system=SYSTEM,
             prompt=f"USER EDIT INSTRUCTION:\n{instruction.strip()}\n\nCURRENT DRAFT:\n{context}",
             schema=EDIT_SCHEMA,
-            thinking_level=os.getenv("GEMINI_EDIT_THINKING_LEVEL", "medium"),
+            thinking_level=os.getenv("GEMINI_EDIT_THINKING_LEVEL", "high"),
+            max_output_tokens=8192,
         )
         return sanitize_draft_unicode(res)
 
@@ -399,13 +470,19 @@ class DraftEditor:
 
         # Auto-convert spoken "कोष्ठक में X" inside new_text if the LLM left it literal
         new = re.sub(r"\s*कोष्ठक\s+में\s+([^\n,।()]+)", r" (\1)", new).strip()
+        if section == "pleadings" and operation in {"insert_before", "insert_after", "append", "rewrite_paragraph"}:
+            new = re.sub(
+                r"^\s*(?:[*•▪▸]\s*|(?:प्रस्तर|धारा|पैरा|कंडिका)?\s*[0-9०-९]{1,3}\s*(?:\([^)]*\))?\s*[:.\-–—]+\s*)",
+                "",
+                new,
+            ).strip()
         edit["new_text"] = new
 
         if not self._valid_section(section):
             raise ValueError(f"Invalid edit section: {section}")
 
         layout_ops = {"page_break_before", "page_break_after", "remove_page_break_before", "remove_page_break_after"}
-        text_ops = {"replace", "replace_all", "delete", "insert_before", "insert_after", "append"}
+        text_ops = {"replace", "replace_all", "rewrite_paragraph", "delete", "insert_before", "insert_after", "append"}
         if operation not in text_ops | layout_ops:
             raise ValueError(f"Unsupported edit operation: {operation}")
 
@@ -438,7 +515,6 @@ class DraftEditor:
                 val = str(out.get(sec_key, "") or "")
                 replaced = _flex_replace_once(val, old, new)
                 if replaced is not None and replaced != val:
-                    # Replace all occurrences in scalar if multiple exist
                     while True:
                         nxt = _flex_replace_once(replaced, old, new)
                         if nxt is None or nxt == replaced:
@@ -471,6 +547,12 @@ class DraftEditor:
         scalar = section in {"opening_averment", "verification", "title", "court_heading", "case_heading"}
         if scalar:
             current = str(out.get(section, "") or "")
+            if operation == "rewrite_paragraph":
+                if not new.strip():
+                    raise ValueError(f"Cannot rewrite {section} with empty text.")
+                edit["old_text"] = current
+                out[section] = new.strip()
+                return sanitize_draft_unicode(out)
             if not current:
                 if operation in {"replace", "append", "insert_after"} and new:
                     out[section] = new
@@ -480,9 +562,8 @@ class DraftEditor:
                 replacement = "" if operation == "delete" else new
                 updated = _flex_replace_once(current, old, replacement)
                 if updated is None:
-                    # Fallback for short scalar headings (`title`, `court_heading`, `case_heading`):
-                    # if replacing the title/heading and `new` is provided, replace the scalar value cleanly
-                    if operation == "replace" and section in {"title", "court_heading", "case_heading"} and new.strip():
+                    if operation == "replace" and new.strip():
+                        edit["old_text"] = current
                         updated = new.strip()
                     else:
                         raise ValueError(f"Target text '{old}' not found in {section}.")
@@ -508,6 +589,14 @@ class DraftEditor:
                 index = max(0, min(index, len(items) - 1))
 
             current = str(items[index]) if items else ""
+            if operation == "rewrite_paragraph":
+                if not new.strip():
+                    raise ValueError("Cannot rewrite paragraph with empty text.")
+                edit["old_text"] = current
+                items[index] = new.strip()
+                out[section] = items
+                return sanitize_draft_unicode(out)
+
             if operation in {"replace", "delete"}:
                 if operation == "delete" and (not old.strip() or old.strip() == current.strip()):
                     items.pop(index)
@@ -515,12 +604,10 @@ class DraftEditor:
                     return sanitize_draft_unicode(out)
                 replacement = "" if operation == "delete" else new
 
-                # Special handling for `parties`: if a party name is being deleted/replaced and appears
-                # across multiple party entries (e.g. both वादीगण and प्रतिवादीगण), update all matching entries.
                 if section == "parties" and old.strip():
                     matched_any = False
                     updated_parties: list[str] = []
-                    for i, party_line in enumerate(items):
+                    for party_line in items:
                         s_line = str(party_line)
                         cand = _flex_replace_once(s_line, old, replacement)
                         if cand is not None and cand != s_line:
@@ -538,11 +625,16 @@ class DraftEditor:
                 updated = _flex_replace_once(current, old, replacement)
                 if updated is None:
                     found_idx = next((i for i, it in enumerate(items) if _flex_replace_once(str(it), old, replacement) is not None), None)
-                    if found_idx is None:
+                    if found_idx is not None:
+                        index = found_idx
+                        edit["index"] = found_idx
+                        updated = _flex_replace_once(str(items[found_idx]), old, replacement)
+                    elif operation == "replace" and new.strip() and (len(new.strip()) >= 25 or new.strip().startswith("यह कि")):
+                        # GPT-6.0-Luna rewrote the whole paragraph at `index`
+                        edit["old_text"] = current
+                        updated = new.strip()
+                    else:
                         raise ValueError(f"Target text '{old}' not found in {section}.")
-                    index = found_idx
-                    edit["index"] = found_idx
-                    updated = _flex_replace_once(str(items[found_idx]), old, replacement)
 
                 if operation == "delete":
                     updated = _cleanup_party_or_sentence_punctuation(updated)
@@ -559,6 +651,11 @@ class DraftEditor:
         return sanitize_draft_unicode(out)
 
     def apply(self, draft: dict[str, Any], edit: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        old_pleadings_count = len([
+            str(p).strip()
+            for p in (draft.get("pleadings") or [])
+            if str(p).strip() and not str(p).strip().startswith("अतिरिक्त कथन")
+        ])
         operation = str(edit.get("operation", ""))
         if operation == "batch" and isinstance(edit.get("edits"), list):
             current = deepcopy(draft)
@@ -573,9 +670,11 @@ class DraftEditor:
                     errors.append(str(exc))
             if not descriptions and errors:
                 raise ValueError("; ".join(errors))
+            current = _sync_verification_paragraph_count(current, old_pleadings_count)
             return format_draft_numbers(sanitize_draft_unicode(current)), "\n".join(descriptions)
 
         updated = self._apply_single_op(draft, edit)
+        updated = _sync_verification_paragraph_count(updated, old_pleadings_count)
         return format_draft_numbers(sanitize_draft_unicode(updated)), self.describe(edit)
 
     @staticmethod
@@ -619,6 +718,8 @@ class DraftEditor:
             return f"🗑️ {target} से यह अंश हटाया जाएगा:\n{old}"
         if op == "replace":
             return f"✏️ {target} में बदलाव:\nBefore: {old}\nAfter: {new}"
+        if op == "rewrite_paragraph":
+            return f"✏️ {target} में विधिक संशोधन (GPT-6.0-Luna):\nBefore: {old}\nAfter: {new}"
         if op == "insert_before":
             return f"➕ {target} से पहले नया बिंदु जोड़ा जाएगा:\n{new}"
         return f"➕ {target} के बाद नया बिंदु जोड़ा जाएगा:\n{new}"
