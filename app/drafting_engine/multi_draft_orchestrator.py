@@ -82,7 +82,7 @@ _ROLE_WORDS_PAT = (
     r"(?:प्रतिवादीगण|प्रतिवादिनीगण|प्रतिवादिनी|प्रतिवादी|विपक्षीगण|विपक्षी|"
     r"वादीगण|वादिनी|वादी|प्रार्थीगण|प्रार्थिनी|प्रार्थी|"
     r"आवेदकगण|आवेदिका|आवेदक|आपत्तिकर्त्री|आपत्तिकर्तागण|आपत्तिकर्ता|"
-    r"उत्तरदातागण|उत्तरदाता|शपथग्रहीता|शपथकर्ता)"
+    r"उत्तरदातागण|उत्तरदाता|शपथग्रहीता|शपथग्रहीत्री|शपथकर्त्री|शपथकर्ता)"
     r"(?:\s*/\s*(?:प्रतिवादीगण|प्रतिवादिनीगण|प्रतिवादिनी|प्रतिवादी|विपक्षीगण|विपक्षी|"
     r"वादीगण|वादिनी|वादी|प्रार्थीगण|प्रार्थिनी|प्रार्थी|"
     r"आवेदकगण|आवेदिका|आवेदक|आपत्तिकर्त्री|आपत्तिकर्तागण|आपत्तिकर्ता|"
@@ -217,7 +217,7 @@ def _format_cause_title_parties(parties: list[str], facts: dict[str, Any] | None
 
 def _clean_short_name(raw: str) -> str:
     s = _strip_party_role_affixes(str(raw or ""))
-    s = re.sub(r"^\s*मैं\s*,?\s*(?:शपथग्रहीता|शपथकर्ता)?\s*", "", s).strip()
+    s = re.sub(r"^\s*मैं\s*,?\s*(?:शपथग्रहीता|शपथग्रहीत्री|शपथकर्त्री|शपथकर्ता)?\s*", "", s).strip()
     m = re.split(r"\s+(?:पुत्र|पत्नी|पुत्री|विधवा|उम्र|आयु|निवासी)(?=\s|$)|,", s, maxsplit=1)
     if m and m[0].strip():
         return re.sub(r"^\s*\d+(?:\s*\([^)]+\))?\s*[.)\-:]\s*", "", m[0].strip(" ()"))
@@ -377,7 +377,7 @@ def parse_structured_legal_document(raw_text: str, document_type: str = "") -> d
             verification_lines.append(m_ver_inline.group(1).strip())
             continue
         if section in {"pleadings", "prayer"} and re.match(
-            r"^(?:मैं|हम)\s*,?\s*(?:उपरोक्त|शपथग्रहीता|शपथकर्ता|वादी|प्रतिवादी|आपत्तिकर्त्री|प्रार्थी).*सत्यापित\s+कर",
+            r"^(?:मैं|हम)\s*,?\s*(?:उपरोक्त|शपथग्रहीता|शपथग्रहीत्री|शपथकर्त्री|शपथकर्ता|वादी|प्रतिवादी|आपत्तिकर्त्री|प्रार्थी).*(?:सत्यापित|तस्दीक)\s+कर",
             ln,
         ):
             section = "verification"
@@ -386,7 +386,7 @@ def parse_structured_legal_document(raw_text: str, document_type: str = "") -> d
 
         if section in {"pleadings", "prayer", "verification", "signature"} and (
             re.match(
-                r"^(?:दिनांक|स्थान|तारीख|हस्ताक्षर|द्वारा\s*अधिवक्ता|अधिवक्ता|एडवोकेट|प्रार्थीगण|प्रार्थी|आवेदकगण|आपत्तिकर्त्री|आपत्तिकर्ता|वादीगण|वादी|प्रतिवादीगण|प्रतिवादी|शपथग्रहीता|शपथकर्ता|मो०|मोबाइल|पंजीकरण\s*सं)(?=\s|$|[:।.,;\-–—(])",
+                r"^(?:दिनांक|स्थान|तारीख|हस्ताक्षर|पहचानकर्ता|द्वारा\s*अधिवक्ता|अधिवक्ता|एडवोकेट|प्रार्थीगण|प्रार्थी|आवेदकगण|आपत्तिकर्त्री|आपत्तिकर्ता|वादीगण|वादी|प्रतिवादीगण|प्रतिवादी|शपथग्रहीता|शपथग्रहीत्री|शपथकर्त्री|शपथकर्ता|मो०|मोबाइल|पंजीकरण\s*सं)(?=\s|$|[:।.,;\-–—(])",
                 ln,
             )
             or (section == "signature" and len(ln) <= 65)
@@ -866,7 +866,7 @@ def _normalize_affidavit_structure(out: dict[str, Any], facts: dict[str, Any], d
     is_suit = _is_court_suit_affidavit(facts) or document_type == "evidence_pw_affidavit"
     party_name, _ = _extract_party_names_for_doc(facts, document_type)
     deponent_full = str(facts.get("deponent") or party_name or "शपथग्रहीता").strip()
-    deponent_full = re.sub(r"^\s*मैं\s*,?\s*(?:शपथग्रहीता|शपथकर्ता)?\s*", "", deponent_full).strip()
+    deponent_full = re.sub(r"^\s*मैं\s*,?\s*(?:शपथग्रहीता|शपथग्रहीत्री|शपथकर्त्री|शपथकर्ता)?\s*", "", deponent_full).strip()
 
     # 1. Authority / Forum Heading (`court_heading`)
     ch_forum = str(out.get("court_heading") or facts.get("court_name") or "").strip()
@@ -1336,17 +1336,16 @@ class MultiDraftOrchestrator:
                 or "\n".join(str(x) for x in (state.facts.get("facts") or []))
             ).strip()
 
-            # 1. Deterministic Verbatim Structural Parser for structured documents (2+ paragraphs):
-            # Handles 17-paragraph or 100-paragraph PDFs, DOCX files, and multi-part pasted texts instantaneously
-            # with 100% verbatim fidelity and zero risk of LLM output truncation or timeout.
             parsed_doc = parse_structured_legal_document(raw_source_text, document_type=state.document_type)
-            if len(parsed_doc.get("pleadings") or []) >= 2:
-                custom_adds = [str(x).strip() for x in (state.facts.get("custom_add_points") or []) if str(x).strip()]
-                for pt in custom_adds:
-                    pt_clean = pt if pt.startswith("यह कि") else f"यह कि {pt}"
-                    if not pt_clean.endswith(("।", ".")):
-                        pt_clean += "।"
-                    parsed_doc["pleadings"].append(pt_clean)
+            custom_adds = [str(x).strip() for x in (state.facts.get("custom_add_points") or []) if str(x).strip()]
+            for pt in custom_adds:
+                pt_clean = pt if pt.startswith("यह कि") else f"यह कि {pt}"
+                if not pt_clean.endswith(("।", ".")):
+                    pt_clean += "।"
+                parsed_doc.setdefault("pleadings", []).append(pt_clean)
+
+            # If running in an offline test environment without API keys and parsed_doc has 2+ paragraphs, use parsed_doc directly
+            if not self.client.has_active_key() and len(parsed_doc.get("pleadings") or []) >= 2:
                 normalized_raw = _normalize_draft_structure(
                     parsed_doc, state.facts, document_type=state.document_type, style_mode="as_is_mode"
                 )
@@ -1354,7 +1353,7 @@ class MultiDraftOrchestrator:
                 state.status = "ready"
                 return draft
 
-            # 2. LLM Structuring Engine for unstructured / handwritten notes (with deterministic fallback)
+            # Let Microsoft Foundry GPT-6.0-Luna do the heavy lifting with Document Intelligence structural pre-parse
             as_is_rules = [
                 "AS-IT-IS & HANDWRITTEN LEGAL STRUCTURING MODE: Do NOT replace the advocate's text with a corpus template.",
                 "If RAW_SOURCE_DOCUMENT_TEXT is an existing A4/typed document (Dava, Affidavit, Legal Notice, Written Statement, Application, Objection Petition, etc.), preserve 100% of its wording, paragraphs, sequence, headings, party details, prayer, and verification AS-IT-IS so it renders onto Legal-size paper (`8.5\" × 14\"`).",
@@ -1365,6 +1364,7 @@ class MultiDraftOrchestrator:
                 "DOCUMENT_TYPE": label,
                 "SELECTED_STYLE_MODE": STYLE_NAMES.get("as_is_mode"),
                 "RAW_SOURCE_DOCUMENT_TEXT": raw_source_text,
+                "DOCUMENT_INTELLIGENCE_STRUCTURAL_PARSE": parsed_doc,
                 "EXTRACTED_CASE_FACTS": {k: v for k, v in state.facts.items() if k not in {"raw_source_text", "raw_source_pages"}},
                 "SYSTEM_RULES": as_is_rules,
                 "OUTPUT_REQUIREMENTS": {
@@ -1385,9 +1385,17 @@ class MultiDraftOrchestrator:
                     system=system,
                     prompt=json.dumps(package, ensure_ascii=False, indent=2),
                     schema=SCHEMA,
-                    thinking_level=os.getenv("GEMINI_DRAFTING_THINKING_LEVEL", "low"),
+                    thinking_level=os.getenv("GEMINI_DRAFTING_THINKING_LEVEL", "high"),
                     max_output_tokens=16384,
                 )
+                # Ensure zero paragraph loss on long documents (e.g. 17+ paragraphs):
+                parsed_p = parsed_doc.get("pleadings") or []
+                luna_p = (raw_draft or {}).get("pleadings") or []
+                if len(parsed_p) >= 2 and len(luna_p) < len(parsed_p):
+                    raw_draft["pleadings"] = parsed_p
+                for k_field in ("court_heading", "case_heading", "parties", "title", "opening_averment", "prayer", "verification", "signature_block"):
+                    if not raw_draft.get(k_field) and parsed_doc.get(k_field):
+                        raw_draft[k_field] = parsed_doc[k_field]
             except Exception:
                 raw_draft = parsed_doc if parsed_doc.get("pleadings") else {
                     "court_heading": str(state.facts.get("court_name") or ""),
