@@ -97,7 +97,7 @@ LABELS = {
     "purpose": ["Purpose", "उद्देश्य", "विषय", "Subject"],
     "sender": ["Sender", "प्रेषक", "नोटिसदाता"],
     "recipient": ["Recipient", "प्राप्तकर्ता", "नोटिसी"],
-    "deponent": ["Deponent", "शपथकर्ता", "शपथग्रहीता", "हस्ताक्षर शपथग्रहीता", "हस्ताक्षर शपथकर्ता"],
+    "deponent": ["Deponent", "शपथकर्ता", "शपथकर्त्री", "शपथग्रहीता", "शपथग्रहीत्री", "हस्ताक्षर शपथग्रहीता", "हस्ताक्षर शपथकर्ता"],
 }
 
 RELIEF_MARKERS = re.compile(
@@ -240,14 +240,14 @@ def _rescue_affidavit_fields(message: str, result: dict[str, Any], current: dict
 
     if not out.get("deponent") and not current.get("deponent"):
         m_main = re.search(
-            r"मैं\s*,?\s*(?:शपथकर्ता|शपथग्रहीता)?\s*([^\n।]{3,160}?(?:निवासी|जिला|उत्तर प्रदेश|कानपुर|आगरा|औरैया|लखनऊ)[^\n।]{0,80})",
+            r"मैं\s*,?\s*(?:शपथकर्ता|शपथकर्त्री|शपथग्रहीता|शपथग्रहीत्री)?\s*([^\n।]{2,160}?)(?=,?\s*शपथपूर्वक|\s*सत्यनिष्ठा|\n|।)",
             text,
         )
         if m_main and "सत्यापित करता" not in m_main.group(1):
             out["deponent"] = _clean(m_main.group(1))
         if not out.get("deponent"):
             m_sig = re.search(
-                r"(?:हस्ताक्षर\s*)?(?:शपथग्रहीता|शपथकर्ता)\s*[:\-–—]?\s*\n?\s*\(?([^\n()]{2,80})\)?",
+                r"(?:हस्ताक्षर\s*)?(?:शपथग्रहीता|शपथग्रहीत्री|शपथकर्त्री|शपथकर्ता)\s*[:\-–—]?\s*\n?\s*\(?([^\n()]{2,80})\)?",
                 text,
             )
             if m_sig:
