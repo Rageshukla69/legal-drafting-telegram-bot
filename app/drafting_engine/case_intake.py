@@ -3,7 +3,7 @@
 The intake layer is deliberately NOT keyword/label driven. It treats every user
 message as legal evidence, classifies it by semantic role, re-audits the
 accumulated case when required fields are missing, and keeps deterministic
-safety nets for obvious labelled blocks and request/narrative separation.
+safety nets for obvious labelled blocks, long structured documents, and request/narrative separation.
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ SCHEMA_PATH = ROOT / "intake_schema.json"
 TYPE_GUIDANCE = {
     "dava_plaint": "Plaint/वाद: court, court complex, advocate name, initiating party, opposite party, property, material facts/events, cause-of-action events and requested final/interim relief.",
     "written_statement": "Written statement/लिखित कथन: plaintiff/defendant, defendant-side narrative, admissions, denials, objections, alternative pleas, documents and counter-relief.",
-    "application": "Application/प्रार्थना पत्र: forum, applicant/opposite parties, background, purpose and every requested prayer/interim relief.",
+    "application": "Application/प्रार्थना पत्र व आपत्ति पत्र: forum, applicant/opposite parties, background, purpose and every requested prayer/interim relief.",
     "evidence_pw_affidavit": "Evidence/PW affidavit: court, witness/deponent, relationship, testimony facts, dates, places and exhibits/documents.",
     "affidavit": "Affidavit/शपथपत्र (any judicial, administrative, university, scholarship, revenue, or notary affidavit): authority/forum (समक्ष/न्यायालय), deponent (शपथकर्ता/शपथग्रहीता full details), purpose/subject, all sworn factual statements (प्रस्तर/धारा 1..N), place, date, advocate/registration details, and verification.",
     "legal_notice": "Legal notice/विधिक नोटिस: sender, recipient, chronology, breach/default, demand, deadline and documents.",
@@ -83,13 +83,13 @@ AUDIT RULES
 LABELS = {
     "court_name": ["Court", "न्यायालय", "अदालत", "कोर्ट", "समक्ष", "Before"],
     "court_complex": ["Court Complex", "कचहरी", "न्यायालय परिसर", "कोर्ट कम्पाउण्ड"],
-    "advocate_name": ["Advocate", "Advocate Name", "अधिवक्ता", "वकील", "एडवोकेट", "Counsel"],
-    "plaintiff_intro": ["Plaintiff", "वादी", "दावेदार", "Claimant"],
-    "defendant_intro": ["Defendant", "प्रतिवादी", "विपक्षी", "Respondent", "Opposite Party"],
+    "advocate_name": ["Advocate", "Advocate Name", "अधिवक्ता", "वकील", "एडवोकेट", "Counsel", "द्वारा अधिवक्ता"],
+    "plaintiff_intro": ["Plaintiff", "वादी", "दावेदार", "Claimant", "प्रार्थीगण", "आवेदकगण"],
+    "defendant_intro": ["Defendant", "प्रतिवादी", "विपक्षी", "Respondent", "Opposite Party", "आपत्तिकर्त्री", "प्रतिवादिनी"],
     "property_description": ["Property", "संपत्ति", "विवादित भूमि", "भूमि", "मकान", "विवादित संपत्ति"],
     "facts": ["Main Facts", "Facts", "मुख्य तथ्य", "तथ्य", "विवरण", "Issue", "Case Details", "शपथपत्र के कथन"],
     "cause_of_action": ["Cause of action", "वाद हेतुक", "वाद हेतु", "वाद हेतुक की तारीख", "कारण वाद"],
-    "reliefs": ["Relief", "Reliefs", "राहत", "प्रार्थना", "अनुतोष", "Prayer", "मांगी गई राहत"],
+    "reliefs": ["Relief", "Reliefs", "राहत", "प्रार्थना", "अनुतोष", "Prayer", "मांगी गई राहत", "अनुतोष की मांग", "दावाकृत अनुतोष"],
     "demands": ["Demand", "Demands", "मांग", "अनुपालन"],
     "defence_points": ["Defence", "प्रतिरक्षा", "बचाव", "आपत्ति"],
     "custom_add_points": ["Add Point", "Add Points", "अतिरिक्त बिंदु", "जोड़ने योग्य बिंदु"],
@@ -102,7 +102,7 @@ LABELS = {
 
 RELIEF_MARKERS = re.compile(
     r"(?:अतः|अत:|इसलिए|इस हेतु|न्यायहित में|प्रार्थना है|निवेदन है|राहत दी जाए|राहत प्रदान|"
-    r"रोका जाए|रोक दिया जाए|घोषित किया जाए|कब्जा दिलाया जाए|आदेशित किया जाए|"
+    r"रोका जाए|रोक दिया जाए|घोषित किया जाए|कब्जा दिलाया जाए|आदेशित किया जाए|निरस्त करने की कृपा|"
     r"may kindly|it is therefore prayed|prayer|relief|restrain|restrained|directed|declared|"
     r"grant|award|allow|dismiss|decree|sought|requested)", re.I
 )
@@ -160,6 +160,53 @@ def _extract_labelled(message: str) -> dict[str, Any]:
     return out
 
 
+def _extract_long_structured_pleading_fast(message: str) -> dict[str, Any]:
+    """Deterministically extract court, case_number, parties, facts (all 'यह कि' paragraphs), reliefs, and advocate
+    from long pasted or PDF-extracted Hindi legal documents (e.g. 5 to 100 paragraphs)."""
+    from .multi_draft_orchestrator import parse_structured_legal_document
+
+    parsed = parse_structured_legal_document(message)
+    pleadings = parsed.get("pleadings") or []
+    if len(pleadings) < 2:
+        return {}
+
+    out: dict[str, Any] = {
+        "facts": pleadings,
+    }
+    if parsed.get("court_heading"):
+        out["court_name"] = parsed["court_heading"]
+    if parsed.get("case_heading"):
+        m_num = re.search(r"([0-9०-९]+\s*/\s*[0-9०-९]{4}|[0-9०-९]+)", parsed["case_heading"])
+        if m_num:
+            out["case_number"] = m_num.group(1).strip()
+    parties = parsed.get("parties") or []
+    if parties:
+        if "बनाम" in parties:
+            b_idx = parties.index("बनाम")
+            pls = [p for p in parties[:b_idx] if p != "बनाम"]
+            dfs = [p for p in parties[b_idx + 1:] if p != "बनाम"]
+            if pls:
+                out["plaintiffs"] = pls
+            if dfs:
+                out["defendants"] = dfs
+        out["parties"] = [p for p in parties if p != "बनाम"]
+    if parsed.get("prayer"):
+        out["reliefs"] = parsed["prayer"]
+    if parsed.get("title"):
+        out["purpose"] = parsed["title"].splitlines()[0].strip()
+    sig = "\n".join(parsed.get("signature_block") or [])
+    m_adv = re.search(r"(?:द्वारा\s*अधिवक्ता\s*[:\-–—]?\s*)([^\n]+)", sig)
+    if m_adv and m_adv.group(1).strip():
+        out["advocate_name"] = m_adv.group(1).strip(" ()")
+    else:
+        for ln in parsed.get("signature_block") or []:
+            if "शुक्ल" in ln or "एडवोकेट" in ln or "अधिवक्ता" in ln:
+                if not ln.startswith("द्वारा"):
+                    out["advocate_name"] = ln.strip(" ()")
+                    break
+    return out
+
+
 def _narrative_rescue(message: str, result: dict[str, Any]) -> dict[str, Any]:
     """Last-resort rescue when AI returns an incomplete classification."""
     out = dict(result or {})
@@ -186,13 +233,11 @@ def _rescue_affidavit_fields(message: str, result: dict[str, Any], current: dict
     if not text:
         return out
 
-    # 1. Recover Forum / Authority ("समक्ष: ..." or "न्यायालय ...")
     if not out.get("court_name") and not current.get("court_name"):
         m_samaksh = re.search(r"(?m)^\s*(?:समक्ष|न्यायालय)\s*[:\-–—]?\s*(.+)$", text)
         if m_samaksh:
             out["court_name"] = f"समक्ष: {_clean(m_samaksh.group(1))}" if "समक्ष" in m_samaksh.group(0) else _clean(m_samaksh.group(0))
 
-    # 2. Recover Deponent ("मैं, ...", "मैं शपथकर्ता ...", "हस्ताक्षर शपथग्रहीता (नाम)", etc.)
     if not out.get("deponent") and not current.get("deponent"):
         m_main = re.search(
             r"मैं\s*,?\s*(?:शपथकर्ता|शपथग्रहीता)?\s*([^\n।]{3,160}?(?:निवासी|जिला|उत्तर प्रदेश|कानपुर|आगरा|औरैया|लखनऊ)[^\n।]{0,80})",
@@ -219,7 +264,6 @@ def _rescue_affidavit_fields(message: str, result: dict[str, Any], current: dict
                     out["deponent"] = _clean(vals)
                     break
 
-    # 3. Recover Advocate / Identification details if present ("अधिवक्ता\nपंजीकरण सं०: UP19878/25...")
     if not out.get("advocate_name") and not current.get("advocate_name"):
         m_adv = re.search(
             r"(?:अधिवक्ता|एडवोकेट)[^\n]*\n\s*(?:पंजीकरण\s*सं[०.]?\s*[:\-]?\s*[A-Za-z0-9/\-]+)(?:\s*\n\s*मो[०.]?\s*[:\-]?\s*\d{10})?",
@@ -228,7 +272,6 @@ def _rescue_affidavit_fields(message: str, result: dict[str, Any], current: dict
         if m_adv:
             out["advocate_name"] = _clean(m_adv.group(0))
 
-    # 4. Recover Purpose if facts are present so the user is never stuck in a loop after pasting a full affidavit
     has_facts = bool(out.get("facts") or current.get("facts"))
     if has_facts and not out.get("purpose") and not current.get("purpose"):
         m_subj = re.search(r"(?m)^\s*(?:विषय|उद्देश्य|बाबत|वास्ते)\s*[:\-–—]\s*(.+)$", text)
@@ -294,8 +337,33 @@ def extract_case_facts(
     if not history or history[-1].strip() != message.strip():
         history.append(message)
 
-    history = _history_for_model(history, int(os.getenv("GEMINI_INTAKE_HISTORY_CHARS", "80000")))
     current = _normalize(current_facts or {})
+
+    # Fast deterministic path for already-structured long pleadings/petitions (e.g. 5 to 100 'यह कि' paragraphs)
+    # Prevents multi-call LLM timeouts when a user uploads a multi-page PDF or pastes a 17-paragraph document!
+    combined_source = "\n\n".join(history)
+    fast_structured = _normalize(_extract_long_structured_pleading_fast(combined_source))
+    labelled = _normalize(_extract_labelled(message))
+
+    required = {
+        "dava_plaint": ("court_name", "plaintiffs", "defendants", "facts", "reliefs"),
+        "written_statement": ("court_name", "plaintiffs", "defendants", "facts"),
+        "application": ("court_name", "parties", "facts", "reliefs"),
+        "evidence_pw_affidavit": ("court_name", "deponent", "facts"),
+        "affidavit": ("deponent", "facts", "purpose"),
+        "legal_notice": ("sender", "recipient", "facts", "demands"),
+        "other_civil": ("parties", "facts", "purpose"),
+    }.get(document_type, ("parties", "facts", "purpose"))
+
+    if len(fast_structured.get("facts") or []) >= 3:
+        fast_merged = _normalize({**current, **labelled, **fast_structured})
+        if document_type in {"affidavit", "evidence_pw_affidavit"}:
+            fast_merged = _normalize(_rescue_affidavit_fields(combined_source, fast_merged, current))
+        fast_missing = [key for key in required if not fast_merged.get(key)]
+        if not fast_missing or len(combined_source) >= 2200:
+            return fast_merged
+
+    history = _history_for_model(history, int(os.getenv("GEMINI_INTAKE_HISTORY_CHARS", "80000")))
     client = GeminiClient()
 
     payload = {
@@ -314,25 +382,15 @@ def extract_case_facts(
         first = {}
     first = _normalize(first)
 
-    labelled = _normalize(_extract_labelled(message))
-    candidate = _normalize({**first, **labelled})
+    candidate = _normalize({**first, **labelled, **fast_structured})
 
     if document_type in {"affidavit", "evidence_pw_affidavit"}:
         candidate = _normalize(_rescue_affidavit_fields(message, candidate, current))
 
-    required = {
-        "dava_plaint": ("court_name", "plaintiffs", "defendants", "facts", "reliefs"),
-        "written_statement": ("court_name", "plaintiffs", "defendants", "facts"),
-        "application": ("court_name", "parties", "facts", "reliefs"),
-        "evidence_pw_affidavit": ("court_name", "deponent", "facts"),
-        "affidavit": ("deponent", "facts", "purpose"),
-        "legal_notice": ("sender", "recipient", "facts", "demands"),
-        "other_civil": ("parties", "facts", "purpose"),
-    }.get(document_type, ("parties", "facts", "purpose"))
     missing = [key for key in required if not candidate.get(key) and not current.get(key)]
 
     audit: dict[str, Any] = {}
-    if missing or os.getenv("GEMINI_INTAKE_AUDIT_ALWAYS", "1").strip().lower() in {"1", "true", "yes", "on"}:
+    if missing and len(combined_source) < 3500 and os.getenv("GEMINI_INTAKE_AUDIT_ALWAYS", "0").strip().lower() in {"1", "true", "yes", "on"}:
         audit_payload = {
             "document_type": document_type,
             "required_fields_still_missing": missing,

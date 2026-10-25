@@ -27,7 +27,7 @@ SECTION_DIVIDER_HEADING = "अतिरिक्त कथन (उजरात �
 
 AS_IS_SPECIALIST_PROMPT = """You are the Verbatim Legal Structuring & Handwritten-to-Legal Conversion Engine powered by GPT-6.0-Luna.
 
-The advocate has provided an existing document (printed on A4 paper, PDF, Word, or text) OR a handwritten legal draft (हस्तलिखित ड्राफ्ट) for a Dava (वाद-पत्र), Written Statement (जवाब दावा / प्रतिवाद-पत्र), Affidavit (शपथ-पत्र), Legal Notice (कानूनी नोटिस), Application (प्रार्थना-पत्र), or other civil filing.
+The advocate has provided an existing document (printed on A4 paper, PDF, Word, or text) OR a handwritten legal draft (हस्तलिखित ड्राफ्ट) for a Dava (वाद-पत्र), Written Statement (जवाब दावा / प्रतिवाद-पत्र), Affidavit (शपथ-पत्र), Legal Notice (कानूनी नोटिस), Application / Objection Petition (प्रार्थना-पत्र / आपत्ति-पत्र), or other civil filing.
 
 Your goal is to place their document into the structured JSON fields (`court_heading`, `case_heading`, `parties`, `title`, `opening_averment`, `pleadings`, `prayer`, `verification`, `signature_block`) so the bot's deterministic renderer outputs a court-ready **Legal-Size (`8.5" × 14"`)** DOCX and PDF that they can immediately use or edit.
 
@@ -37,21 +37,19 @@ CRITICAL RULES FOR "AS-IT-IS / HANDWRITTEN TO LEGAL STRUCTURE" MODE:
    - NEVER add external template paragraphs, NEVER invent new facts, and NEVER summarize or shorten the advocate's paragraphs.
 2. **If the Source is an Already-Structured A4 / Typed Document**:
    - Keep the exact wording and structure of each section (`court_heading`, `case_heading`, `parties`, `title`, `opening_averment`, `pleadings`, `prayer`, `verification`, `signature_block`) as written in the A4 document.
-   - Strip only leading paragraph numbers (`1.`, `2.`, `1 (एक) :`) from items in `pleadings` because the renderer automatically numbers them `1 (एक) : `, `2 (दो) : `, etc.
+   - Strip only leading paragraph numbers (`1.`, `2.`, `1 (एक) :`, `*`) from items in `pleadings` because the renderer automatically numbers them `1 (एक) : `, `2 (दो) : `, etc.
 3. **If the Source is a Handwritten Draft or Rough Notes (हस्तलिखित ड्राफ्ट)**:
    - Silently fix any OCR character/matra recognition noise caused by handwriting scan (e.g. broken Devanagari matras) using Indian legal context while preserving the advocate's exact intended words and facts.
    - Organize the handwritten content into proper Indian court legal structure:
      * `court_heading`: The Court or Authority name (`न्यायालय श्रीमान ...` or `समक्ष : ...`).
      * `case_heading`: Case/Suit number line (`मूल वाद संख्या ... सन् ...`), or `""` for non-court affidavits/legal notices.
      * `parties`: Each plaintiff and defendant (or sender/recipient) in proper cause-title format.
-     * `title`: Proper centered document title (`वाद-पत्र ...`, `प्रतिवाद-पत्र / जवाब दावा`, `शपथ-पत्र`, `रजिस्टर्ड कानूनी नोटिस`, `प्रार्थना-पत्र ...`).
-     * `opening_averment`: Formal opening line (`उपरोक्त वादी निम्नलिखित निवेदन करता है :-` / `मैं शपथग्रहीता ... शपथपूर्वक बयान करता हूँ :-`).
+     * `title`: Proper centered document title (`वाद-पत्र ...`, `प्रतिवाद-पत्र / जवाब दावा`, `शपथ-पत्र`, `रजिस्टर्ड कानूनी नोटिस`, `प्रार्थना-पत्र ...`, `आपत्ति-पत्र ...`).
+     * `opening_averment`: Formal opening line (`उपरोक्त वादी निम्नलिखित निवेदन करता है :-` / `मान्यवर, ...` / `मैं शपथग्रहीता ... शपथपूर्वक बयान करता हूँ :-`).
      * `pleadings`: Each handwritten point/paragraph formatted cleanly starting with `"यह कि ..."` (without leading paragraph numbers).
      * `prayer`: Prayer clauses (`प्रार्थना`) if present or applicable (leave `[]` for affidavits).
      * `verification`: Formal verification (`सत्यापन` / `तस्दीक`) without repeating the heading word `'सत्यापन'`.
      * `signature_block`: Place, date, party/deponent signature line, and advocate line.
-4. **No Prohibited Legal Sections in Pleadings / Written Statement**:
-   - In Dava (वाद-पत्र) and Written Statement (जवाब दावा), do NOT add legal sections (`धारा`), CPC (`सिविल प्रक्रिया संहिता`), BNSS (`भारतीय नागरिक सुरक्षा संहिता`), BNS, IPC, or statutory citations.
 """
 
 BASE_RULES = [
@@ -60,7 +58,7 @@ BASE_RULES = [
     "CAUSE-TITLE PARTY FORMATTING (`parties`): Never write 'वादी:', 'वादीगण:', 'प्रतिवादी:', or 'प्रतिवादीगण:' at the start of any party line (the renderer places `.................... वादी` and `.................... प्रतिवादीगण` on the right automatically). Never merge multiple plaintiffs or multiple defendants into a single string—put each person as a separate item in `parties` so they are numbered individually (`1 (एक). ...`, `2 (दो). ...`).",
     "MANDATORY BILINGUAL NUMBER FORMAT: Every factual numerical value (Gata/Khasra/Bhoomi number, area in hectare/biswa/bigha/decimal, age, date, time, money amount, fraction, and Vaad Patra paragraph number) MUST be written in digits followed by its Hindi words in parentheses, e.g., 'वादपत्र की धारा 1 (एक)', 'गाटा संख्या 412 (चार सौ बारह)', 'रकबा 0.250 (शून्य दशमलव दो पाँच शून्य) हेक्टेयर', '2 (दो) बिस्वा', 'उम्र लगभग 52 (बावन) वर्ष', 'दिनांक 12 अक्टूबर 2026 (बारह अक्टूबर दो हजार छब्बीस)', 'प्रातः 10:00 (दस) बजे'. Never write bare number words like 'दो बिस्वा' without the digit '2 (दो) बिस्वा'.",
     "NEVER write thin, 1-sentence summaries. Every pleading or affidavit paragraph must be written in rich, authoritative, multi-sentence formal Hindi ('यह कि ...').",
-    "FOR WRITTEN STATEMENT (जवाब दावा) TWO-PART STRUCTURE: (1) In Part 1 (para-wise replies to the Vaad Patra), reply strictly 1-to-1 to the numbered paragraphs of the Vaad Patra ('यह कि वादपत्र की धारा 1 (एक) का कथन...', 'यह कि वादपत्र की धारा 2 (दो) का कथन...', etc.) on purely factual grounds, and NEVER put a 'भाग प्रथम' heading before Paragraph 1. (2) Immediately after the para-wise replies, insert the exact section heading item 'अतिरिक्त कथन (उजरात मजीद)', followed by continuously numbered factual defense paragraphs setting out the defendants' true factual case, absence of cause of action, peshbandi/harassment, suppression of material facts/unclean hands, undervaluation/insufficient court fee, and prayer for dismissal with special costs — WITHOUT citing any legal sections, CPC Orders/Rules, BNSS, or statutory Acts.",
+    "FOR WRITTEN STATEMENT (जवाब दावा) TWO-PART STRUCTURE: (1) In Part 1 (para-wise replies to the Vaad Patra), reply strictly 1-to-1 to the numbered paragraphs of the Vaad Patra ('यह कि वादपत्र की धारा 1 (एक) का कथन...', 'यह कि वादपत्र की धारा 2 (दो) का कथन...', etc.) on purely factual grounds, and NEVER put a 'भाग प्रथम' heading before Paragraph 1. (2) Immediately after the para-wise replies, insert the exact section heading item 'अतिरिक्त कथन (उजरात मजीद)', followed by continuously numbered defense paragraphs setting out the defendants' true factual case, absence of cause of action, peshbandi/harassment, suppression of material facts/unclean hands, undervaluation/insufficient court fee, and prayer for dismissal with special costs — WITHOUT citing any legal sections, CPC Orders/Rules, BNSS, or statutory Acts.",
     "Preserve event status exactly: attempt is not completion; threat is not dispossession; allegation is not an established fact.",
     "If CASE_FACTS contains custom_add_points, include every requested point as a proper paragraph/clause.",
     "If CASE_FACTS contains custom_remove_points, omit those topics/clauses from the draft.",
@@ -80,18 +78,29 @@ _PARTY_STOPWORDS = {
     "village", "post", "tehsil", "pargana", "district", "ward", "house",
 }
 
+_ROLE_WORDS_PAT = (
+    r"(?:प्रतिवादीगण|प्रतिवादिनीगण|प्रतिवादिनी|प्रतिवादी|विपक्षीगण|विपक्षी|"
+    r"वादीगण|वादिनी|वादी|प्रार्थीगण|प्रार्थिनी|प्रार्थी|"
+    r"आवेदकगण|आवेदिका|आवेदक|आपत्तिकर्त्री|आपत्तिकर्तागण|आपत्तिकर्ता|"
+    r"उत्तरदातागण|उत्तरदाता|शपथग्रहीता|शपथकर्ता)"
+    r"(?:\s*/\s*(?:प्रतिवादीगण|प्रतिवादिनीगण|प्रतिवादिनी|प्रतिवादी|विपक्षीगण|विपक्षी|"
+    r"वादीगण|वादिनी|वादी|प्रार्थीगण|प्रार्थिनी|प्रार्थी|"
+    r"आवेदकगण|आवेदिका|आवेदक|आपत्तिकर्त्री|आपत्तिकर्तागण|आपत्तिकर्ता|"
+    r"उत्तरदातागण|उत्तरदाता|शपथग्रहीता|शपथकर्ता))*"
+)
+
 _LEADING_ROLE_PREFIX_RE = re.compile(
-    r"^\s*(?:(?:\d+(?:\s*\([^)]+\))?\s*[.)\-:]\s*)?"
-    r"(?:प्रतिवादीगण|प्रतिवादिनीगण|प्रतिवादिनी|प्रतिवादी|विपक्षीगण|विपक्षी|वादीगण|वादिनी|वादी|प्रार्थीगण|प्रार्थिनी|प्रार्थी|उत्तरदातागण|उत्तरदाता|शपथग्रहीता|शपथकर्ता)"
-    r"(?:\s*(?:संख्या|सं०|सं\.|नं०|नं\.)\s*\d+(?:\s*\([^)]+\))?(?:\s*(?:व|एवं|तथा)\s*\d+(?:\s*\([^)]+\))?)?)?"
-    r"\s*[:\-–—]+\s*)+"
+    rf"^\s*(?:(?:\d+(?:\s*\([^)]+\))?\s*[.)\-:]\s*)?"
+    rf"{_ROLE_WORDS_PAT}"
+    rf"(?:\s*(?:संख्या|सं०|सं\.|नं०|नं\.)\s*\d+(?:\s*\([^)]+\))?(?:\s*(?:व|एवं|तथा)\s*\d+(?:\s*\([^)]+\))?)?)?"
+    rf"\s*[:\-–—]+\s*)+"
 )
 
 _TRAILING_ROLE_SUFFIX_RE = re.compile(
-    r"\s*(?:[,;|\-–—.]+\s*)?"
-    r"(?:प्रतिवादीगण|प्रतिवादिनीगण|प्रतिवादिनी|प्रतिवादी|विपक्षीगण|विपक्षी|वादीगण|वादिनी|वादी|प्रार्थीगण|प्रार्थिनी|प्रार्थी|उत्तरदातागण|उत्तरदाता|शपथग्रहीता|शपथकर्ता)"
-    r"(?:\s*(?:संख्या|सं०|सं\.|नं०|नं\.)\s*\d+(?:\s*\([^)]+\))?(?:\s*(?:व|एवं|तथा)\s*\d+(?:\s*\([^)]+\))?)?)?"
-    r"[।.]?\s*$"
+    rf"\s*(?:[,;|\-–—.…]+\s*)?"
+    rf"{_ROLE_WORDS_PAT}"
+    rf"(?:\s*(?:संख्या|सं०|सं\.|नं०|नं\.)\s*\d+(?:\s*\([^)]+\))?(?:\s*(?:व|एवं|तथा)\s*\d+(?:\s*\([^)]+\))?)?)?"
+    rf"[।.]?\s*$"
 )
 
 
@@ -108,11 +117,20 @@ def _flatten_str_item(item: Any) -> str:
 
 
 def _strip_party_role_affixes(line: str) -> str:
-    """Remove both leading ('वादी: ...', 'प्रतिवादीगण: ...') and trailing ('... — वादी') role labels."""
+    """Remove both leading ('वादी: ...', 'प्रतिवादीगण: ...') and trailing ('... — वादी', '... प्रार्थीगण / आवेदकगण') role labels."""
     s = str(line or "").strip()
     s = _LEADING_ROLE_PREFIX_RE.sub("", s).strip()
     s = _TRAILING_ROLE_SUFFIX_RE.sub("", s).strip()
     return s
+
+
+def _extract_trailing_party_role(line: str) -> str:
+    """Extract custom role label from a party line if present (e.g. 'प्रार्थीगण / आवेदकगण' or 'आपत्तिकर्त्री / प्रतिवादिनी')."""
+    s = str(line or "").strip()
+    m = re.search(rf"(?:[—–\-…]|\.\.\.)+\s*({_ROLE_WORDS_PAT})\s*[।.]?\s*$", s)
+    if m:
+        return m.group(1).strip()
+    return ""
 
 
 def _expand_merged_party_lines(lines: list[str]) -> list[str]:
@@ -124,8 +142,8 @@ def _expand_merged_party_lines(lines: list[str]) -> list[str]:
             continue
         s_no_num = re.sub(r"^\s*\d+(?:\s*\([^)]+\))?\s*[.)\-:]\s*", "", s).strip()
         m = re.match(
-            r"^(?P<p1>.+?\b(?:पुत्र|पत्नी|पुत्री|विधवा)\s+[^,]+?)\s+(?:तथा|एवं|व|और)\s+"
-            r"(?P<p2>.+?\b(?:पुत्र|पत्नी|पुत्री|विधवा)\s+[^,]+?)\s*,?\s*"
+            r"^(?P<p1>.+?(?=\s)(?:पुत्र|पत्नी|पुत्री|विधवा)\s+[^,]+?)\s+(?:तथा|एवं|व|और)\s+"
+            r"(?P<p2>.+?(?=\s)(?:पुत्र|पत्नी|पुत्री|विधवा)\s+[^,]+?)\s*,?\s*"
             r"(?:दोनों\s+|तीनों\s+|सभी\s+)?(?:निवासीगण|निवासी)\s+(?P<addr>.+)$",
             s_no_num,
         )
@@ -172,7 +190,7 @@ def _format_cause_title_parties(parties: list[str], facts: dict[str, Any] | None
             out.append(".................... वादीगण")
         else:
             p_clean = re.sub(r"^\s*\d+(?:\s*\([^)]+\))?\s*[.)\-:]\s*", "", cleaned_pl[0]).strip()
-            is_plural_pl = any(w in p_clean for w in ("दोनों", "तीनों", "निवासीगण", "पुत्रगण", "वादीगण"))
+            is_plural_pl = any(w in p_clean for w in ("दोनों", "तीनों", "निवासीगण", "पुत्रगण", "वादीगण", "आदि"))
             out.append(p_clean)
             out.append(".................... वादीगण" if is_plural_pl else ".................... वादी")
 
@@ -186,7 +204,7 @@ def _format_cause_title_parties(parties: list[str], facts: dict[str, Any] | None
             out.append(".................... प्रतिवादीगण")
         else:
             d_clean = re.sub(r"^\s*\d+(?:\s*\([^)]+\))?\s*[.)\-:]\s*", "", cleaned_df[0]).strip()
-            is_plural_df = any(w in d_clean for w in ("दोनों", "तीनों", "निवासीगण", "पुत्रगण", "प्रतिवादीगण"))
+            is_plural_df = any(w in d_clean for w in ("दोनों", "तीनों", "निवासीगण", "पुत्रगण", "प्रतिवादीगण", "आदि"))
             out.append(d_clean)
             out.append(".................... प्रतिवादीगण" if is_plural_df else ".................... प्रतिवादी")
 
@@ -200,7 +218,7 @@ def _format_cause_title_parties(parties: list[str], facts: dict[str, Any] | None
 def _clean_short_name(raw: str) -> str:
     s = _strip_party_role_affixes(str(raw or ""))
     s = re.sub(r"^\s*मैं\s*,?\s*(?:शपथग्रहीता|शपथकर्ता)?\s*", "", s).strip()
-    m = re.split(r"\s+(?:पुत्र|पत्नी|पुत्री|विधवा|उम्र|आयु|निवासी)\b|,", s, maxsplit=1)
+    m = re.split(r"\s+(?:पुत्र|पत्नी|पुत्री|विधवा|उम्र|आयु|निवासी)(?=\s|$)|,", s, maxsplit=1)
     if m and m[0].strip():
         return re.sub(r"^\s*\d+(?:\s*\([^)]+\))?\s*[.)\-:]\s*", "", m[0].strip(" ()"))
     return s.strip(" ()")
@@ -251,6 +269,340 @@ def _extract_party_names_for_doc(facts: dict[str, Any], document_type: str = "da
         elif isinstance(val, str) and val.strip():
             return _clean_short_name(val), "उपरोक्त वादी"
     return "वादी", "उपरोक्त वादी"
+
+
+_DEVANAGARI_DIGITS_TRANS = str.maketrans("०१२३४५६७८९", "0123456789")
+
+
+def _norm_dedup_key(s: str) -> str:
+    """Normalize paragraph text for duplicate-page detection across Hindi/ASCII digits and punctuation."""
+    t = str(s or "").translate(_DEVANAGARI_DIGITS_TRANS)
+    t = re.sub(r"\([^)]*\)", "", t)
+    t = re.sub(r"[^0-9\u0900-\u097F]+", "", t)
+    return t[:90]
+
+
+def parse_structured_legal_document(raw_text: str, document_type: str = "") -> dict[str, Any]:
+    """Deterministically parse a structured Hindi legal document (from PDF, DOCX, OCR, or multi-part pasted text)
+    into the canonical draft schema (`court_heading`, `case_heading`, `parties`, `title`, `opening_averment`,
+    `pleadings`, `prayer`, `verification`, `signature_block`) with zero LLM token truncation or latency.
+    """
+    text = str(raw_text or "").strip()
+    if not text:
+        return {}
+
+    # 1. Remove page footer/header artifacts like "प्रकीर्ण वाद संख्या ६४/२०२५ — मंजूलता आदि बनाम राजरानी पृष्ठ १ / २"
+    cleaned_lines: list[str] = []
+    for raw_ln in text.splitlines():
+        ln = raw_ln.strip()
+        if not ln:
+            continue
+        if re.search(r"पृष्ठ\s*[0-9०-९]+\s*/\s*[0-9०-९]+", ln):
+            ln = re.sub(r"^.*?पृष्ठ\s*[0-9०-९]+\s*/\s*[0-9०-९]+\s*$", "", ln).strip()
+            if not ln:
+                continue
+        if re.match(r"^page\s*\d+(?:\s*of\s*\d+)?$", ln, flags=re.I):
+            continue
+        if re.match(r"^[.\-_—–]{4,}$", ln):
+            continue
+        if re.match(r"^[0-9०-९]{1,3}\s*[.):\-–—]*$", ln):
+            continue
+        cleaned_lines.append(ln)
+
+    # 2. Split lines that contain multiple inline bulleted/numbered "यह कि" points
+    expanded_lines: list[str] = []
+    for ln in cleaned_lines:
+        parts = re.split(
+            r"(?=(?:^|\s)(?:[*•▪▸]\s*|(?:प्रस्तर|धारा|पैरा)?\s*[0-9०-९]{1,3}\s*(?:\([^)]+\))?\s*[.):\-–—]\s*)यह\s+कि(?=\s))",
+            ln,
+        )
+        for p in parts:
+            p_str = p.strip()
+            if p_str:
+                expanded_lines.append(p_str)
+
+    court_heading = ""
+    case_heading = ""
+    parties: list[str] = []
+    title_lines: list[str] = []
+    opening_averment = ""
+    pleadings: list[str] = []
+    prayer: list[str] = []
+    verification_lines: list[str] = []
+    signature_block: list[str] = []
+
+    section = "header"
+    seen_versus = False
+    para_start_re = re.compile(
+        r"^(?:[*•▪▸\-]\s*|(?:प्रस्तर|धारा|पैरा)?\s*[0-9०-९]{1,3}\s*(?:\([^)]*\))?\s*[.):\-–—]+\s*)?(यह\s+कि(?=\s|:).*)$"
+    )
+    numbered_item_re = re.compile(
+        r"^(?:[*•▪▸]\s*|[0-9०-९]{1,3}\s*(?:\([^)]*\))?\s*[.):\-–—]+\s*)(.+)$"
+    )
+
+    for ln in expanded_lines:
+        # If we already finished collecting prayer + advocate signature on an earlier page
+        # and encounter a repeated paragraph from a duplicate page in the PDF, stop!
+        if (
+            section in {"prayer", "verification", "signature"}
+            and prayer
+            and any("अधिवक्ता" in s or "एडवोकेट" in s for s in signature_block)
+            and para_start_re.match(ln)
+        ):
+            break
+
+        # Detect section transitions
+        if re.match(r"^[\s*•_\-–—]*(?:प्रार्थना|अनुतोष)(?:\s*\(Prayer\))?\s*[:\-–—]*\s*$", ln, flags=re.I):
+            section = "prayer"
+            continue
+        m_prayer_inline = re.match(r"^[\s*•_\-–—]*(?:प्रार्थना|अनुतोष)\s*[:\-–—]+\s*(.+)$", ln)
+        if m_prayer_inline:
+            section = "prayer"
+            prayer.append(m_prayer_inline.group(1).strip())
+            continue
+        if section in {"pleadings", "header"} and re.match(
+            r"^(?:अतः|अतएव)\s+(?:माननीय\s+न्यायालय|श्रीमान\s+जी|न्यायालय)\s+से\s+(?:सादर\s+|सविनय\s+|विनम्र\s+)?प्रार्थना\s+है",
+            ln,
+        ):
+            section = "prayer"
+            prayer.append(ln)
+            continue
+
+        if re.match(r"^[\s*•_\-–—]*(?:सत्यापन|तस्दीक)(?:\s*\(Verification\))?\s*[:\-–—]*\s*$", ln, flags=re.I):
+            section = "verification"
+            continue
+        m_ver_inline = re.match(r"^[\s*•_\-–—]*(?:सत्यापन|तस्दीक)(?:\s*\(Verification\))?\s*[:\-–—]+\s*(.+)$", ln, flags=re.I)
+        if m_ver_inline:
+            section = "verification"
+            verification_lines.append(m_ver_inline.group(1).strip())
+            continue
+        if section in {"pleadings", "prayer"} and re.match(
+            r"^(?:मैं|हम)\s*,?\s*(?:उपरोक्त|शपथग्रहीता|शपथकर्ता|वादी|प्रतिवादी|आपत्तिकर्त्री|प्रार्थी).*सत्यापित\s+कर",
+            ln,
+        ):
+            section = "verification"
+            verification_lines.append(ln)
+            continue
+
+        if section in {"pleadings", "prayer", "verification", "signature"} and (
+            re.match(
+                r"^(?:दिनांक|स्थान|तारीख|हस्ताक्षर|द्वारा\s*अधिवक्ता|अधिवक्ता|एडवोकेट|प्रार्थीगण|प्रार्थी|आवेदकगण|आपत्तिकर्त्री|आपत्तिकर्ता|वादीगण|वादी|प्रतिवादीगण|प्रतिवादी|शपथग्रहीता|शपथकर्ता|मो०|मोबाइल|पंजीकरण\s*सं)(?=\s|$|[:।.,;\-–—(])",
+                ln,
+            )
+            or (section == "signature" and len(ln) <= 65)
+        ):
+            section = "signature"
+            signature_block.append(ln)
+            continue
+
+        m_para = para_start_re.match(ln)
+        if m_para and section in {"header", "pleadings"}:
+            section = "pleadings"
+            pleadings.append(m_para.group(1).strip())
+            continue
+
+        if section == "header":
+            if not court_heading and re.match(r"^(?:न्यायालय|माननीय\s+न्यायालय|समक्ष|सेवा\s+में)(?=\s|$)", ln):
+                court_heading = ln
+                continue
+            if not case_heading and re.search(
+                r"(?:वाद\s*संख्या|प्रकीर्ण\s*वाद|मूल\s*वाद|मुकदमा\s*सं|अपील\s*सं|केस\s*नं|वाद\s*सं०|सन्\s*[0-9०-९]{4})",
+                ln,
+            ):
+                case_heading = ln
+                continue
+            if re.match(r"^बनाम\s*[:\-–—]*$", ln) or ln == "बनाम":
+                seen_versus = True
+                continue
+            is_role_only = bool(re.match(
+                r"^(?:\.\.\.|…|—|–|-)+\s*(?:प्रार्थी|आवेदक|वादी|प्रतिवादी|आपत्तिकर्त्री|आपत्तिकर्ता|विपक्षी|उत्तरदाता)",
+                ln,
+            ))
+            if is_role_only:
+                if parties and not re.search(r"(?:\.\.\.|…|—)\s*(?:प्रार्थी|आवेदक|वादी|प्रतिवादी|आपत्तिकर्त्री|आपत्तिकर्ता|विपक्षी|उत्तरदाता)", parties[-1]):
+                    parties[-1] = f"{parties[-1]} {ln}".strip()
+                else:
+                    parties.append(ln)
+                continue
+            if re.search(
+                r"(?:\.\.\.|…|—|–|-)\s*(?:प्रार्थी|आवेदक|वादी|प्रतिवादी|आपत्तिकर्त्री|आपत्तिकर्ता|विपक्षी|उत्तरदाता)",
+                ln,
+            ) or (
+                not title_lines
+                and any(
+                    ln.endswith(r_sfx)
+                    for r_sfx in (
+                        "प्रार्थीगण", "आवेदकगण", "वादी", "वादीगण", "वादिनी",
+                        "प्रतिवादी", "प्रतिवादीगण", "प्रतिवादिनी", "आपत्तिकर्त्री",
+                        "विपक्षीगण", "उत्तरदातागण",
+                    )
+                )
+            ):
+                parties.append(ln)
+                continue
+            if not title_lines and len(ln) <= 95 and not re.search(
+                r"(?:प्रार्थना\s*पत्र|आपत्ति\s*पत्र|वाद\s*पत्र|जवाब\s*दावा|शपथ\s*पत्र|नोटिस|मान्यवर|महोदय|विरुद्ध)",
+                ln,
+            ):
+                if parties and re.match(r"^(?:\.\.\.|…|—|–|-)+\s*", parties[-1]):
+                    parties[-1] = f"{ln} {parties[-1]}".strip()
+                    continue
+                if seen_versus and len(parties) == 1:
+                    parties.append(ln)
+                    continue
+            if re.match(
+                r"^(?:मान्यवर|महोदय|श्रीमान\s*जी|उपरोक्त\s*(?:वादी|प्रतिवादी|आपत्तिकर्त्री|प्रार्थी)|मैं\s*शपथग्रहीता|मैं\s*शपथकर्ता)",
+                ln,
+            ) or ln.endswith(("प्रस्तुत हैं:", "प्रस्तुत है:", "निवेदन है कि:", "कथन है कि:", "बयान करता हूँ:", "बयान करती हूँ:")):
+                opening_averment = (f"{opening_averment} {ln}".strip() if opening_averment else ln)
+                continue
+            title_lines.append(ln)
+            continue
+
+        if section == "pleadings":
+            m_num = numbered_item_re.match(ln)
+            if m_num and (m_num.group(1).startswith("यह कि") or len(m_num.group(1)) > 25):
+                pleadings.append(m_num.group(1).strip())
+            elif pleadings:
+                pleadings[-1] = f"{pleadings[-1]} {ln}".strip()
+            else:
+                pleadings.append(ln)
+            continue
+
+        if section == "prayer":
+            m_num = numbered_item_re.match(ln)
+            if m_num:
+                prayer.append(m_num.group(1).strip())
+            elif re.match(r"^(?:\([क-ज्ञa-zA-Z0-9]+\))\s*(.+)$", ln):
+                prayer.append(ln)
+            elif prayer:
+                prayer[-1] = f"{prayer[-1]} {ln}".strip()
+            else:
+                prayer.append(ln)
+            continue
+
+        if section == "verification":
+            verification_lines.append(ln)
+            continue
+
+    # Deduplicate pleadings and prayer (in case of multi-page OCR overlap)
+    dedup_pleadings: list[str] = []
+    seen_p_keys: set[str] = set()
+    for p in pleadings:
+        p_clean = re.sub(r"^\s*(?:[*•▪▸]\s*|[0-9०-९]{1,3}\s*(?:\([^)]*\))?\s*[.):\-–—]+\s*)", "", p).strip()
+        if not p_clean:
+            continue
+        k = _norm_dedup_key(p_clean)
+        if k and len(k) >= 20 and k in seen_p_keys:
+            continue
+        if k:
+            seen_p_keys.add(k)
+        dedup_pleadings.append(p_clean)
+
+    dedup_prayer: list[str] = []
+    seen_pr_keys: set[str] = set()
+    for pr in prayer:
+        pr_clean = pr.strip()
+        if not pr_clean:
+            continue
+        k = _norm_dedup_key(pr_clean)
+        if k and len(k) >= 15 and k in seen_pr_keys:
+            continue
+        if k:
+            seen_pr_keys.add(k)
+        dedup_prayer.append(pr_clean)
+
+    # Deduplicate signature_block lines while preserving order
+    dedup_sig: list[str] = []
+    for s_ln in signature_block:
+        s_clean = s_ln.strip()
+        if s_clean and s_clean not in dedup_sig:
+            dedup_sig.append(s_clean)
+
+    title_str = "\n".join(title_lines).strip()
+    if not title_str:
+        if document_type == "written_statement":
+            title_str = "प्रतिवाद-पत्र / जवाब दावा"
+        elif document_type == "application":
+            title_str = "प्रार्थना-पत्र / आपत्ति-पत्र"
+        elif document_type == "affidavit":
+            title_str = "शपथ-पत्र (AFFIDAVIT)"
+        elif document_type == "legal_notice":
+            title_str = "विधिक नोटिस (LEGAL NOTICE)"
+        else:
+            title_str = "विधिक दस्तावेज़ / प्रार्थना-पत्र"
+
+    return {
+        "court_heading": court_heading,
+        "case_heading": case_heading,
+        "parties": parties,
+        "title": title_str,
+        "opening_averment": opening_averment,
+        "pleadings": dedup_pleadings,
+        "prayer": dedup_prayer,
+        "verification": "\n".join(verification_lines).strip(),
+        "signature_block": dedup_sig,
+    }
+
+
+def fast_extract_as_is_state(state: CaseState, text: str) -> dict[str, Any]:
+    """Deterministically extract case facts from raw text in `as_is_mode` (or for long structured documents)
+    without making slow multi-round LLM calls during intake.
+    """
+    all_user_msgs = state.user_messages(limit=40)
+    combined_raw = "\n\n".join(all_user_msgs).strip() if all_user_msgs else str(text or "").strip()
+    parsed = parse_structured_legal_document(combined_raw, document_type=state.document_type)
+
+    extracted: dict[str, Any] = {
+        "raw_source_text": combined_raw,
+    }
+    if parsed.get("court_heading"):
+        extracted["court_name"] = parsed["court_heading"]
+    if parsed.get("case_heading"):
+        m_no = re.search(r"([0-9०-९]+)\s*/\s*([0-9०-९]{4})", parsed["case_heading"])
+        if m_no:
+            extracted["case_number"] = m_no.group(1).translate(_DEVANAGARI_DIGITS_TRANS)
+            extracted["case_year"] = m_no.group(2).translate(_DEVANAGARI_DIGITS_TRANS)
+    if parsed.get("parties"):
+        extracted["parties"] = parsed["parties"]
+        pls: list[str] = []
+        dfs: list[str] = []
+        for idx, p_line in enumerate(parsed["parties"]):
+            clean_p = _strip_party_role_affixes(p_line)
+            if not clean_p:
+                continue
+            if any(w in p_line for w in ("प्रतिवादी", "आपत्तिकर्त्री", "आपत्तिकर्ता", "विपक्षी", "उत्तरदाता")) or idx >= 1:
+                dfs.append(clean_p)
+            else:
+                pls.append(clean_p)
+        if pls:
+            extracted["plaintiffs"] = pls
+        if dfs:
+            extracted["defendants"] = dfs
+    if parsed.get("title"):
+        extracted["purpose"] = parsed["title"].replace("\n", " — ")
+
+    if parsed.get("pleadings"):
+        extracted["facts"] = parsed["pleadings"]
+    else:
+        raw_lines = [ln.strip() for ln in combined_raw.splitlines() if ln.strip()]
+        if raw_lines:
+            extracted["facts"] = raw_lines
+
+    if parsed.get("prayer"):
+        extracted["reliefs"] = parsed["prayer"]
+
+    for sig_ln in parsed.get("signature_block") or []:
+        if "स्थान" in sig_ln:
+            m_pl = re.sub(r"^.*?स्थान\s*[:\-–—]*\s*", "", sig_ln).strip()
+            if m_pl and not m_pl.startswith("."):
+                extracted["place"] = m_pl
+        if "अधिवक्ता" in sig_ln or "एडवोकेट" in sig_ln or "शुक" in sig_ln:
+            m_adv = re.sub(r"^.*?द्वारा\s*अधिवक्ता\s*[:\-–—]*\s*", "", sig_ln).strip()
+            if m_adv:
+                extracted["advocate_name"] = m_adv
+
+    return extracted
 
 
 _TOP_HEADING_DROP_RE = re.compile(
@@ -367,12 +719,11 @@ def _strip_prohibited_statutes_from_pleading(text: str) -> str:
     )
 
     # 4. Strip inline statutory Act / Code / Section / Order-Rule phrases
-    # Note: section letter suffixes after digits are 1-2 chars like -ए, ए, अ, क, ख, or parenthesized like (एच), (क)
-    sec_num_pat = r"\d+(?:\s*\([^)]{1,20}\))?(?:\s*[-–—]\s*[A-Za-z\u0900-\u097F]{1,2}|[A-Za-zक-ज्ञअ-औ]{1,2}\b)?(?:\s*\([A-Za-z\u0900-\u097F0-9\-]{1,6}\))*"
+    sec_num_pat = r"\d+(?:\s*\([^)]{1,20}\))?(?:\s*[-–—]\s*[A-Za-z\u0900-\u097F]{1,2}|[A-Za-zक-ज्ञअ-औ]{1,2}(?=\s|$|[,।.)]))?(?:\s*\([A-Za-z\u0900-\u097F0-9\-]{1,6}\))*"
     act_names_pat = (
         r"(?:भारतीय\s*नागरिक\s*सुरक्षा\s*संहिता|बी०एन०एस०एस०|बी\.एन\.एस\.एस\.|BNSS|"
         r"भारतीय\s*न्याय\s*संहिता|बी०एन०एस०|BNS|"
-        r"सिविल\s*प्रक्रिया\s*संहिता|सी०पी०सी०|सी\.पी\.सी\.|सी\s*पी\s*सी|CPC|जाप्ता\s*दीवानी|जा०दी०|"
+        r"सिविल\s*प्रक्रिया\s*संहिता|व्यवहार\s*प्रक्रिया\s*संहिता|सी०पी०सी०|सी\.पी\.सी\.|सी\s*पी\s*सी|CPC|जाप्ता\s*दीवानी|जा०दी०|"
         r"भारतीय\s*दंड\s*संहिता|भा०द०सं०|IPC|दंड\s*प्रक्रिया\s*संहिता|द०प्र०सं०|CrPC|"
         r"विशिष्ट\s*अनुतोष\s*अधिनियम|उत्तर\s*प्रदेश\s*राजस्व\s*संहिता|उ०प्र०\s*राजस्व\s*संहिता|राजस्व\s*संहिता|"
         r"भारतीय\s*साक्ष्य\s*अधिनियम|साक्ष्य\s*अधिनियम|भारतीय\s*परिसीमा\s*अधिनियम|परिसीमा\s*अधिनियम|"
@@ -382,13 +733,9 @@ def _strip_prohibited_statutes_from_pleading(text: str) -> str:
     )
 
     statute_patterns = [
-        # Order X Rule Y phrases (with optional preceding/following Act name)
-        rf"(?:{act_names_pat}\s*(?:के|की)\s*)?(?:अंतर्गत\s*|के\s*अंतर्गत\s*|हस्व\s*)?आदेश\s*\d+(?:\s*\([^)]+\))?\s*(?:के\s*परंतुक\s*(?:एवं|व)\s*|व\s*)?(?:नियम\s*{sec_num_pat}(?:\s*(?:व|एवं|तथा)\s*{sec_num_pat})*)?(?:\s*{act_names_pat})?(?:\s*(?:के\s*अंतर्गत|के\s*तहत|के\s*प्रावधानों?\s*से|से))?",
-        # Act name followed by की धारा X ...
+        rf"(?:{act_names_pat}\s*(?:के|की)\s*)?(?:अंतर्गत\s*|अन्तर्गत\s*|के\s*अंतर्गत\s*|हस्व\s*)?आदेश\s*\d+(?:\s*\([^)]+\))?\s*(?:के\s*परंतुक\s*(?:एवं|व)\s*|व\s*)?(?:नियम\s*{sec_num_pat}(?:\s*(?:व|एवं|तथा)\s*{sec_num_pat})*)?(?:\s*(?:सहपठित|सपठित)\s*धारा\s*{sec_num_pat})?(?:\s*{act_names_pat})?(?:\s*(?:के\s*अंतर्गत|के\s*तहत|के\s*प्रावधानों?\s*से|से))?",
         rf"{act_names_pat}\s*(?:की|के)\s*(?:धारा|दफा|नियम)\s*{sec_num_pat}(?:\s*(?:व|एवं|तथा|,)\s*(?:धारा\s*)?{sec_num_pat})*(?:\s*(?:के\s*अंतर्गत|के\s*तहत|के\s*प्रावधानों?\s*से|से))?",
-        # धारा X ... followed by Act name
-        rf"(?:अंतर्गत\s*|सपठित\s*|हस्व\s*)?(?:धारा|दफा)\s*{sec_num_pat}(?:\s*(?:व|एवं|तथा|,)\s*(?:धारा\s*)?{sec_num_pat})*(?:\s*सपठित\s*धारा\s*{sec_num_pat})?(?:\s*{act_names_pat})?(?:\s*(?:के\s*अंतर्गत|के\s*तहत|के\s*प्रावधानों?\s*से|से))?",
-        # Standalone Act name with के प्रावधानों से / के अंतर्गत
+        rf"(?:अंतर्गत\s*|अन्तर्गत\s*|सपठित\s*|सहपठित\s*|हस्व\s*)?(?:धारा|दफा)\s*{sec_num_pat}(?:\s*(?:व|एवं|तथा|,)\s*(?:धारा\s*)?{sec_num_pat})*(?:\s*(?:सपठित|सहपठित)\s*धारा\s*{sec_num_pat})?(?:\s*{act_names_pat})?(?:\s*(?:के\s*अंतर्गत|के\s*तहत|के\s*प्रावधानों?\s*से|से))?",
         rf"{act_names_pat}(?:\s*(?:के\s*प्रावधानों?\s*से|के\s*अंतर्गत|के\s*तहत|से))?",
     ]
     for pat in statute_patterns:
@@ -400,14 +747,13 @@ def _strip_prohibited_statutes_from_pleading(text: str) -> str:
 
     # Clean up residual connector / "बाधित है" artifacts left after removing statutory references
     s = re.sub(r"\s*(?:तथा|एवं|और)\s*(?:एवं\s*)?(?:पूर्णतः\s*)?(?:बाधित|वर्जित)\s*है", "", s)
-    s = re.sub(r"\s+(?:के\s*अंतर्गत|के\s*तहत|सपठित)\s+", " ", s)
+    s = re.sub(r"\s+(?:के\s*अंतर्गत|के\s*तहत|सपठित|सहपठित)\s+", " ", s)
     s = re.sub(r"\s+(?:की|के|तथा|एवं|और)\s+(?=[,।.]|$)", "", s)
-    s = re.sub(r"\b(?:अंतर्गत|सपठित|हस्व)\s+", "", s)
+    s = re.sub(r"(?:^|\s)(?:अंतर्गत|अन्तर्गत|सपठित|सहपठित|हस्व)\s+", " ", s)
     s = re.sub(r"\s*,\s*,+", ", ", s)
     s = re.sub(r"\(\s*\)", "", s)
     s = re.sub(r"\s+", " ", s).strip(" ,;:-–—")
 
-    # If the entire sentence became just a bare stub like "यह कि दावा वादी से बाधित है", drop it
     if re.match(
         r"^(?:यह\s*कि\s*)?(?:दावा\s*वादी|वादी\s*का\s*वाद|वादीगण\s*का\s*वाद|प्रस्तुत\s*वाद)?\s*(?:के\s*प्रावधानों?\s*से\s*|विधि\s*द्वारा\s*|नियम\s*से\s*)?(?:पूर्णतः\s*)?(?:बाधित\s*है|वर्जित\s*है)[।.]?$",
         s,
@@ -459,7 +805,6 @@ def _structure_written_statement_two_parts(pleadings: list[str], facts: dict[str
 
         is_plaint_para_reply = bool(re.search(r"(?:वाद\s*पत्र|वादपत्र)\s*(?:की|के)\s*(?:धारा|पैरा)", p_body))
 
-        # Clean any prohibited statutory citations (CPC, BNSS, BNS, IPC, Acts, Sections) from the paragraph
         cleaned_para = _strip_prohibited_statutes_from_pleading(p_body)
         if not cleaned_para:
             continue
@@ -470,15 +815,11 @@ def _structure_written_statement_two_parts(pleadings: list[str], facts: dict[str
             in_part2 = True
             part2_factual_defense.append(cleaned_para)
 
-    joined_p2 = "\n".join(part2_factual_defense)
-
-    # Ensure core factual defense pleas in Part 2 (अतिरिक्त कथन) WITHOUT any legal section, CPC, or BNSS reference
     if not any("वाद कारण" in x or "वादकारण" in x for x in part2_factual_defense):
         part2_factual_defense.insert(
             0,
             "यह कि वादी को प्रतिवादीगण के विरुद्ध कोई वाद कारण उत्पन्न नहीं हुआ है और न ही वादी माननीय न्यायालय से प्रतिवादीगण के विरुद्ध किसी भी अनुतोष को पाने का अधिकारी है।",
         )
-        joined_p2 = "\n".join(part2_factual_defense)
 
     if not any("वास्तविक तथ्य" in x or "पेशबंदी" in x or "दरअसल" in x for x in part2_factual_defense):
         part2_factual_defense.append(
@@ -573,7 +914,7 @@ def _normalize_affidavit_structure(out: dict[str, Any], facts: dict[str, Any], d
     pleadings = [str(p).strip() for p in (out.get("pleadings") or []) if str(p).strip()]
     cleaned_pleadings: list[str] = []
     for p in pleadings:
-        p_no_num = re.sub(r"^\s*(?:प्रस्तर|धारा|पैरा)?\s*\d+\s*(?:\([^)]*\))?\s*[:.\-–—]+\s*", "", p).strip()
+        p_no_num = re.sub(r"^\s*(?:[*•▪▸]\s*|(?:प्रस्तर|धारा|पैरा)?\s*[0-9०-९]+\s*(?:\([^)]*\))?\s*[:.\-–—]+\s*)", "", p).strip()
         if not p_no_num:
             continue
         if not p_no_num.startswith("यह कि"):
@@ -671,28 +1012,43 @@ def _normalize_draft_structure(
         else:
             out[str_key] = str(val or "").strip()
 
-    # In "As-It-Is / Handwritten to Legal Format" mode (`as_is_mode`), preserve the advocate's exact document
-    # structure and paragraphs without injecting boilerplate paragraphs, while cleaning any leading numbers
-    # and prohibited statutory sections in Dava / Written Statement.
+    # In "As-It-Is / Handwritten to Legal Format" mode (`as_is_mode`), preserve 100% of the advocate's exact document
+    # structure, paragraphs, and wording without stripping any of their text or injecting boilerplate paragraphs.
     if style_mode == "as_is_mode":
         cleaned_as_is_pleadings: list[str] = []
         for p in out.get("pleadings") or []:
-            p_no_num = re.sub(r"^\s*\d+\s*(?:\([^)]*\))?\s*[:.\-–—]+\s*", "", str(p).strip()).strip()
-            if not p_no_num:
-                continue
-            if document_type in {"dava_plaint", "written_statement"}:
-                p_no_num = _strip_prohibited_statutes_from_pleading(p_no_num)
+            p_no_num = re.sub(
+                r"^\s*(?:[*•▪▸]\s*|(?:प्रस्तर|धारा|पैरा)?\s*[0-9०-९]{1,3}\s*(?:\([^)]*\))?\s*[:.\-–—]+\s*)",
+                "",
+                str(p).strip(),
+            ).strip()
             if p_no_num:
                 cleaned_as_is_pleadings.append(p_no_num)
         out["pleadings"] = cleaned_as_is_pleadings
+
+        if not out.get("title"):
+            out["title"] = str(facts.get("purpose") or "प्रार्थना-पत्र / आपत्ति-पत्र").strip()
+
         if out.get("parties") and document_type not in {"legal_notice", "affidavit"}:
             out["parties"] = _format_cause_title_parties(out["parties"], facts)
+
         if out.get("verification"):
             ver_lines = [
                 ln.strip() for ln in str(out["verification"]).splitlines()
                 if ln.strip() and not re.match(r"^[\s\-–—:*_]*सत्यापन[\s\-–—:*_]*$", ln.strip())
             ]
             out["verification"] = "\n".join(ver_lines).strip()
+
+        if not out.get("signature_block"):
+            place_str = str(facts.get("place") or facts.get("court_complex") or "............").strip()
+            adv_str = str(facts.get("advocate_name") or "अधिवक्ता").strip()
+            party_name, _ = _extract_party_names_for_doc(facts, document_type)
+            out["signature_block"] = [
+                f"स्थान : {place_str}",
+                "दिनांक : ............",
+                f"प्रार्थी / पक्षकार ({party_name})",
+                f"द्वारा अधिवक्ता : {adv_str}",
+            ]
         return format_draft_numbers(out)
 
     # Dedicated structural normalizer for all Affidavits (Judicial, University/Scholarship, Administrative, or Notary)
@@ -848,7 +1204,6 @@ def _normalize_draft_structure(
         if cleaned_sig:
             out["signature_block"] = cleaned_sig
 
-    # Always apply deterministic bilingual number formatting (digits + Hindi words in parentheses) across all styles
     return format_draft_numbers(out)
 
 
@@ -897,7 +1252,8 @@ class MultiDraftOrchestrator:
     def collect(self, state: CaseState, new_facts: dict[str, Any]):
         state.merge_facts(new_facts)
         user_msgs = state.user_messages(limit=40)
-        if user_msgs and not state.facts.get("raw_source_text"):
+        if user_msgs:
+            # Always keep raw_source_text synchronized with all user messages in the session
             state.facts["raw_source_text"] = "\n\n".join(user_msgs)
 
         if state.document_type in {"affidavit", "evidence_pw_affidavit"} and not state.facts.get("deponent"):
@@ -926,6 +1282,13 @@ class MultiDraftOrchestrator:
         return {"status": "ready", "facts": state.facts}
 
     def extract_and_collect(self, state: CaseState, text: str):
+        # Fast-path for As-It-Is mode or already-structured long pleadings (3+ 'यह कि' paragraphs)
+        yah_ki_count = len(re.findall(r"(?:^|\n|\s)यह\s+कि(?=\s|:)", str(text or "")))
+        if state.style_mode == "as_is_mode" or yah_ki_count >= 3:
+            fast_extracted = fast_extract_as_is_state(state, text)
+            if fast_extracted.get("facts"):
+                return self.collect(state, fast_extracted)
+
         extracted = extract_case_facts(
             text,
             current_facts=state.facts,
@@ -935,6 +1298,9 @@ class MultiDraftOrchestrator:
         return self.collect(state, extracted)
 
     def refresh_intake(self, state: CaseState):
+        if state.style_mode == "as_is_mode":
+            raw_text = str(state.facts.get("raw_source_text") or "\n\n".join(state.user_messages(limit=40))).strip()
+            return self.collect(state, fast_extract_as_is_state(state, raw_text))
         refreshed = reconcile_case_state(
             state.facts,
             state.document_type,
@@ -969,11 +1335,30 @@ class MultiDraftOrchestrator:
                 or "\n\n".join(state.user_messages(limit=40))
                 or "\n".join(str(x) for x in (state.facts.get("facts") or []))
             ).strip()
+
+            # 1. Deterministic Verbatim Structural Parser for structured documents (2+ paragraphs):
+            # Handles 17-paragraph or 100-paragraph PDFs, DOCX files, and multi-part pasted texts instantaneously
+            # with 100% verbatim fidelity and zero risk of LLM output truncation or timeout.
+            parsed_doc = parse_structured_legal_document(raw_source_text, document_type=state.document_type)
+            if len(parsed_doc.get("pleadings") or []) >= 2:
+                custom_adds = [str(x).strip() for x in (state.facts.get("custom_add_points") or []) if str(x).strip()]
+                for pt in custom_adds:
+                    pt_clean = pt if pt.startswith("यह कि") else f"यह कि {pt}"
+                    if not pt_clean.endswith(("।", ".")):
+                        pt_clean += "।"
+                    parsed_doc["pleadings"].append(pt_clean)
+                normalized_raw = _normalize_draft_structure(
+                    parsed_doc, state.facts, document_type=state.document_type, style_mode="as_is_mode"
+                )
+                draft = format_draft_numbers(sanitize_draft_unicode(normalized_raw))
+                state.status = "ready"
+                return draft
+
+            # 2. LLM Structuring Engine for unstructured / handwritten notes (with deterministic fallback)
             as_is_rules = [
                 "AS-IT-IS & HANDWRITTEN LEGAL STRUCTURING MODE: Do NOT replace the advocate's text with a corpus template.",
-                "If RAW_SOURCE_DOCUMENT_TEXT is an existing A4/typed document (Dava, Affidavit, Legal Notice, Written Statement, Application, etc.), preserve 100% of its wording, paragraphs, sequence, headings, party details, prayer, and verification AS-IT-IS so it renders onto Legal-size paper (`8.5\" × 14\"`).",
+                "If RAW_SOURCE_DOCUMENT_TEXT is an existing A4/typed document (Dava, Affidavit, Legal Notice, Written Statement, Application, Objection Petition, etc.), preserve 100% of its wording, paragraphs, sequence, headings, party details, prayer, and verification AS-IT-IS so it renders onto Legal-size paper (`8.5\" × 14\"`).",
                 "If RAW_SOURCE_DOCUMENT_TEXT is from a handwritten draft (हस्तलिखित ड्राफ्ट), fix any OCR character/matra recognition noise and organize the advocate's exact handwritten facts and paragraphs into proper Indian court legal structure (`court_heading`, `case_heading`, `parties`, `title`, `opening_averment`, numbered `pleadings` starting with 'यह कि ...', `prayer`, `verification`, `signature_block`).",
-                "STRICTLY PROHIBITED IN PLEADINGS / WRITTEN STATEMENT: Never insert legal sections ('धारा' of any Act), CPC ('सिविल प्रक्रिया संहिता'), or BNSS ('भारतीय नागरिक सुरक्षा संहिता') into Dava or Jawab Dava pleadings.",
                 "Write numerical values in bilingual format (digits + Hindi words in parentheses) and do NOT prepend paragraph numbers in `pleadings` (the renderer numbers them automatically).",
             ]
             package: dict[str, Any] = {
@@ -995,12 +1380,26 @@ class MultiDraftOrchestrator:
                 },
             }
             system = AS_IS_SPECIALIST_PROMPT + "\n\n" + "\n".join(f"- {r}" for r in as_is_rules)
-            raw_draft = self.client.generate_json(
-                system=system,
-                prompt=json.dumps(package, ensure_ascii=False, indent=2),
-                schema=SCHEMA,
-                thinking_level=os.getenv("GEMINI_DRAFTING_THINKING_LEVEL", "high"),
-            )
+            try:
+                raw_draft = self.client.generate_json(
+                    system=system,
+                    prompt=json.dumps(package, ensure_ascii=False, indent=2),
+                    schema=SCHEMA,
+                    thinking_level=os.getenv("GEMINI_DRAFTING_THINKING_LEVEL", "low"),
+                    max_output_tokens=16384,
+                )
+            except Exception:
+                raw_draft = parsed_doc if parsed_doc.get("pleadings") else {
+                    "court_heading": str(state.facts.get("court_name") or ""),
+                    "case_heading": "",
+                    "parties": list(state.facts.get("parties") or []),
+                    "title": str(state.facts.get("purpose") or label),
+                    "opening_averment": "",
+                    "pleadings": list(state.facts.get("facts") or [raw_source_text]),
+                    "prayer": list(state.facts.get("reliefs") or []),
+                    "verification": "",
+                    "signature_block": [],
+                }
             normalized_raw = _normalize_draft_structure(
                 raw_draft, state.facts, document_type=state.document_type, style_mode="as_is_mode"
             )
@@ -1098,6 +1497,7 @@ class MultiDraftOrchestrator:
                 prompt=json.dumps(package, ensure_ascii=False, indent=2),
                 schema=SCHEMA,
                 thinking_level=os.getenv("GEMINI_DRAFTING_THINKING_LEVEL", "high"),
+                max_output_tokens=16384,
             )
             normalized_raw = _normalize_draft_structure(
                 raw_draft, state.facts, document_type=state.document_type, style_mode=style_mode

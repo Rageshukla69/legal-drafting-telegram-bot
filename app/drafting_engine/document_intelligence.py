@@ -1,7 +1,8 @@
-"""Azure AI Document Intelligence v4 REST integration with Microsoft Foundry (gpt-6.0-luna), Gemini Vision OCR fallback, and direct DOCX/TXT/PDF extraction."""
+"""Azure AI Document Intelligence v4 REST integration with Microsoft Foundry (gpt-6.0-luna), Gemini Vision OCR fallback, and direct PDF/DOCX/TXT extraction."""
 from __future__ import annotations
-import base64, io, logging, os, time
+import base64, io, logging, os, subprocess, tempfile, time
 from dataclasses import dataclass
+from pathlib import Path
 import requests
 
 from .gemini_client import DEFAULT_AZURE_ENDPOINT, DEFAULT_AZURE_MODEL, _normalize_azure_endpoint
@@ -98,15 +99,92 @@ def _extract_docx_or_txt_direct(data: bytes, filename: str, content_type: str = 
     return None
 
 
+def _extract_pdf_with_pdfium(data: bytes) -> OCRResult | None:
+    """Extract clean Unicode Devanagari text from digital PDFs using pypdfium2 with bounding-box matra-gap filtering."""
+    try:
+        import pypdfium2 as pdfium
+
+        doc = pdfium.PdfDocument(data)
+        num_pages = len(doc)
+        if num_pages == 0:
+            return None
+        pages_out: list[str] = []
+        for p_idx in range(num_pages):
+            tp = doc[p_idx].get_textpage()
+            n = tp.count_chars()
+            chars = []
+            for i in range(n):
+                ch = tp.get_text_range(i, 1)
+                box = tp.get_charbox(i) if ch not in (" ", "\r", "\n", "\t") else None
+                chars.append((ch, box))
+            out = []
+            for i, (ch, box) in enumerate(chars):
+                if ch == " " and box is None and i > 0 and i + 1 < n:
+                    prev_ch, prev_box = chars[i - 1]
+                    next_ch, next_box = chars[i + 1]
+                    if prev_box and next_box and "\u0900" <= next_ch <= "\u097f":
+                        gap = next_box[0] - prev_box[2]
+                        if prev_ch == "\u093f" and gap < 2.6:
+                            continue
+                        if prev_ch in ("\u093e", "\u0940", "\u094b", "\u094c") and i >= 2 and chars[i - 2][1]:
+                            c_box = chars[i - 2][1]
+                            if abs((prev_box[2] - prev_box[0]) - (c_box[2] - c_box[0])) < 0.25 and gap < 4.4:
+                                continue
+                out.append(ch)
+            page_txt = "".join(out).strip()
+            if page_txt:
+                pages_out.append(page_txt)
+        joined = "\n\n".join(pages_out).strip()
+        if len(joined) >= 40 and "\x00" not in joined and "\ufffd" not in joined:
+            return OCRResult(
+                text=decode_krutidev_hybrid(joined),
+                page_count=num_pages,
+                model_id="pdfium-direct",
+            )
+    except Exception:
+        pass
+    return None
+
+
 def _extract_pdf_text_direct(data: bytes) -> OCRResult | None:
-    """Extract embedded text from digital PDFs using pypdf before falling back to vision APIs."""
+    """Extract embedded text from digital PDFs using pdftotext, pypdfium2, or pypdf before calling external OCR APIs."""
+    # 1. Try poppler pdftotext (handles Chromium/HarfBuzz Devanagari ActualText spans cleanly)
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp_pdf:
+            tmp_pdf.write(data)
+            tmp_pdf.flush()
+            proc = subprocess.run(
+                ["pdftotext", "-enc", "UTF-8", tmp_pdf.name, "-"],
+                capture_output=True,
+                timeout=20,
+                check=False,
+            )
+            if proc.returncode == 0 and proc.stdout:
+                raw_txt = proc.stdout.decode("utf-8", errors="replace")
+                pages = [p.strip() for p in raw_txt.split("\x0c") if p.strip()]
+                joined = "\n\n".join(pages).strip()
+                if len(joined) >= 40 and "\x00" not in joined and "\ufffd" not in joined:
+                    return OCRResult(
+                        text=decode_krutidev_hybrid(joined),
+                        page_count=len(pages) or 1,
+                        model_id="pdftotext-direct",
+                    )
+    except Exception:
+        pass
+
+    # 2. Try pypdfium2 with Devanagari matra bounding-box filter
+    pdfium_res = _extract_pdf_with_pdfium(data)
+    if pdfium_res is not None:
+        return pdfium_res
+
+    # 3. Try pypdf (only if no null-byte broken ligatures exist)
     try:
         from pypdf import PdfReader
 
         reader = PdfReader(io.BytesIO(data))
         pages_text = [(page.extract_text() or "").strip() for page in reader.pages]
         joined = "\n\n".join(p for p in pages_text if p).strip()
-        if len(joined) >= 40:
+        if len(joined) >= 40 and "\x00" not in joined and "\ufffd" not in joined:
             return OCRResult(
                 text=decode_krutidev_hybrid(joined),
                 page_count=len(reader.pages) or 1,
@@ -214,10 +292,16 @@ def analyze_document_bytes(
     if not data:
         raise DocumentIntelligenceError("The uploaded document is empty.")
 
-    # Fast path for Word (.docx) or text (.txt) files (e.g. A4 Word document uploaded for Legal-size conversion)
+    # 1. Fast path for Word (.docx) or text (.txt) files
     direct_doc = _extract_docx_or_txt_direct(data, filename, content_type)
     if direct_doc is not None:
         return direct_doc
+
+    # 2. Fast path for digital PDFs with clean embedded Unicode text (zero API latency)
+    if (filename or "").lower().endswith(".pdf") or (content_type or "").lower() == "application/pdf":
+        direct_pdf = _extract_pdf_text_direct(data)
+        if direct_pdf is not None and len(direct_pdf.text.strip()) >= 80:
+            return direct_pdf
 
     model = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_MODEL", "prebuilt-layout").strip() or "prebuilt-layout"
     if model != "prebuilt-layout":
@@ -291,7 +375,6 @@ def analyze_document_bytes(
                     chunks.append(str(c))
         text = "\n".join(chunks).strip()
 
-    # If Azure prebuilt-layout returned almost nothing on a cursive Hindi handwritten image, try multimodal Vision fallback
     if len(text.strip()) < 25 and not filename.lower().endswith(".pdf"):
         try:
             if os.getenv("AZURE_AI_KEY", "").strip() or os.getenv("FOUNDRY_API_KEY", "").strip():
