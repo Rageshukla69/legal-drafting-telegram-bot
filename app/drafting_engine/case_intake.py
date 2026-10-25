@@ -390,7 +390,7 @@ def extract_case_facts(
     missing = [key for key in required if not candidate.get(key) and not current.get(key)]
 
     audit: dict[str, Any] = {}
-    if missing and len(combined_source) < 3500 and os.getenv("GEMINI_INTAKE_AUDIT_ALWAYS", "0").strip().lower() in {"1", "true", "yes", "on"}:
+    if missing and len(combined_source) < 1800 and os.getenv("GEMINI_INTAKE_AUDIT_ALWAYS", "1").strip().lower() in {"1", "true", "yes", "on"}:
         audit_payload = {
             "document_type": document_type,
             "required_fields_still_missing": missing,

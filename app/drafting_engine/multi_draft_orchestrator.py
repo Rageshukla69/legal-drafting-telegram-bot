@@ -52,6 +52,22 @@ CRITICAL RULES FOR "AS-IT-IS / HANDWRITTEN TO LEGAL STRUCTURE" MODE:
      * `signature_block`: Place, date, party/deponent signature line, and advocate line.
 """
 
+SINGLE_PAGE_SPECIALIST_PROMPT = """You are the Single-Page Legal Recreation & Correction Engine powered by GPT-6.0-Luna.
+
+The advocate has an existing multi-page case file where a specific single page (e.g., Page 1, Page 2, Page 3, or Page 4) has a typo in someone's name, father's name, year, date, Gata number, or paragraph wording, and wants to **recreate ONLY that exact single page** with the requested correction (`CORRECTION_INSTRUCTION`) so they can print and replace just that page in the physical file.
+
+CRITICAL RULES FOR SINGLE-PAGE RECREATION MODE:
+1. **Recreate ONLY the Content Present on the Target Page (`TARGET_PAGE_RAW_TEXT` / `STRUCTURAL_PAGE_PARSE`)**:
+   - Do NOT invent a `court_heading`, `case_heading`, `parties`, or `title` if the target page is a continuation page (like Page 2 or Page 3) that does not have those headings! Leave `court_heading: ""`, `case_heading: ""`, `parties: []`, `title: ""` if they are not on this page.
+   - Do NOT invent `prayer`, `verification`, or `signature_block` if they do not appear on this page! Leave them empty (`[]` or `""`) if they are on a later page.
+2. **Preserve Exact Starting Paragraph Number & Top Continuation**:
+   - Keep `layout` with `"single_page_mode": True`, `"single_page_number": TARGET_PAGE_NUMBER`, `"start_paragraph_number": START_PARAGRAPH_NUMBER`, and `"page_top_continuation": PAGE_TOP_CONTINUATION`.
+   - Strip leading paragraph numbers (`9.`, `९ (नौ) :`, etc.) from items in `pleadings` because the renderer automatically numbers them starting from `START_PARAGRAPH_NUMBER` (`9 (नौ) : `, `10 (दस) : `, etc.).
+3. **Apply the Requested Correction (`CORRECTION_INSTRUCTION`) Precisely**:
+   - If `CORRECTION_INSTRUCTION` specifies a change (e.g., changing a name, year, date, Gata number, or wording in a specific paragraph or across this page), apply it cleanly in formal court Hindi with bilingual number formatting (`2025 (दो हजार पच्चीस)`).
+   - Preserve all other paragraphs and sentences on this page 100% verbatim.
+"""
+
 BASE_RULES = [
     "CASE_FACTS are the sole authority for case-specific names, dates, plot/Gata numbers, roll/registration numbers, boundaries, and events. Never copy old party names or unrelated past transactions from retrieved templates.",
     "STRICT PLEADING RULE (ORDER VI RULE 2 CPC — NO LEGAL SECTIONS / NO CPC / NO BNSS IN PLEADINGS): In Written Statements (जवाब दावा / प्रतिवाद-पत्र) and Plaints (वाद-पत्र / Dava), citing legal Sections ('धारा' of any Act), Orders/Rules ('आदेश ... नियम ...'), CPC ('सिविल प्रक्रिया संहिता' / 'सी०पी०सी०' / 'जाप्ता दीवानी'), BNSS ('भारतीय नागरिक सुरक्षा संहिता' / 'बी०एन०एस०एस०'), BNS ('भारतीय न्याय संहिता'), IPC ('भारतीय दंड संहिता'), CrPC ('दंड प्रक्रिया संहिता'), Specific Relief Act ('विशिष्ट अनुतोष अधिनियम'), UP Revenue Code ('उत्तर प्रदेश राजस्व संहिता'), Evidence Act ('साक्ष्य अधिनियम'), or Limitation Act ('परिसीमा अधिनियम') is STRICTLY PROHIBITED. Pleadings must state ONLY material facts (सारभूत तथ्य). (Note: Writing 'वादपत्र की धारा 1 (एक)', 'वादपत्र की धारा 2 (दो)' to refer to Paragraph 1, Paragraph 2 of the Plaint in a Written Statement is standard Hindi court terminology for paragraph numbers and is required in Part 1 of a Written Statement).",
@@ -545,13 +561,220 @@ def parse_structured_legal_document(raw_text: str, document_type: str = "") -> d
     }
 
 
+def parse_single_page_document(raw_page_text: str, page_number: int = 1) -> dict[str, Any]:
+    """Deterministically parse a single page (e.g., Page 1, Page 2, Page 3) of an existing legal case file
+    so that recreating that single page preserves:
+      - Exact footer page number (`single_page_number`, e.g., 3)
+      - Exact starting paragraph number on that page (`start_paragraph_number`, e.g., 9)
+      - Any unnumbered continuation lines at the top of the page from the previous page (`page_top_continuation`)
+      - Zero injected fake titles (`"वाद पत्र"`) or fake signature blocks when they do not appear on that page.
+    """
+    text = str(raw_page_text or "").strip()
+    if not text:
+        return {}
+
+    detected_page_no = max(1, int(page_number or 1))
+    cleaned_lines: list[str] = []
+    for raw_ln in text.splitlines():
+        ln = raw_ln.strip()
+        if not ln:
+            continue
+        m_footer_pg = re.search(r"पृष्ठ\s*([0-9०-९]+)\s*(?:/\s*[0-9०-९]+)?", ln)
+        if m_footer_pg:
+            try:
+                pg_val = int(m_footer_pg.group(1).translate(_DEVANAGARI_DIGITS_TRANS))
+                if 1 <= pg_val <= 200 and page_number <= 1:
+                    detected_page_no = pg_val
+            except Exception:
+                pass
+            ln = re.sub(r"^.*?पृष्ठ\s*[0-9०-९]+(?:\s*/\s*[0-9०-९]+)?\s*$", "", ln).strip()
+            if not ln:
+                continue
+        m_en_pg = re.match(r"^(?:page|p\.?)\s*[-–—:]?\s*(\d+)(?:\s*of\s*\d+)?$", ln, flags=re.I)
+        if m_en_pg:
+            if page_number <= 1:
+                detected_page_no = max(1, int(m_en_pg.group(1)))
+            continue
+        if re.match(r"^[.\-_—–]{4,}$", ln):
+            continue
+        if re.match(r"^[-–—]?\s*([0-9०-९]{1,2})\s*[-–—]?$", ln):
+            try:
+                pg_val = int(re.sub(r"\D", "", ln.translate(_DEVANAGARI_DIGITS_TRANS)))
+                if 1 <= pg_val <= 99 and page_number <= 1:
+                    detected_page_no = pg_val
+            except Exception:
+                pass
+            continue
+        cleaned_lines.append(ln)
+
+    # Split inline numbered "यह कि" points
+    expanded_lines: list[str] = []
+    for ln in cleaned_lines:
+        parts = re.split(
+            r"(?=(?:^|\s)(?:[*•▪▸]\s*|(?:प्रस्तर|धारा|पैरा)?\s*[0-9०-९]{1,3}\s*(?:\([^)]+\))?\s*[.):\-–—]\s*)यह\s+कि(?=\s))",
+            ln,
+        )
+        for p in parts:
+            if p.strip():
+                expanded_lines.append(p.strip())
+
+    # Detect whether this page actually has a Court Heading or Cause-Title (Page 1) or is a continuation page (Page 2, 3...)
+    has_court_or_case_header = any(
+        re.match(r"^(?:न्यायालय|माननीय\s+न्यायालय|समक्ष|सेवा\s+में)(?=\s|$)", ln)
+        or re.search(r"(?:वाद\s*संख्या|प्रकीर्ण\s*वाद|मूल\s*वाद|मुकदमा\s*सं)", ln)
+        or re.match(r"^बनाम\s*[:\-–—]*$", ln)
+        for ln in expanded_lines[:8]
+    )
+
+    numbered_para_re = re.compile(
+        r"^\s*(?:प्रस्तर|धारा|पैरा)?\s*([0-9०-९]{1,3})\s*(?:\([^)]*\))?\s*[.):\-–—]+\s*(.+)$"
+    )
+    yah_ki_unnumbered_re = re.compile(r"^\s*[*•▪▸\-]?\s*(यह\s+कि(?=\s|:).*)$")
+
+    start_paragraph_number: int | None = None
+    for ln in expanded_lines:
+        m_np = numbered_para_re.match(ln)
+        if m_np:
+            body_cand = m_np.group(2).strip()
+            # Ensure it's a pleading paragraph (not "1. राम कुमार ... वादी")
+            if body_cand.startswith("यह कि") or not has_court_or_case_header or len(body_cand) > 45:
+                try:
+                    num_val = int(m_np.group(1).translate(_DEVANAGARI_DIGITS_TRANS))
+                    if 1 <= num_val <= 200:
+                        start_paragraph_number = num_val
+                        break
+                except Exception:
+                    pass
+
+    if start_paragraph_number is None:
+        start_paragraph_number = 1
+
+    # If this is a continuation page (no court/case header, or start_paragraph_number > 1), parse without inventing headers/titles
+    if not has_court_or_case_header or start_paragraph_number > 1 or detected_page_no > 1:
+        page_top_continuation_lines: list[str] = []
+        pleadings: list[str] = []
+        prayer: list[str] = []
+        verification_lines: list[str] = []
+        signature_block: list[str] = []
+        section = "top"
+
+        for ln in expanded_lines:
+            if re.match(r"^[\s*•_\-–—]*(?:प्रार्थना|अनुतोष)(?:\s*\(Prayer\))?\s*[:\-–—]*\s*$", ln, flags=re.I):
+                section = "prayer"
+                continue
+            m_prayer_inline = re.match(r"^[\s*•_\-–—]*(?:प्रार्थना|अनुतोष)\s*[:\-–—]+\s*(.+)$", ln)
+            if m_prayer_inline:
+                section = "prayer"
+                prayer.append(m_prayer_inline.group(1).strip())
+                continue
+            if re.match(
+                r"^(?:अतः|अतएव)\s+(?:माननीय\s+न्यायालय|श्रीमान\s+जी|न्यायालय)\s+से\s+(?:सादर\s+|सविनय\s+|विनम्र\s+)?प्रार्थना\s+है",
+                ln,
+            ):
+                section = "prayer"
+                prayer.append(ln)
+                continue
+
+            if re.match(r"^[\s*•_\-–—]*(?:सत्यापन|तस्दीक)(?:\s*\(Verification\))?\s*[:\-–—]*\s*$", ln, flags=re.I):
+                section = "verification"
+                continue
+            m_ver_inline = re.match(r"^[\s*•_\-–—]*(?:सत्यापन|तस्दीक)(?:\s*\(Verification\))?\s*[:\-–—]+\s*(.+)$", ln, flags=re.I)
+            if m_ver_inline:
+                section = "verification"
+                verification_lines.append(m_ver_inline.group(1).strip())
+                continue
+            if re.match(
+                r"^(?:मैं|हम)\s*,?\s*(?:उपरोक्त|शपथग्रहीता|शपथग्रहीत्री|शपथकर्त्री|शपथकर्ता|वादी|प्रतिवादी|आपत्तिकर्त्री|प्रार्थी).*(?:सत्यापित|तस्दीक)\s+कर",
+                ln,
+            ):
+                section = "verification"
+                verification_lines.append(ln)
+                continue
+
+            if section in {"pleadings", "prayer", "verification", "signature"} and (
+                re.match(
+                    r"^(?:दिनांक|स्थान|तारीख|हस्ताक्षर|पहचानकर्ता|द्वारा\s*अधिवक्ता|अधिवक्ता|एडवोकेट|प्रार्थीगण|प्रार्थी|आवेदकगण|आपत्तिकर्त्री|आपत्तिकर्ता|वादीगण|वादी|प्रतिवादीगण|प्रतिवादी|शपथग्रहीता|शपथग्रहीत्री|शपथकर्त्री|शपथकर्ता|मो०|मोबाइल|पंजीकरण\s*सं)(?=\s|$|[:।.,;\-–—(])",
+                    ln,
+                )
+                or (section == "signature" and len(ln) <= 65)
+            ):
+                section = "signature"
+                signature_block.append(ln)
+                continue
+
+            if _PART2_HEADING_MATCH_RE.match(ln):
+                section = "pleadings"
+                pleadings.append(SECTION_DIVIDER_HEADING)
+                continue
+
+            m_np = numbered_para_re.match(ln)
+            if m_np and section in {"top", "pleadings"}:
+                section = "pleadings"
+                pleadings.append(m_np.group(2).strip())
+                continue
+
+            m_yk = yah_ki_unnumbered_re.match(ln)
+            if m_yk and section in {"top", "pleadings"}:
+                section = "pleadings"
+                pleadings.append(m_yk.group(1).strip())
+                continue
+
+            if section == "top":
+                page_top_continuation_lines.append(ln)
+            elif section == "pleadings":
+                if pleadings and pleadings[-1] != SECTION_DIVIDER_HEADING:
+                    pleadings[-1] = f"{pleadings[-1]} {ln}".strip()
+                else:
+                    pleadings.append(ln)
+            elif section == "prayer":
+                if re.match(r"^(?:\([क-ज्ञa-zA-Z0-9]+\))\s*(.+)$", ln):
+                    prayer.append(ln)
+                elif prayer:
+                    prayer[-1] = f"{prayer[-1]} {ln}".strip()
+                else:
+                    prayer.append(ln)
+            elif section == "verification":
+                verification_lines.append(ln)
+
+        return {
+            "court_heading": "",
+            "case_heading": "",
+            "parties": [],
+            "title": "",
+            "opening_averment": "",
+            "pleadings": pleadings,
+            "prayer": prayer,
+            "verification": "\n".join(verification_lines).strip(),
+            "signature_block": signature_block,
+            "layout": {
+                "single_page_mode": True,
+                "single_page_number": detected_page_no,
+                "start_paragraph_number": start_paragraph_number,
+                "page_top_continuation": " ".join(page_top_continuation_lines).strip(),
+            },
+        }
+
+    # Otherwise, it is Page 1 (with headers/parties/title) — parse normally, but do not inject fake signature/verification if absent on Page 1
+    full_parsed = parse_structured_legal_document(text)
+    full_parsed["layout"] = {
+        "single_page_mode": True,
+        "single_page_number": detected_page_no,
+        "start_paragraph_number": start_paragraph_number,
+        "page_top_continuation": "",
+    }
+    return full_parsed
+
+
 def fast_extract_as_is_state(state: CaseState, text: str) -> dict[str, Any]:
-    """Deterministically extract case facts from raw text in `as_is_mode` (or for long structured documents)
+    """Deterministically extract case facts from raw text in `as_is_mode` or `single_page_mode` (or for long structured documents)
     without making slow multi-round LLM calls during intake.
     """
     all_user_msgs = state.user_messages(limit=40)
     combined_raw = "\n\n".join(all_user_msgs).strip() if all_user_msgs else str(text or "").strip()
-    parsed = parse_structured_legal_document(combined_raw, document_type=state.document_type)
+    if state.style_mode == "single_page_mode" or getattr(state, "single_page_mode", False):
+        parsed = parse_single_page_document(combined_raw, page_number=getattr(state, "target_page_number", 1) or 1)
+    else:
+        parsed = parse_structured_legal_document(combined_raw, document_type=state.document_type)
 
     extracted: dict[str, Any] = {
         "raw_source_text": combined_raw,
@@ -1012,6 +1235,33 @@ def _normalize_draft_structure(
         else:
             out[str_key] = str(val or "").strip()
 
+    # In "Single-Page Recreation & Correction" mode (`single_page_mode`), preserve the exact sections present on that single page
+    # without inventing fake titles, fake court headings, or fake signature blocks!
+    is_single_page = style_mode == "single_page_mode" or bool((out.get("layout") or {}).get("single_page_mode"))
+    if is_single_page:
+        cleaned_sp_pleadings: list[str] = []
+        for p in out.get("pleadings") or []:
+            p_no_num = re.sub(
+                r"^\s*(?:[*•▪▸]\s*|(?:प्रस्तर|धारा|पैरा)?\s*[0-9०-९]{1,3}\s*(?:\([^)]*\))?\s*[:.\-–—]+\s*)",
+                "",
+                str(p).strip(),
+            ).strip()
+            if p_no_num:
+                cleaned_sp_pleadings.append(p_no_num)
+        out["pleadings"] = cleaned_sp_pleadings
+        if out.get("parties") and document_type not in {"legal_notice", "affidavit"}:
+            out["parties"] = _format_cause_title_parties(out["parties"], facts)
+        if out.get("verification"):
+            ver_lines = [
+                ln.strip() for ln in str(out["verification"]).splitlines()
+                if ln.strip() and not re.match(r"^[\s\-–—:*_]*सत्यापन[\s\-–—:*_]*$", ln.strip())
+            ]
+            out["verification"] = "\n".join(ver_lines).strip()
+        layout_meta = dict(out.get("layout") or {})
+        layout_meta["single_page_mode"] = True
+        out["layout"] = layout_meta
+        return format_draft_numbers(out)
+
     # In "As-It-Is / Handwritten to Legal Format" mode (`as_is_mode`), preserve 100% of the advocate's exact document
     # structure, paragraphs, and wording without stripping any of their text or injecting boilerplate paragraphs.
     if style_mode == "as_is_mode":
@@ -1282,9 +1532,9 @@ class MultiDraftOrchestrator:
         return {"status": "ready", "facts": state.facts}
 
     def extract_and_collect(self, state: CaseState, text: str):
-        # Fast-path for As-It-Is mode or already-structured long pleadings (3+ 'यह कि' paragraphs)
+        # Fast-path for As-It-Is mode, Single-Page mode, or already-structured long pleadings (3+ 'यह कि' paragraphs)
         yah_ki_count = len(re.findall(r"(?:^|\n|\s)यह\s+कि(?=\s|:)", str(text or "")))
-        if state.style_mode == "as_is_mode" or yah_ki_count >= 3:
+        if state.style_mode in {"as_is_mode", "single_page_mode"} or getattr(state, "single_page_mode", False) or yah_ki_count >= 3:
             fast_extracted = fast_extract_as_is_state(state, text)
             if fast_extracted.get("facts"):
                 return self.collect(state, fast_extracted)
@@ -1298,7 +1548,7 @@ class MultiDraftOrchestrator:
         return self.collect(state, extracted)
 
     def refresh_intake(self, state: CaseState):
-        if state.style_mode == "as_is_mode":
+        if state.style_mode in {"as_is_mode", "single_page_mode"} or getattr(state, "single_page_mode", False):
             raw_text = str(state.facts.get("raw_source_text") or "\n\n".join(state.user_messages(limit=40))).strip()
             return self.collect(state, fast_extract_as_is_state(state, raw_text))
         refreshed = reconcile_case_state(
@@ -1322,12 +1572,92 @@ class MultiDraftOrchestrator:
 
     def draft_live(self, state: CaseState):
         style_mode = (state.style_mode or "template_mode").strip().lower()
+        if getattr(state, "single_page_mode", False):
+            style_mode = "single_page_mode"
         if missing_fields(state.facts, state.document_type, style_mode=style_mode):
             raise ValueError("Required facts are still missing.")
 
         corpus_type, prompt_file, label = TYPE_META[state.document_type]
 
-        # Special Mode: "As-It-Is / Handwritten to Legal Structure" (`as_is_mode`)
+        # Special Mode 1: Single-Page Recreation & Correction Mode (`single_page_mode`)
+        if style_mode == "single_page_mode":
+            target_page_no = max(1, int(getattr(state, "target_page_number", 0) or state.facts.get("target_page_number") or 1))
+            state.selected_template_name = f"Single-Page Recreation Blueprint (पृष्ठ {target_page_no})"
+
+            raw_pages = state.facts.get("raw_source_pages")
+            if isinstance(raw_pages, list) and len(raw_pages) >= target_page_no:
+                raw_page_text = str(raw_pages[target_page_no - 1] or "").strip()
+            else:
+                raw_page_text = str(
+                    state.facts.get("raw_source_text")
+                    or "\n\n".join(state.user_messages(limit=40))
+                    or "\n".join(str(x) for x in (state.facts.get("facts") or []))
+                ).strip()
+
+            parsed_page = parse_single_page_document(raw_page_text, page_number=target_page_no)
+            correction_inst = str(
+                getattr(state, "page_correction_instruction", "")
+                or state.facts.get("page_correction_instruction")
+                or ""
+            ).strip()
+
+            # Apply any inline correction instruction using DraftEditor first (deterministic & scope-aware)
+            if correction_inst:
+                try:
+                    from .draft_editor import DraftEditor
+                    ed = DraftEditor()
+                    edit_payload = ed.parse(parsed_page, correction_inst)
+                    parsed_page, _ = ed.apply(parsed_page, edit_payload)
+                except Exception:
+                    pass
+
+            if not self.client.has_active_key():
+                normalized_sp = _normalize_draft_structure(
+                    parsed_page, state.facts, document_type=state.document_type, style_mode="single_page_mode"
+                )
+                draft = format_draft_numbers(sanitize_draft_unicode(normalized_sp))
+                state.status = "ready"
+                return draft
+
+            layout_info = dict(parsed_page.get("layout") or {})
+            sp_package: dict[str, Any] = {
+                "DOCUMENT_TYPE": label,
+                "TARGET_PAGE_NUMBER": layout_info.get("single_page_number", target_page_no),
+                "START_PARAGRAPH_NUMBER": layout_info.get("start_paragraph_number", 1),
+                "PAGE_TOP_CONTINUATION": layout_info.get("page_top_continuation", ""),
+                "TARGET_PAGE_RAW_TEXT": raw_page_text,
+                "STRUCTURAL_PAGE_PARSE": parsed_page,
+                "CORRECTION_INSTRUCTION": correction_inst or "No changes requested — recreate this exact page cleanly in Legal format.",
+            }
+            try:
+                raw_draft = self.client.generate_json(
+                    system=SINGLE_PAGE_SPECIALIST_PROMPT,
+                    prompt=json.dumps(sp_package, ensure_ascii=False, indent=2),
+                    schema=SCHEMA,
+                    thinking_level=os.getenv("GEMINI_DRAFTING_THINKING_LEVEL", "high"),
+                    max_output_tokens=12288,
+                )
+                if len(parsed_page.get("pleadings") or []) > len((raw_draft or {}).get("pleadings") or []):
+                    raw_draft["pleadings"] = parsed_page["pleadings"]
+                raw_draft["layout"] = layout_info
+                # Never allow LLM to inject fake title or fake court_heading if parsed_page didn't have them
+                for k_empty in ("court_heading", "case_heading", "title", "opening_averment", "verification"):
+                    if not parsed_page.get(k_empty):
+                        raw_draft[k_empty] = ""
+                for k_list_empty in ("parties", "prayer", "signature_block"):
+                    if not parsed_page.get(k_list_empty):
+                        raw_draft[k_list_empty] = []
+            except Exception:
+                raw_draft = parsed_page
+
+            normalized_sp = _normalize_draft_structure(
+                raw_draft, state.facts, document_type=state.document_type, style_mode="single_page_mode"
+            )
+            draft = format_draft_numbers(sanitize_draft_unicode(normalized_sp))
+            state.status = "ready"
+            return draft
+
+        # Special Mode 2: "As-It-Is / Handwritten to Legal Structure" (`as_is_mode`)
         if style_mode == "as_is_mode":
             state.selected_template_name = "As-It-Is / Handwritten Legal Structure Blueprint"
             raw_source_text = str(
@@ -1521,6 +1851,8 @@ class MultiDraftOrchestrator:
         raise RuntimeError("Generated draft failed deterministic validation: " + "; ".join(errors))
 
     def validate(self, draft, facts, document_type):
+        if (draft.get("layout") or {}).get("single_page_mode"):
+            return []
         errors = []
         for key in ("title", "pleadings", "signature_block"):
             if not draft.get(key):

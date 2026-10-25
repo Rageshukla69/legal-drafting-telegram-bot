@@ -1,4 +1,4 @@
-"""Serializable multi-document intake state, style selection, and deterministic missing checks."""
+"""Serializable multi-document intake state, style selection, single-page recreation state, undo history, and deterministic missing checks."""
 from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -10,6 +10,7 @@ STYLE_NAMES = {
     "dad_style": "⚖️ वरिष्ठ अधिवक्ता शैली (Senior Counsel)",
     "hybrid_mode": "✨ Vakil AI Pro — हाइब्रिड संस्करण",
     "as_is_mode": "📄 हूबहू / हस्तलिखित → लीगल पेपर (As-It-Is / Handwritten)",
+    "single_page_mode": "📃 केवल एक पन्ना सुधार / री-क्रिएट (Single Page Recreate)",
 }
 
 
@@ -33,6 +34,10 @@ class CaseState:
     draft_versions: list[dict[str, Any]] = field(default_factory=list)
     edit_mode: bool = False
     pending_edit: dict[str, Any] = field(default_factory=dict)
+    # Single-page recreation state (for recreating/correcting a specific page like Page 3 of an old case)
+    single_page_mode: bool = False
+    target_page_number: int = 0
+    page_correction_instruction: str = ""
     # All generated documents belonging to this case. Each item stores an independent
     # structured draft, while `facts` remains shared case evidence across document types.
     documents: list[dict[str, Any]] = field(default_factory=list)
@@ -127,6 +132,26 @@ class CaseState:
         self.pending_edit = {}
         self.pending_point_action = ""
 
+    def undo_draft(self) -> bool:
+        """Revert `self.draft` to the immediately preceding version in `self.draft_versions`."""
+        if len(self.draft_versions) < 2:
+            return False
+        self.draft_versions.pop()
+        prev_entry = self.draft_versions[-1]
+        self.draft = prev_entry.get("draft") or {}
+        self.draft_version = int(prev_entry.get("version", max(1, self.draft_version - 1)))
+        for i, existing in enumerate(self.documents):
+            if existing.get("document_id") == self.active_document_id:
+                self.documents[i] = {
+                    **existing,
+                    "version": self.draft_version,
+                    "draft": self.draft,
+                }
+                break
+        self.pending_edit = {}
+        self.pending_point_action = ""
+        return True
+
     def archive_active_document(self) -> None:
         """Persist the current generated document into the case's multi-document list."""
         if not self.draft:
@@ -161,6 +186,9 @@ class CaseState:
         self.edit_mode = False
         self.pending_edit = {}
         self.pending_point_action = ""
+        self.single_page_mode = False
+        self.target_page_number = 0
+        self.page_correction_instruction = ""
         self.document_counter += 1
         self.active_document_id = f"{document_type}-{self.document_counter}"
         self.status = "collecting"
@@ -210,10 +238,8 @@ REQUIRED_BY_TYPE = {
 
 def missing_fields(facts, document_type="dava_plaint", style_mode: str = "template_mode"):
     facts = facts or {}
-    # In As-It-Is / Handwritten Legal Formatting mode, never block generation with missing-field questions
-    # as long as any source text or facts have been provided by the user.
-    if style_mode == "as_is_mode" or facts.get("as_is_mode"):
-        if facts.get("raw_source_text") or facts.get("facts"):
+    if style_mode in {"as_is_mode", "single_page_mode"} or facts.get("as_is_mode") or facts.get("single_page_mode"):
+        if facts.get("raw_source_text") or facts.get("facts") or facts.get("single_page_source_text"):
             return []
         return ["facts"]
     return [key for key, _ in REQUIRED_BY_TYPE.get(document_type, REQUIRED_BY_TYPE["other_civil"]) if not facts.get(key)]
@@ -221,9 +247,9 @@ def missing_fields(facts, document_type="dava_plaint", style_mode: str = "templa
 
 def next_questions(facts, document_type="dava_plaint", max_questions=5, style_mode: str = "template_mode"):
     facts = facts or {}
-    if style_mode == "as_is_mode" or facts.get("as_is_mode"):
-        if facts.get("raw_source_text") or facts.get("facts"):
+    if style_mode in {"as_is_mode", "single_page_mode"} or facts.get("as_is_mode") or facts.get("single_page_mode"):
+        if facts.get("raw_source_text") or facts.get("facts") or facts.get("single_page_source_text"):
             return []
-        return [("facts", "दस्तावेज़ की Photo/PDF, हस्तलिखित पन्ना, या Text")]
+        return [("facts", "दस्तावेज़ / पन्ने की Photo/PDF, हस्तलिखित पन्ना, या Text")]
     labels = REQUIRED_BY_TYPE.get(document_type, REQUIRED_BY_TYPE["other_civil"])
     return [(key, label) for key, label in labels if not facts.get(key)][:max_questions]

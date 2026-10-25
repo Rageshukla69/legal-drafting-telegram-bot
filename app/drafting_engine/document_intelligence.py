@@ -386,3 +386,53 @@ def analyze_document_bytes(
 
     pages = analyze.get("pages") or []
     return OCRResult(text=decode_krutidev_hybrid(text), page_count=len(pages) or 1, model_id=model)
+
+
+def extract_pdf_pages_list(data: bytes) -> list[str]:
+    """Return a list of extracted text strings for each individual page (1-indexed at index 0..N-1) of a PDF."""
+    if not data:
+        return []
+    # 1. Try poppler pdftotext split by form-feed \x0c
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp_pdf:
+            tmp_pdf.write(data)
+            tmp_pdf.flush()
+            proc = subprocess.run(
+                ["pdftotext", "-enc", "UTF-8", tmp_pdf.name, "-"],
+                capture_output=True,
+                timeout=20,
+                check=False,
+            )
+            if proc.returncode == 0 and proc.stdout:
+                raw_txt = proc.stdout.decode("utf-8", errors="replace")
+                raw_pages = raw_txt.split("\x0c")
+                if raw_pages and not raw_pages[-1].strip():
+                    raw_pages = raw_pages[:-1]
+                cleaned = [decode_krutidev_hybrid(pg.strip()) for pg in raw_pages if pg.strip()]
+                if cleaned and all("\x00" not in c and "\ufffd" not in c for c in cleaned):
+                    return cleaned
+    except Exception:
+        pass
+
+    # 2. Try pypdfium2 per page
+    try:
+        import pypdfium2 as pdfium
+
+        doc = pdfium.PdfDocument(data)
+        pages_out: list[str] = []
+        for p_idx in range(len(doc)):
+            tp = doc[p_idx].get_textpage()
+            txt = (tp.get_text_bounded() or "").strip()
+            if txt:
+                pages_out.append(decode_krutidev_hybrid(txt))
+        if pages_out:
+            return pages_out
+    except Exception:
+        pass
+
+    # 3. Fallback to full extraction as a single item
+    try:
+        res = analyze_document_bytes(data, "application/pdf", "document.pdf")
+        return [res.text] if res.text else []
+    except Exception:
+        return []
