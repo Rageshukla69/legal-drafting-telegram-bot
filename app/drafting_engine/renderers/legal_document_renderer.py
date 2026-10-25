@@ -531,9 +531,17 @@ def _docx_font_plan() -> tuple[str, str, str, dict[str, frozenset[int]]]:
     )
 
 
-def _add_docx_page_number_footer(document: Document):
-    """Put the page number in the DOCX footer as a real `PAGE` field."""
+def _add_docx_page_number_footer(document: Document, start_page: int = 1):
+    """Put the page number in the DOCX footer as a real `PAGE` field, starting at `start_page`."""
     section = document.sections[0]
+    if start_page and int(start_page) > 1:
+        sect_pr = section._sectPr
+        for existing_pg in sect_pr.findall(qn("w:pgNumType")):
+            sect_pr.remove(existing_pg)
+        pg_num_type = OxmlElement("w:pgNumType")
+        pg_num_type.set(qn("w:start"), str(int(start_page)))
+        sect_pr.append(pg_num_type)
+
     footer = section.footer
     footer.is_linked_to_previous = False
     paragraph = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
@@ -551,7 +559,7 @@ def _add_docx_page_number_footer(document: Document):
     separate = OxmlElement("w:fldChar")
     separate.set(qn("w:fldCharType"), "separate")
     result = OxmlElement("w:t")
-    result.text = "1"
+    result.text = str(max(1, int(start_page or 1)))
     end = OxmlElement("w:fldChar")
     end.set(qn("w:fldCharType"), "end")
     for element in (begin, instruction, separate, result, end):
@@ -559,7 +567,7 @@ def _add_docx_page_number_footer(document: Document):
     return paragraph
 
 
-def _setup_docx(document: Document, paper: str):
+def _setup_docx(document: Document, paper: str, start_page: int = 1):
     paper = str(paper or "legal").strip().lower()
     if paper not in {"legal", "letter"}:
         paper = "legal"
@@ -593,7 +601,7 @@ def _setup_docx(document: Document, paper: str):
     except Exception:
         pass
 
-    _add_docx_page_number_footer(document)
+    _add_docx_page_number_footer(document, start_page=start_page)
 
 
 def _add_docx_para(
@@ -674,6 +682,38 @@ def _docx_page_break_if_needed(doc: Document, draft: dict[str, Any], section: st
         doc.add_page_break()
 
 
+def _is_single_page_mode(draft: dict[str, Any]) -> bool:
+    layout = draft.get("layout", {}) or {}
+    return bool(isinstance(layout, dict) and layout.get("single_page_mode"))
+
+
+def _start_paragraph_number(draft: dict[str, Any]) -> int:
+    layout = draft.get("layout", {}) or {}
+    if isinstance(layout, dict) and layout.get("start_paragraph_number"):
+        try:
+            return max(1, int(layout["start_paragraph_number"]))
+        except (TypeError, ValueError):
+            pass
+    return 1
+
+
+def _single_page_number(draft: dict[str, Any]) -> int:
+    layout = draft.get("layout", {}) or {}
+    if isinstance(layout, dict) and layout.get("single_page_number"):
+        try:
+            return max(1, int(layout["single_page_number"]))
+        except (TypeError, ValueError):
+            pass
+    return 1
+
+
+def _page_top_continuation(draft: dict[str, Any]) -> str:
+    top = draft.get("page_top_continuation")
+    if not top and isinstance(draft.get("layout"), dict):
+        top = draft["layout"].get("page_top_continuation")
+    return str(top or "").strip()
+
+
 def _ordered_pleading_items(draft: dict[str, Any]) -> list[str]:
     """Return the single approved pleading sequence."""
     return [str(x).strip() for x in (draft.get("pleadings", []) or []) if str(x).strip()]
@@ -681,6 +721,8 @@ def _ordered_pleading_items(draft: dict[str, Any]) -> list[str]:
 
 def _title_text(draft: dict[str, Any]) -> str:
     title = str(draft.get("title", "")).strip()
+    if _is_single_page_mode(draft):
+        return title
     if title and title != "वाद पत्र":
         return title
     return "वाद पत्र"
@@ -704,7 +746,7 @@ def _format_prayer_clause(item: str, idx: int) -> str:
 
 def _signature_lines(draft: dict[str, Any]) -> list[str]:
     lines = [str(x).strip() for x in draft.get("signature_block", []) or [] if str(x).strip()]
-    if lines:
+    if lines or _is_single_page_mode(draft):
         return lines
     if "शपथ" in _title_text(draft):
         return ["हस्ताक्षर शपथग्रहीता / शपथकर्ता"]
@@ -744,7 +786,7 @@ def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "le
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc = Document()
-    _setup_docx(doc, paper)
+    _setup_docx(doc, paper, start_page=_single_page_number(draft))
 
     court = str(draft.get("court_heading", "")).strip()
     case = str(draft.get("case_heading", "")).strip()
@@ -775,8 +817,10 @@ def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "le
             is_role = _is_right_role_line(party)
             _add_docx_para(doc, party, align=WD_ALIGN_PARAGRAPH.RIGHT if is_role else WD_ALIGN_PARAGRAPH.LEFT, size=14, bold=is_role, first_indent=False, after=4)
 
-    _docx_page_break_if_needed(doc, draft, "title")
-    _add_docx_para(doc, _title_text(draft), align=WD_ALIGN_PARAGRAPH.CENTER, size=16, bold=True, underline=True, first_indent=False, after=10)
+    title_str = _title_text(draft)
+    if title_str:
+        _docx_page_break_if_needed(doc, draft, "title")
+        _add_docx_para(doc, title_str, align=WD_ALIGN_PARAGRAPH.CENTER, size=16, bold=True, underline=True, first_indent=False, after=10)
 
     opening = str(draft.get("opening_averment", "")).strip()
     if opening:
@@ -785,8 +829,12 @@ def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "le
             if op_line.strip():
                 _add_docx_para(doc, op_line.strip(), align=WD_ALIGN_PARAGRAPH.LEFT, size=14, first_indent=False, after=6)
 
+    top_cont = _page_top_continuation(draft)
+    if top_cont:
+        _add_docx_para(doc, top_cont, align=WD_ALIGN_PARAGRAPH.JUSTIFY, size=14, first_indent=False, after=12)
+
     _docx_page_break_if_needed(doc, draft, "pleadings")
-    para_num = 0
+    para_num = _start_paragraph_number(draft) - 1
     for paragraph in _ordered_pleading_items(draft):
         if _is_pleading_section_heading(paragraph):
             heading_txt = re.sub(r"^\s*\d+\s*(?:\([^)]*\))?\s*[:.\-–—]+\s*", "", paragraph).strip(" :-–—")
@@ -879,9 +927,11 @@ def _pdf_story(draft: dict[str, Any], font: str, bold_font: str, latin_font: str
             is_role = _is_right_role_line(party)
             story.append(Paragraph(_pdf_inline_font_markup(party, bold_font if is_role else font, latin_bold if is_role else latin_font, symbol_font), right_bold if is_role else left))
 
-    if _layout_break(draft, "page_break_before", "title"):
-        story.append(PageBreak())
-    story.append(Paragraph(_pdf_inline_font_markup(_title_text(draft), bold_font, latin_bold, symbol_font), ParagraphStyle("Title", parent=center16, underline=True, spaceBefore=4, spaceAfter=10)))
+    title_str = _title_text(draft)
+    if title_str:
+        if _layout_break(draft, "page_break_before", "title"):
+            story.append(PageBreak())
+        story.append(Paragraph(_pdf_inline_font_markup(title_str, bold_font, latin_bold, symbol_font), ParagraphStyle("Title", parent=center16, underline=True, spaceBefore=4, spaceAfter=10)))
 
     opening = str(draft.get("opening_averment", "")).strip()
     if opening:
@@ -891,9 +941,13 @@ def _pdf_story(draft: dict[str, Any], font: str, bold_font: str, latin_font: str
             if op_line.strip():
                 story.append(Paragraph(_pdf_inline_font_markup(op_line.strip(), font, latin_font, symbol_font), left))
 
+    top_cont = _page_top_continuation(draft)
+    if top_cont:
+        story.append(Paragraph(_pdf_inline_font_markup(top_cont, font, latin_font, symbol_font), noindent))
+
     if _layout_break(draft, "page_break_before", "pleadings"):
         story.append(PageBreak())
-    para_num = 0
+    para_num = _start_paragraph_number(draft) - 1
     for paragraph in _ordered_pleading_items(draft):
         if _is_pleading_section_heading(paragraph):
             heading_txt = re.sub(r"^\s*\d+\s*(?:\([^)]*\))?\s*[:.\-–—]+\s*", "", paragraph).strip(" :-–—")
@@ -938,11 +992,12 @@ def _pdf_story(draft: dict[str, Any], font: str, bold_font: str, latin_font: str
 
 
 class NumberedCanvas(Canvas):
-    """Adds page numbers without changing the underlying legal content."""
+    """Adds page numbers (supporting custom starting page numbers for Single-Page Recreate mode)."""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, start_page: int = 1, **kwargs):
         Canvas.__init__(self, *args, **kwargs)
         self._saved_page_states = []
+        self._start_page = max(1, int(start_page or 1))
 
     def showPage(self):
         self._saved_page_states.append(dict(self.__dict__))
@@ -958,7 +1013,8 @@ class NumberedCanvas(Canvas):
 
     def draw_page_number(self, page_count: int):
         self.setFont("VakilDeva", 9)
-        self.drawCentredString(4.25 * inch, 0.45 * inch, f"{self._pageNumber}")
+        display_num = self._pageNumber + self._start_page - 1
+        self.drawCentredString(4.25 * inch, 0.45 * inch, f"{display_num}")
 
 
 def render_pdf_reportlab(draft: dict[str, Any], output_path: str | Path, paper: str = "legal"):
@@ -991,9 +1047,10 @@ def render_pdf_reportlab(draft: dict[str, Any], output_path: str | Path, paper: 
         author="Legal Drafting Bot",
     )
     doc.addPageTemplates([PageTemplate(id="legal", frames=[frame])])
+    start_pg = _single_page_number(draft)
     doc.build(
         _pdf_story(draft, font, bold_font, latin_font, symbol_font),
-        canvasmaker=NumberedCanvas,
+        canvasmaker=lambda *a, **kw: NumberedCanvas(*a, start_page=start_pg, **kw),
     )
     return output_path
 
@@ -1086,3 +1143,22 @@ def render_both(
     render_docx(draft, docx_path, paper=paper)
     _write_pdf(draft, pdf_path, paper=paper, docx_path=docx_path)
     return docx_path, pdf_path
+
+
+def extract_pdf_page_slice(pdf_path: str | Path, page_number: int, output_path: str | Path) -> tuple[Path, int]:
+    """Extract a single 1-indexed page (`page_number`) from a rendered multi-page PDF into a standalone 1-page PDF.
+    Returns (output_path, total_pages_in_source)."""
+    from pypdf import PdfReader, PdfWriter
+
+    reader = PdfReader(str(pdf_path))
+    total = len(reader.pages)
+    if total == 0:
+        raise ValueError("Source PDF has 0 pages.")
+    idx = max(0, min(total - 1, int(page_number) - 1))
+    writer = PdfWriter()
+    writer.add_page(reader.pages[idx])
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "wb") as f:
+        writer.write(f)
+    return out, total
