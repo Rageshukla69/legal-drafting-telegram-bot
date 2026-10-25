@@ -5,7 +5,7 @@ Vakil AI Pro Hybrid, and As-It-Is / Handwritten-to-Legal-Size Conversion Mode), 
 blueprint matching, multi-document case chaining (Vaad Patra, Jawab Dava, Interim Application,
 Affidavit, Legal Notice), universal GPT-6.0-Luna Affidavit engine with canonical structure,
 strict Order VI Rule 2 CPC section-free pleadings/Jawab Dava, bilingual numerical formatting,
-and voice/text/OCR/DOCX intake.
+and voice/text/OCR/DOCX intake with multi-part split-message reassembly.
 """
 from __future__ import annotations
 import asyncio, json, logging, os, re, tempfile
@@ -49,6 +49,21 @@ orchestrator = MultiDraftOrchestrator()
 editor = DraftEditor()
 
 DIVIDER = "━━━━━━━━━━━━━━━━━━━━━━"
+TELEGRAM_SAFE_MAX_CHARS = 3900
+
+# Per-user concurrency locks and split-message buffers so long pasted texts split by Telegram
+# into 2-4 parts at the same millisecond are seamlessly reassembled and processed once.
+_user_locks: dict[int, asyncio.Lock] = {}
+_pending_text_buffers: dict[int, list[str]] = {}
+
+
+def _get_user_lock(uid: int) -> asyncio.Lock:
+    lock = _user_locks.get(uid)
+    if lock is None:
+        lock = asyncio.Lock()
+        _user_locks[uid] = lock
+    return lock
+
 
 TYPE_ORDER = [
     "dava_plaint", "written_statement", "application",
@@ -78,28 +93,38 @@ def get_state(uid: int):
     return store.get(case_id_for(uid))
 
 
+def _truncate_for_telegram(text: str, limit: int = TELEGRAM_SAFE_MAX_CHARS) -> str:
+    s = str(text or "")
+    if len(s) <= limit:
+        return s
+    cut = s.rfind("\n", 0, limit - 120)
+    if cut < limit // 2:
+        cut = limit - 120
+    return s[:cut].rstrip() + "\n\n… _(संपूर्ण पाठ केस डोजियर में सुरक्षित है)_"
+
+
 async def _safe_reply_text(message, text: str, **kwargs):
-    """Send a reply with Markdown, falling back to plain text if dynamic user/draft text has unescaped symbols."""
+    """Send a reply with Markdown and automatic 3900-char clamping, falling back to plain text if dynamic user/draft text has unescaped symbols."""
+    safe_text = _truncate_for_telegram(text)
     try:
-        return await message.reply_text(text, **kwargs)
+        return await message.reply_text(safe_text, **kwargs)
     except Exception:
-        if kwargs.get("parse_mode"):
-            fallback_kwargs = dict(kwargs)
-            fallback_kwargs.pop("parse_mode", None)
-            return await message.reply_text(text.replace("*", "").replace("`", ""), **fallback_kwargs)
-        raise
+        fallback_kwargs = dict(kwargs)
+        fallback_kwargs.pop("parse_mode", None)
+        plain = _truncate_for_telegram(safe_text.replace("*", "").replace("`", "").replace("_", ""), 3700)
+        return await message.reply_text(plain, **fallback_kwargs)
 
 
 async def _safe_edit_text(query, text: str, **kwargs):
-    """Edit a callback message with Markdown, falling back to plain text if unescaped symbols exist."""
+    """Edit a callback message with Markdown and automatic 3900-char clamping, falling back to plain text if unescaped symbols exist."""
+    safe_text = _truncate_for_telegram(text)
     try:
-        return await query.edit_message_text(text, **kwargs)
+        return await query.edit_message_text(safe_text, **kwargs)
     except Exception:
-        if kwargs.get("parse_mode"):
-            fallback_kwargs = dict(kwargs)
-            fallback_kwargs.pop("parse_mode", None)
-            return await query.edit_message_text(text.replace("*", "").replace("`", ""), **fallback_kwargs)
-        raise
+        fallback_kwargs = dict(kwargs)
+        fallback_kwargs.pop("parse_mode", None)
+        plain = _truncate_for_telegram(safe_text.replace("*", "").replace("`", "").replace("_", ""), 3700)
+        return await query.edit_message_text(plain, **fallback_kwargs)
 
 
 def format_public_blueprint_name(raw_name: str, document_type: str = "dava_plaint", style_mode: str = "template_mode") -> str:
@@ -236,8 +261,8 @@ def existing_documents_menu(state):
     return InlineKeyboardMarkup(rows)
 
 
-# Ordered so specific document types (Evidence Affidavit, Affidavit, Legal Notice, Application, Written Statement)
-# are checked cleanly without short-token false positives like 'ws' inside English words or 'लिखित बयान' inside affidavits.
+# Ordered so specific document types (Evidence Affidavit, Affidavit, Application/Objection, Legal Notice, Written Statement)
+# are checked cleanly without false positives when 'जवाबदावा' is mentioned inside a paragraph of an Objection Petition.
 _TYPE_KEYWORDS = {
     "evidence_pw_affidavit": (
         "evidence affidavit", "pw affidavit", "साक्ष्य शपथपत्र", "साक्ष्य का शपथपत्र",
@@ -247,13 +272,15 @@ _TYPE_KEYWORDS = {
         "affidavit", "शपथपत्र", "शपथ पत्र", "शपथ-पत्र", "हलफनामा", "हल्फ़नामा",
         "शपथग्रहीता", "शपथकर्ता", "shapath patra", "shapathpatra", "halafnama",
     ),
+    "application": (
+        "application", "प्रार्थना पत्र", "प्रार्थना-पत्र", "प्रार्थनापत्र", "आपत्ति पत्र",
+        "आपत्ति-पत्र", "आपत्तिपत्र", "आपत्तियाँ सादर", "आपत्तियां सादर", "पुनर्स्थापन प्रार्थना पत्र",
+        "आदेश 9 नियम 13", "आदेश ९ नियम १३", "आवेदन", "कमीशन", "6ग", "संशोधन",
+        "39 नियम 1", "7 नियम 11", "स्टे प्रार्थना पत्र", "objection petition",
+    ),
     "written_statement": (
         "written statement", "जवाब दावा", "जवाब-दावा", "प्रतिवादपत्र", "प्रतिवाद पत्र",
         "जवाबदावा", "लिखित कथन", "jawab dava", "jawabdava",
-    ),
-    "application": (
-        "application", "प्रार्थना पत्र", "प्रार्थना-पत्र", "प्रार्थनापत्र", "आवेदन",
-        "कमीशन", "6ग", "संशोधन", "39 नियम 1", "7 नियम 11", "स्टे प्रार्थना पत्र",
     ),
     "legal_notice": (
         "legal notice", "कानूनी नोटिस", "विधिक नोटिस", "रजिस्टर्ड नोटिस", "138 ni", "धारा 138",
@@ -269,14 +296,27 @@ _TYPE_KEYWORDS = {
 
 
 def infer_document_type(text: str, default: str = "dava_plaint") -> str:
-    """Infer document type from natural-language Hindi/English dictation or OCR text."""
-    low = re.sub(r"\s+", " ", str(text or "").strip().casefold())
-    if not low:
+    """Infer document type from natural-language Hindi/English dictation or OCR text,
+    checking the document's heading/title (first 400 chars) first so incidental mentions
+    of 'जवाबदावा' or 'वादपत्र' inside body paragraphs do not misclassify an Application/Objection."""
+    raw = str(text or "").strip()
+    if not raw:
         return default
-    if any(m in low for m in ("written statement", "जवाब दावा", "जवाब-दावा", "प्रतिवादपत्र", "प्रतिवाद पत्र", "jawab dava", "jawabdava")):
+    head_low = re.sub(r"\s+", " ", raw[:400].casefold())
+    full_low = re.sub(r"\s+", " ", raw.casefold())
+
+    # 1. Check heading/title region first
+    if any(m in head_low for m in ("आपत्ति पत्र", "आपत्ति-पत्र", "आपत्तिपत्र", "प्रार्थना पत्र", "प्रार्थना-पत्र", "आदेश 9 नियम 13", "आदेश ९ नियम १३", "objection petition")):
+        return "application"
+    for typ, markers in _TYPE_KEYWORDS.items():
+        if any(m in head_low for m in markers):
+            return typ
+
+    # 2. Check full text if heading didn't match
+    if any(m in full_low for m in ("written statement", "जवाब दावा", "जवाब-दावा", "प्रतिवादपत्र", "प्रतिवाद पत्र", "jawab dava", "jawabdava")):
         return "written_statement"
     for typ, markers in _TYPE_KEYWORDS.items():
-        if any(m in low for m in markers):
+        if any(m in full_low for m in markers):
             return typ
     return default
 
@@ -394,12 +434,27 @@ def questions_text(state):
 
 
 def summary_text(state):
+    """Build a concise, Telegram-safe Case Dossier preview card (always < 1,500 chars)
+    even when the underlying document has 17, 50, or 100+ long paragraphs."""
     facts = state.facts
     style_label = STYLE_NAMES.get(state.style_mode, state.style_mode)
 
-    def val(k):
+    def val(k, max_items: int = 4, max_item_chars: int = 140) -> str:
         v = facts.get(k, "—")
-        return "\n".join(f"  • {x}" for x in v) if isinstance(v, list) else str(v)
+        if isinstance(v, list):
+            items = [str(x).strip() for x in v if str(x).strip()]
+            if not items:
+                return "—"
+            shown = []
+            for x in items[:max_items]:
+                short_x = (x[:max_item_chars].rstrip() + "…") if len(x) > max_item_chars else x
+                shown.append(f"  • {short_x}")
+            if len(items) > max_items:
+                rem = len(items) - max_items
+                shown.append(f"  • _… (+ {rem} अन्य पैराग्राफ सुरक्षित रूप से दर्ज हैं — कुल {len(items)} पैराग्राफ)_")
+            return "\n".join(shown)
+        s = str(v or "—").strip()
+        return (s[:300].rstrip() + "…") if len(s) > 300 else s
 
     extra = ""
     if state.selected_template_name or state.document_type == "affidavit" or state.style_mode == "as_is_mode":
@@ -423,11 +478,13 @@ def summary_text(state):
             f"📊 *पूर्णता (Readiness):* `{progress(state)}`\n"
             f"{DIVIDER}\n"
             f"🏛️ *समक्ष / न्यायालय:* {forum_str}\n"
-            f"👤 *शपथग्रहीता / शपथकर्ता:* {val('deponent')}\n"
-            f"🎯 *उद्देश्य / विषय:* {val('purpose')}\n"
-            f"📋 *शपथपूर्वक कथन (Statements):*\n{val('facts')}\n"
+            f"👤 *शपथग्रहीता / शपथकर्ता:* {val('deponent', max_items=2)}\n"
+            f"🎯 *उद्देश्य / विषय:* {val('purpose', max_items=2)}\n"
+            f"📋 *शपथपूर्वक कथन (Statements):*\n{val('facts', max_items=4, max_item_chars=135)}\n"
         )
 
+    parties_preview = val("parties", max_items=4, max_item_chars=110) if facts.get("parties") else val("plaintiffs", max_items=4, max_item_chars=110)
+    relief_preview = val("reliefs", max_items=2, max_item_chars=160) if facts.get("reliefs") else val("demands", max_items=2, max_item_chars=160)
     return (
         f"🏛️ *VAKIL DRAFTING AI — CASE DOSSIER*\n"
         f"{DIVIDER}\n"
@@ -436,10 +493,10 @@ def summary_text(state):
         f"{extra}"
         f"📊 *पूर्णता (Readiness):* `{progress(state)}`\n"
         f"{DIVIDER}\n"
-        f"🏛️ *न्यायालय:* {val('court_name')}\n"
-        f"👥 *पक्षकार:* {val('parties') or val('plaintiffs')}\n"
-        f"📋 *मुख्य तथ्य / विवाद:*\n{val('facts')}\n"
-        f"⚖️ *मांगी गई राहत / अनुतोष:*\n{val('reliefs') if facts.get('reliefs') else val('demands')}\n"
+        f"🏛️ *न्यायालय:* {val('court_name', max_items=1, max_item_chars=140)}\n"
+        f"👥 *पक्षकार:*\n{parties_preview}\n"
+        f"📋 *मुख्य तथ्य / पैराग्राफ:*\n{val('facts', max_items=4, max_item_chars=135)}\n"
+        f"⚖️ *मांगी गई राहत / प्रार्थना:*\n{relief_preview}\n"
     )
 
 
@@ -516,7 +573,7 @@ async def corpus_info(update, context):
     msg = (
         "🏛️ *VAKIL DRAFTING AI — SYSTEM ARCHITECTURE*\n"
         f"{DIVIDER}\n"
-        "⚡ *Drafting Core:* `Vakil Neural Legal Engine v4.3`\n"
+        "⚡ *Drafting Core:* `Vakil Neural Legal Engine v4.4`\n"
         "🛡️ *Pleading Guard:* `Order VI Rule 2 CPC (Pure Factual Pleadings)`\n"
         "🔢 *Bilingual Formatter:* `Active (अंक + हिंदी शब्द)`\n"
         f"📚 *Indexed Judicial Precedents:* `{max(total_docs, 800)}+ Verified Formats`\n"
@@ -961,7 +1018,7 @@ async def download_command(update, context):
     await download_current_draft(update, uid, state, edit_message=False)
 
 
-async def intake_text(update, context, text=None, *, suppress_questions=False, announce=True):
+async def intake_text(update, context, text=None, *, suppress_questions=False, announce=True, split_parts_count: int = 1):
     if not update.effective_user:
         return
     if not access.is_authorized(update.effective_user.id):
@@ -992,8 +1049,10 @@ async def intake_text(update, context, text=None, *, suppress_questions=False, a
     state.record("user", text)
     if announce:
         mode_note = " (📄 हूबहू / हस्तलिखित लीगल मोड)" if state.style_mode == "as_is_mode" else ""
-        await update.message.reply_text(
-            f"⚙️ *{DISPLAY_NAMES[state.document_type]}*{mode_note} — आपके विवरण का विधिक विश्लेषण किया जा रहा है…",
+        parts_note = f" _(विस्तृत पाठ के `{split_parts_count}` भाग संयुक्त किए गए)_" if split_parts_count > 1 else ""
+        await _safe_reply_text(
+            update.message,
+            f"⚙️ *{DISPLAY_NAMES[state.document_type]}*{mode_note}{parts_note} — आपके विवरण का विधिक विश्लेषण किया जा रहा है…",
             parse_mode="Markdown",
         )
     try:
@@ -1086,7 +1145,7 @@ async def add_document_command(update, context):
 
 
 async def text_message(update, context):
-    if not update.effective_user:
+    if not update.effective_user or not update.message:
         return
     uid = update.effective_user.id
     raw_text = update.message.text or ""
@@ -1103,7 +1162,29 @@ async def text_message(update, context):
             await process_edit_instruction(update, context, raw_text)
             return
 
-    await intake_text(update, context)
+    # Buffer and reassemble multi-part messages when Telegram automatically splits a long paste (>4096 chars)
+    buf = _pending_text_buffers.get(uid)
+    if buf is not None:
+        buf.append(raw_text)
+        return
+
+    _pending_text_buffers[uid] = [raw_text]
+    # Wait briefly if the message is long or looks like a multi-part paste so all parts arrive in order
+    wait_sec = 0.9 if len(raw_text) >= 1200 else 0.35
+    await asyncio.sleep(wait_sec)
+    while True:
+        cur_len = len(_pending_text_buffers.get(uid, []))
+        if cur_len <= 1:
+            break
+        await asyncio.sleep(0.35)
+        if len(_pending_text_buffers.get(uid, [])) == cur_len:
+            break
+
+    parts = _pending_text_buffers.pop(uid, [raw_text])
+    combined_text = "\n".join(p.strip() for p in parts if p and p.strip())
+
+    async with _get_user_lock(uid):
+        await intake_text(update, context, combined_text, split_parts_count=len(parts))
 
 
 async def voice_message(update, context):
@@ -1138,7 +1219,8 @@ async def voice_message(update, context):
                 await process_edit_instruction(update, context, transcript)
                 return
 
-        await intake_text(update, context, transcript)
+        async with _get_user_lock(uid):
+            await intake_text(update, context, transcript)
     except Exception:
         log.exception("voice failed")
         await update.message.reply_text("❌ Voice note प्रोसेस नहीं हो सका। कृपया पुनः प्रयास करें।")
@@ -1153,150 +1235,152 @@ async def image_document_message(update, context):
     uid = update.effective_user.id
     caption = (update.message.caption or "").strip()
     auto_as_is = detect_as_is_intent(caption)
-    state = get_state(uid)
-    if not state:
-        inferred = infer_document_type(caption, default="dava_plaint")
-        state = CaseState(
-            case_id_for(uid),
-            document_type=inferred,
-            style_mode="as_is_mode" if auto_as_is else "template_mode",
-            style_selected=auto_as_is,
-            type_selected=False,
-        )
-        store.save(uid, state)
-    elif auto_as_is:
-        state.style_mode = "as_is_mode"
-        state.style_selected = True
-        store.save(uid, state)
 
-    file_bytes = None
-    content_type = None
-    filename = "telegram_document"
-    try:
-        if update.message.photo:
-            photo = update.message.photo[-1]
-            tg_file = await context.bot.get_file(photo.file_id)
-            buf = BytesIO()
-            await tg_file.download_to_memory(out=buf)
-            file_bytes = buf.getvalue()
-            content_type = "image/jpeg"
-            filename = "telegram_photo.jpg"
-        elif update.message.document:
-            doc = update.message.document
-            content_type = (doc.mime_type or "application/octet-stream").lower()
-            filename = doc.file_name or filename
-            supported = (
-                content_type.startswith("image/")
-                or content_type in {"application/pdf", "text/plain", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
-                or filename.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".heif", ".pdf", ".docx", ".txt"))
-            )
-            if not supported:
-                await update.message.reply_text(
-                    "⚠️ केवल Image फ़ाइलें (JPG/PNG/TIFF/HEIF), PDF दस्तावेज़, और Word (.docx) / Text (.txt) फ़ाइलें समर्थित हैं।"
-                )
-                return
-            tg_file = await context.bot.get_file(doc.file_id)
-            buf = BytesIO()
-            await tg_file.download_to_memory(out=buf)
-            file_bytes = buf.getvalue()
-            if content_type == "application/octet-stream":
-                lower = filename.lower()
-                if lower.endswith(".pdf"):
-                    content_type = "application/pdf"
-                elif lower.endswith(".docx"):
-                    content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                elif lower.endswith(".txt"):
-                    content_type = "text/plain"
-                elif lower.endswith(".png"):
-                    content_type = "image/png"
-                elif lower.endswith((".jpg", ".jpeg")):
-                    content_type = "image/jpeg"
-                elif lower.endswith((".tif", ".tiff")):
-                    content_type = "image/tiff"
-                elif lower.endswith(".heif"):
-                    content_type = "image/heif"
-        else:
-            return
-
-        await update.message.reply_text("📸 *Judicial OCR & Document Scanner सक्रिय है…* दस्तावेज़ से पाठ और संरचना निकाली जा रही है…", parse_mode="Markdown")
-        extracted = await asyncio.to_thread(analyze_document_bytes, file_bytes, content_type, filename)
-        text = extracted.text.strip()
-        if caption and not detect_as_is_intent(caption):
-            text = f"{caption}\n\n{text}".strip()
-        if not text:
-            await update.message.reply_text("⚠️ दस्तावेज़ से पठनीय पाठ नहीं मिला। कृपया साफ़ फोटो या PDF भेजें।")
-            return
-
-        if state.draft and (state.pending_point_action or state.edit_mode or (caption and detect_edit_intent(caption)) or detect_edit_intent(text[:500])):
-            state.edit_mode = True
-            store.save(uid, state)
-            await process_edit_instruction(update, context, caption or text)
-            return
-
-        if not state.type_selected:
-            inferred_doc_type = infer_document_type(f"{caption}\n{text[:1500]}", default=state.document_type)
-            state.document_type = inferred_doc_type
-            store.save(uid, state)
-
-        page_count = extracted.page_count
-        chunk_size = max(20000, int(os.getenv("IMAGE_INTAKE_CHUNK_CHARS", "60000")))
-        chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
-        if len(chunks) == 1:
-            await update.message.reply_text(
-                f"✅ *स्कैन पूर्ण* — `{page_count}` पृष्ठ (`{len(text)}` अक्षर)।\n"
-                "🧠 दस्तावेज़ से विधिक तथ्य एवं संरचना संकलित की जा रही है…",
-                parse_mode="Markdown",
-            )
-        else:
-            await update.message.reply_text(
-                f"✅ *स्कैन पूर्ण* — `{page_count}` पृष्ठ (`{len(text)}` अक्षर)।\n"
-                f"📚 विस्तृत दस्तावेज़ को `{len(chunks)}` भागों में विश्लेषित किया जा रहा है…",
-                parse_mode="Markdown",
-            )
-        for index, chunk in enumerate(chunks, 1):
-            if len(chunks) > 1 and index in {1, len(chunks)}:
-                await update.message.reply_text(f"⚙️ विधिक तथ्य विश्लेषण ({index}/{len(chunks)})…")
-            await intake_text(update, context, chunk, suppress_questions=True, announce=False)
-
+    async with _get_user_lock(uid):
         state = get_state(uid)
-        if state and state.style_mode == "as_is_mode":
-            await _safe_reply_text(
-                update.message,
-                f"✅ *दस्तावेज़ सफलतापूर्वक पढ़ लिया गया है!*\n\n{summary_text(state)}\n"
-                "💡 *अगला कदम:*\n"
-                "• यदि इस दस्तावेज़ का कोई अगला पन्ना (Page 2, Page 3...) बाकी है, तो उसकी Photo अभी भेजें।\n"
-                "• यदि सभी पन्ने आ गए हैं, तो नीचे **⚡ हूबहू लीगल ड्राफ्ट तैयार करें (Generate Legal)** दबाएं!",
-                parse_mode="Markdown",
-                reply_markup=case_actions(state),
+        if not state:
+            inferred = infer_document_type(caption, default="dava_plaint")
+            state = CaseState(
+                case_id_for(uid),
+                document_type=inferred,
+                style_mode="as_is_mode" if auto_as_is else "template_mode",
+                style_selected=auto_as_is,
+                type_selected=False,
             )
-        elif state and not state.style_selected:
-            await _safe_reply_text(
-                update.message,
-                f"✅ *दस्तावेज़ से सभी प्रमुख तथ्य संकलित कर लिए गए हैं!*\n\n{summary_text(state)}\n"
-                "👇 *कृपया चुनें कि आप इसे किस रूप में तैयार करना चाहते हैं (यदि हूबहू / हस्तलिखित लीगल पेपर में चाहिए तो चौथा विकल्प चुनें):*",
-                parse_mode="Markdown",
-                reply_markup=style_selection_menu(),
-            )
-        elif state and not missing_fields(state.facts, state.document_type, style_mode=state.style_mode):
-            await _safe_reply_text(
-                update.message,
-                f"✅ *दस्तावेज़ से सभी आवश्यक तथ्य संकलित हो गए हैं।*\n\n{summary_text(state)}",
-                parse_mode="Markdown",
-                reply_markup=case_actions(state),
-            )
-        else:
-            await _safe_reply_text(
-                update.message,
-                f"📋 *OCR विश्लेषण पूर्ण।* कृपया शेष आवश्यक विवरण प्रदान करें (या सीधे हूबहू लीगल पेपर में बनाने के लिए **📄 हूबहू लीगल पेपर में बनाएं** दबाएं):\n\n{questions_text(state)}\n\n📊 *पूर्णता:* `{progress(state)}`",
-                parse_mode="Markdown",
-                reply_markup=case_actions(state),
-            )
-    except DocumentIntelligenceError as exc:
-        log.exception("Document Intelligence failed")
-        await update.message.reply_text(f"❌ दस्तावेज़ पढ़ा नहीं जा सका: {str(exc)[:500]}")
-    except Exception:
-        log.exception("image/document processing failed")
-        await update.message.reply_text("❌ दस्तावेज़ प्रोसेस नहीं हो सका। कृपया दोबारा भेजें।")
+            store.save(uid, state)
+        elif auto_as_is:
+            state.style_mode = "as_is_mode"
+            state.style_selected = True
+            store.save(uid, state)
+
+        file_bytes = None
+        content_type = None
+        filename = "telegram_document"
+        try:
+            if update.message.photo:
+                photo = update.message.photo[-1]
+                tg_file = await context.bot.get_file(photo.file_id)
+                buf = BytesIO()
+                await tg_file.download_to_memory(out=buf)
+                file_bytes = buf.getvalue()
+                content_type = "image/jpeg"
+                filename = "telegram_photo.jpg"
+            elif update.message.document:
+                doc = update.message.document
+                content_type = (doc.mime_type or "application/octet-stream").lower()
+                filename = doc.file_name or filename
+                supported = (
+                    content_type.startswith("image/")
+                    or content_type in {"application/pdf", "text/plain", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+                    or filename.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".heif", ".pdf", ".docx", ".txt"))
+                )
+                if not supported:
+                    await update.message.reply_text(
+                        "⚠️ केवल Image फ़ाइलें (JPG/PNG/TIFF/HEIF), PDF दस्तावेज़, और Word (.docx) / Text (.txt) फ़ाइलें समर्थित हैं।"
+                    )
+                    return
+                tg_file = await context.bot.get_file(doc.file_id)
+                buf = BytesIO()
+                await tg_file.download_to_memory(out=buf)
+                file_bytes = buf.getvalue()
+                if content_type == "application/octet-stream":
+                    lower = filename.lower()
+                    if lower.endswith(".pdf"):
+                        content_type = "application/pdf"
+                    elif lower.endswith(".docx"):
+                        content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    elif lower.endswith(".txt"):
+                        content_type = "text/plain"
+                    elif lower.endswith(".png"):
+                        content_type = "image/png"
+                    elif lower.endswith((".jpg", ".jpeg")):
+                        content_type = "image/jpeg"
+                    elif lower.endswith((".tif", ".tiff")):
+                        content_type = "image/tiff"
+                    elif lower.endswith(".heif"):
+                        content_type = "image/heif"
+            else:
+                return
+
+            await update.message.reply_text("📸 *Judicial OCR & Document Scanner सक्रिय है…* दस्तावेज़ से पाठ और संरचना निकाली जा रही है…", parse_mode="Markdown")
+            extracted = await asyncio.to_thread(analyze_document_bytes, file_bytes, content_type, filename)
+            text = extracted.text.strip()
+            if caption and not detect_as_is_intent(caption):
+                text = f"{caption}\n\n{text}".strip()
+            if not text:
+                await update.message.reply_text("⚠️ दस्तावेज़ से पठनीय पाठ नहीं मिला। कृपया साफ़ फोटो या PDF भेजें।")
+                return
+
+            if state.draft and (state.pending_point_action or state.edit_mode or (caption and detect_edit_intent(caption)) or detect_edit_intent(text[:500])):
+                state.edit_mode = True
+                store.save(uid, state)
+                await process_edit_instruction(update, context, caption or text)
+                return
+
+            if not state.type_selected:
+                inferred_doc_type = infer_document_type(f"{caption}\n{text[:1500]}", default=state.document_type)
+                state.document_type = inferred_doc_type
+                store.save(uid, state)
+
+            page_count = extracted.page_count
+            chunk_size = max(50000, int(os.getenv("IMAGE_INTAKE_CHUNK_CHARS", "120000")))
+            chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+            if len(chunks) == 1:
+                await update.message.reply_text(
+                    f"✅ *स्कैन पूर्ण* — `{page_count}` पृष्ठ (`{len(text)}` अक्षर)।\n"
+                    "🧠 दस्तावेज़ से विधिक तथ्य एवं संरचना संकलित की जा रही है…",
+                    parse_mode="Markdown",
+                )
+            else:
+                await update.message.reply_text(
+                    f"✅ *स्कैन पूर्ण* — `{page_count}` पृष्ठ (`{len(text)}` अक्षर)।\n"
+                    f"📚 विस्तृत दस्तावेज़ को `{len(chunks)}` भागों में विश्लेषित किया जा रहा है…",
+                    parse_mode="Markdown",
+                )
+            for index, chunk in enumerate(chunks, 1):
+                if len(chunks) > 1 and index in {1, len(chunks)}:
+                    await update.message.reply_text(f"⚙️ विधिक तथ्य विश्लेषण ({index}/{len(chunks)})…")
+                await intake_text(update, context, chunk, suppress_questions=True, announce=False)
+
+            state = get_state(uid)
+            if state and state.style_mode == "as_is_mode":
+                await _safe_reply_text(
+                    update.message,
+                    f"✅ *दस्तावेज़ सफलतापूर्वक पढ़ लिया गया है!*\n\n{summary_text(state)}\n"
+                    "💡 *अगला कदम:*\n"
+                    "• यदि इस दस्तावेज़ का कोई अगला पन्ना (Page 2, Page 3...) बाकी है, तो उसकी Photo अभी भेजें।\n"
+                    "• यदि सभी पन्ने आ गए हैं, तो नीचे **⚡ हूबहू लीगल ड्राफ्ट तैयार करें (Generate Legal)** दबाएं!",
+                    parse_mode="Markdown",
+                    reply_markup=case_actions(state),
+                )
+            elif state and not state.style_selected:
+                await _safe_reply_text(
+                    update.message,
+                    f"✅ *दस्तावेज़ से सभी प्रमुख तथ्य संकलित कर लिए गए हैं!*\n\n{summary_text(state)}\n"
+                    "👇 *कृपया चुनें कि आप इसे किस रूप में तैयार करना चाहते हैं (यदि हूबहू / हस्तलिखित लीगल पेपर में चाहिए तो चौथा विकल्प चुनें):*",
+                    parse_mode="Markdown",
+                    reply_markup=style_selection_menu(),
+                )
+            elif state and not missing_fields(state.facts, state.document_type, style_mode=state.style_mode):
+                await _safe_reply_text(
+                    update.message,
+                    f"✅ *दस्तावेज़ से सभी आवश्यक तथ्य संकलित हो गए हैं।*\n\n{summary_text(state)}",
+                    parse_mode="Markdown",
+                    reply_markup=case_actions(state),
+                )
+            else:
+                await _safe_reply_text(
+                    update.message,
+                    f"📋 *OCR विश्लेषण पूर्ण।* कृपया शेष आवश्यक विवरण प्रदान करें (या सीधे हूबहू लीगल पेपर में बनाने के लिए **📄 हूबहू लीगल पेपर में बनाएं** दबाएं):\n\n{questions_text(state)}\n\n📊 *पूर्णता:* `{progress(state)}`",
+                    parse_mode="Markdown",
+                    reply_markup=case_actions(state),
+                )
+        except DocumentIntelligenceError as exc:
+            log.exception("Document Intelligence failed")
+            await update.message.reply_text(f"❌ दस्तावेज़ पढ़ा नहीं जा सका: {str(exc)[:500]}")
+        except Exception:
+            log.exception("image/document processing failed")
+            await update.message.reply_text("❌ दस्तावेज़ प्रोसेस नहीं हो सका। कृपया दोबारा भेजें।")
 
 
 async def generate_for(update, uid, state, edit=False):
@@ -1747,7 +1831,6 @@ async def button(update, context):
         if state.document_type == t and state.draft:
             await q.edit_message_text("यह दस्तावेज़ अभी सक्रिय है। कृपया कोई दूसरा प्रकार चुनें।", reply_markup=document_menu(state))
             return
-        # When creating a follow-up companion document (like Jawab Dava from a Plaint), switch from as_is_mode to template_mode if needed
         if state.style_mode == "as_is_mode":
             state.style_mode = "template_mode"
         state.begin_new_document(t)
