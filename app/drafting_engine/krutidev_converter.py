@@ -18,6 +18,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
+# Formatting marker pattern (alignment tags) that must be preserved untouched
+_FORMAT_MARKER_PREFIX_RE = re.compile(
+    r"^(?:\s*(?:<<ALIGN:(?:LEFT|CENTER|RIGHT|JUSTIFY)>>|\[ALIGN:(?:LEFT|CENTER|RIGHT|JUSTIFY)\])\s*)+",
+    flags=re.I,
+)
+
 # Strict signal: only triggers when true KrutiDev-010 codes are attached to Devanagari
 # or unmistakable KrutiDev tokens (`¼...½`, `श्रh`, `जwनियर`, `mपराsDत`, etc.) exist.
 # Ordinary punctuation (`,`, `:`, `/`, `-`, `'`, `"`, `?`) never triggers this.
@@ -51,16 +57,28 @@ def has_krutidev_remnants(text: str) -> bool:
     """Return True if `text` contains hybrid KrutiDev-010 encoding remnants."""
     if not text:
         return False
-    return bool(_HYBRID_SIGNAL_RE.search(str(text)))
+    cleaned = _FORMAT_MARKER_PREFIX_RE.sub("", str(text))
+    return bool(_HYBRID_SIGNAL_RE.search(cleaned))
 
 
 def decode_krutidev_hybrid(text: str, *, force: bool = False) -> str:
     """Convert hybrid KrutiDev-010 + Unicode text into clean Unicode Devanagari."""
     if not text:
         return ""
-    s = str(text)
+    raw_str = str(text)
+    prefix_match = _FORMAT_MARKER_PREFIX_RE.match(raw_str)
+    align_prefix = ""
+    if prefix_match:
+        raw_tag = prefix_match.group(0)
+        m_dir = re.findall(r"(?:<<ALIGN:|\[ALIGN:)(LEFT|CENTER|RIGHT|JUSTIFY)(?:>>|\])", raw_tag, flags=re.I)
+        if m_dir:
+            align_prefix = f"<<ALIGN:{m_dir[-1].upper()}>>"
+        s = raw_str[prefix_match.end():]
+    else:
+        s = raw_str
+
     if not force and not has_krutidev_remnants(s):
-        return normalize_hindi_abbreviations(s)
+        return align_prefix + normalize_hindi_abbreviations(s)
 
     # Protect legitimate standalone ASCII words (3+ letters with no Devanagari in the token)
     protected: dict[str, str] = {}
@@ -265,7 +283,7 @@ def decode_krutidev_hybrid(text: str, *, force: bool = False) -> str:
     for key, val in protected.items():
         s = s.replace(key, val)
 
-    return normalize_hindi_abbreviations(s)
+    return align_prefix + normalize_hindi_abbreviations(s)
 
 
 def sanitize_draft_unicode(draft: Any) -> Any:

@@ -151,10 +151,13 @@ _MONEY_PREFIX_RE = re.compile(
 )
 _UNIT_RE_C = re.compile(rf"(?<![\w.:])([0-9]{{1,9}})(?=\s*(?:{_UNIT_RE})(?!\w))", re.I)
 _KEYWORD_NUM_RE = re.compile(
-    rf"(?P<prefix>(?:{_KEYWORD_RE})\s*[-:]*\s*)(?P<num>[0-9]{{1,9}})(?![0-9:])",
+    rf"(?P<prefix>(?:{_KEYWORD_RE})\s*(?:\*\*\s*)?[-:]*\s*)(?P<num>[0-9]{{1,9}})(?![0-9:])",
     re.I,
 )
-_LEADING_PARTY_ITEM_RE = re.compile(r"^(\s*0*)(\d{1,2})(?=\s*[.)\-:]\s*[\u0900-\u097F])")
+_LEADING_PARTY_ITEM_RE = re.compile(
+    r"^(\s*(?:(?:<<ALIGN:[A-Za-z]+>>|\[ALIGN:[A-Za-z]+\])\s*)*(?:\*\*\s*)?0*)(\d{1,2})(?=\s*[.)\-:]\s*[\u0900-\u097F*])",
+    flags=re.I,
+)
 
 _PARA_CHAIN_RE = re.compile(
     r"(?P<head>(?:पैराग्राफ|पैरा|चरण|मद|प्रतिवादीगण|प्रतिवादी|वादीगण|वादी|विपक्षीगण|विपक्षी|"
@@ -171,7 +174,9 @@ _BARE_WORD_UNIT_RE = re.compile(
 def _already_expanded(text: str, start: int, end: int) -> bool:
     tail = text[end:end + 90]
     head = text[max(0, start - 20):start]
-    return bool(re.match(r"\s*(?:/-)?\s*\([^)]{1,100}\)", tail)) or bool(re.search(r"\([^)]{1,100}\)\s*$", head))
+    return bool(re.match(r"\s*(?:\*\*)?\s*(?:/-)?\s*(?:\*\*)?\s*\([^)]{1,100}\)", tail)) or bool(
+        re.search(r"\([^)]{1,100}\)\s*(?:\*\*)?\s*$", head)
+    )
 
 
 def _is_part_of_comma_number(text: str, start: int, end: int) -> bool:

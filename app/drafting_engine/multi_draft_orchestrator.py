@@ -429,6 +429,15 @@ def parse_structured_legal_document(raw_text: str, document_type: str = "") -> d
                 continue
             if re.match(r"^बनाम\s*[:\-–—]*$", ln) or ln == "बनाम":
                 seen_versus = True
+                if not parties and title_lines and len(title_lines[-1]) <= 95:
+                    parties.append(title_lines.pop())
+                continue
+            if " बनाम " in ln and not re.search(
+                r"(?:प्रार्थना\s*पत्र|आपत्ति\s*पत्र|वाद\s*पत्र|जवाब\s*दावा|शपथ\s*पत्र|नोटिस)",
+                ln,
+            ):
+                parties.append(ln)
+                seen_versus = True
                 continue
             is_role_only = bool(re.match(
                 r"^(?:\.\.\.|…|—|–|-)+\s*(?:प्रार्थी|आवेदक|वादी|प्रतिवादी|आपत्तिकर्त्री|आपत्तिकर्ता|विपक्षी|उत्तरदाता)",
