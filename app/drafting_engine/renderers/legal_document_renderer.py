@@ -5,6 +5,10 @@ structured content, while this module controls paper size, margins, fonts,
 font thickness (both Latin `<w:b/>` and Complex Script `<w:bCs/>`), font sizes
 (both `<w:sz/>` and `<w:szCs/>`), alignment, numbering, spacing, and output files.
 
+Supports inline & full-line bold formatting (`**...**`) and per-line horizontal
+alignment overrides (`<<ALIGN:LEFT>>`, `<<ALIGN:CENTER>>`, `<<ALIGN:RIGHT>>`,
+`<<ALIGN:JUSTIFY>>` or `[ALIGN:...]`) across both DOCX and PDF.
+
 Canonical pipeline
 ------------------
 The DOCX is the single layout source::
@@ -64,6 +68,40 @@ HINDI_WORDS = {
     19: "उन्नीस", 20: "बीस",
 }
 
+_ALIGN_PREFIX_RE = re.compile(
+    r"^(?:\s*(?:<<ALIGN:(LEFT|CENTER|RIGHT|JUSTIFY)>>|\[ALIGN:(LEFT|CENTER|RIGHT|JUSTIFY)\])\s*)+",
+    flags=re.I,
+)
+_SINGLE_ALIGN_TOKEN_RE = re.compile(
+    r"(?:<<ALIGN:(LEFT|CENTER|RIGHT|JUSTIFY)>>|\[ALIGN:(LEFT|CENTER|RIGHT|JUSTIFY)\])",
+    flags=re.I,
+)
+
+
+def parse_line_alignment(text: str) -> tuple[str, str | None]:
+    """Extract leading alignment marker (`<<ALIGN:LEFT>>`, `[ALIGN:CENTER]`, etc.) from `text`.
+    Returns `(clean_text, align_override)` where `align_override` is `'left' | 'center' | 'right' | 'justify' | None`."""
+    s = str(text or "")
+    m = _ALIGN_PREFIX_RE.match(s)
+    if not m:
+        return s, None
+    prefix = m.group(0)
+    tokens = _SINGLE_ALIGN_TOKEN_RE.findall(prefix)
+    align_val: str | None = None
+    for t1, t2 in tokens:
+        chosen = (t1 or t2 or "").strip().lower()
+        if chosen in {"left", "center", "right", "justify"}:
+            align_val = chosen
+    return s[m.end():].strip(), align_val
+
+
+def strip_formatting_markers(text: str, *, keep_bold: bool = False) -> str:
+    """Remove alignment tags and optionally `**` bold markers for plain-text comparisons."""
+    clean, _ = parse_line_alignment(str(text or ""))
+    if not keep_bold:
+        clean = clean.replace("**", "")
+    return clean.strip()
+
 
 def hindi_number(n: int) -> str:
     if n in HINDI_WORDS:
@@ -75,13 +113,29 @@ def hindi_number(n: int) -> str:
 
 
 def numbered(text: str, n: int) -> str:
-    text = str(text).strip()
-    if not text:
+    raw = str(text).strip()
+    if not raw:
         return ""
+    clean_body, align_override = parse_line_alignment(raw)
+    if not clean_body:
+        return ""
+
+    # Check if the entire paragraph body is wrapped in **...**
+    full_bold = (
+        clean_body.startswith("**")
+        and clean_body.endswith("**")
+        and len(clean_body) > 4
+        and "**" not in clean_body[2:-2]
+    )
+    inner = clean_body[2:-2].strip() if full_bold else clean_body
+
     # The model is forbidden from numbering. As a defensive measure, remove
     # one accidental leading numeric/Hindi-letter prefix before rendering.
-    text = re.sub(r"^\s*\d+\s*(?:[-–—]?\s*\([^)]*\))?\s*[:.)-]+\s*", "", text)
-    return f"{n} ({hindi_number(n)}) : {text}"
+    inner = re.sub(r"^\s*\d+\s*(?:[-–—]?\s*\([^)]*\))?\s*[:.)-]+\s*", "", inner)
+    formatted = f"**{n} ({hindi_number(n)}) : {inner}**" if full_bold else f"{n} ({hindi_number(n)}) : {inner}"
+    if align_override:
+        return f"<<ALIGN:{align_override.upper()}>>{formatted}"
+    return formatted
 
 
 def normalize_between_label(value: str) -> str:
@@ -89,10 +143,10 @@ def normalize_between_label(value: str) -> str:
     return "बनाम"
 
 
-_BANAM_CLEAN_RE = re.compile(r"^[\s\-–—:|।]*बनाम[\s\-–—:|।]*$")
-_LEADING_PARTY_NUM_RE = re.compile(r"^\s*0*(\d+)\s*(?:\([^)]+\))?\s*[.)\-:]\s*")
+_BANAM_CLEAN_RE = re.compile(r"^[\s\-–—:|।*]*बनाम[\s\-–—:|।*]*$")
+_LEADING_PARTY_NUM_RE = re.compile(r"^\s*(?:(?:<<ALIGN:[A-Za-z]+>>|\[ALIGN:[A-Za-z]+\])\s*)*(?:\*\*\s*)?0*(\d+)\s*(?:\([^)]+\))?\s*[.)\-:]\s*", flags=re.I)
 _ROLE_SUFFIX_RE = re.compile(
-    r"(\s*(?:[-–—|।]+\s*)?(?:प्रतिवादीगण|प्रतिवादिनीगण|प्रतिवादिनी|प्रतिवादी|विपक्षीगण|विपक्षी|वादीगण|वादिनी|वादी|प्रार्थीगण|प्रार्थिनी|प्रार्थी)\s*)$"
+    r"(\s*(?:[-–—|।]+\s*)?(?:प्रतिवादीगण|प्रतिवादिनीगण|प्रतिवादिनी|प्रतिवादी|विपक्षीगण|विपक्षी|वादीगण|वादिनी|वादी|प्रार्थीगण|प्रार्थिनी|प्रार्थी)\s*(?:\*\*)?\s*)$"
 )
 
 
@@ -162,6 +216,11 @@ def split_party_blocks(parties: list[str]) -> tuple[list[str], list[str], list[s
             if s:
                 flat_lines.append(s)
 
+    # If there is only a single combined "A बनाम B" line (e.g. "<<ALIGN:CENTER>>श्रीमती मंजू लता आदि **बनाम** राजरानी"),
+    # keep it in `other` so it renders as a single line with its exact alignment and inline bolding!
+    if len(flat_lines) == 1 and "बनाम" in flat_lines[0] and not _BANAM_CLEAN_RE.match(strip_formatting_markers(flat_lines[0])):
+        return [], [], flat_lines
+
     plaintiff: list[str] = []
     defendant: list[str] = []
     other: list[str] = []
@@ -170,14 +229,15 @@ def split_party_blocks(parties: list[str]) -> tuple[list[str], list[str], list[s
     pending: list[str] = []
 
     for line in flat_lines:
-        if _BANAM_CLEAN_RE.match(line):
+        clean_for_banam = strip_formatting_markers(line)
+        if _BANAM_CLEAN_RE.match(clean_for_banam):
             if pending and not plaintiff and not seen_banam:
                 plaintiff.extend(pending)
                 pending = []
             seen_banam = True
             continue
 
-        low = line.casefold()
+        low = clean_for_banam.casefold()
         has_def = any(lbl in low for lbl in defendant_labels)
         has_pl = any(lbl in low for lbl in plaintiff_labels)
 
@@ -353,23 +413,17 @@ def _is_devanagari(cp: int) -> bool:
     )
 
 
-def _pdf_inline_font_markup(text: str, primary: str, fallback: str, symbols: str) -> str:
-    """Create HarfBuzz-safe PDF font runs without ever switching fonts inside a word token.
-
-    CRITICAL FOR REPORTLAB + UHARFBUZZ (`shaping=1`):
-    Switching `<font>` tags inside a non-whitespace token (such as `(` in `VakilLatin`
-    followed by `एक` in `VakilDeva` in `(एक)`, or `भसौरा` in `VakilDeva` followed by
-    `,` in `VakilLatin` in `भसौरा,`) causes ReportLab's HarfBuzz shaper to shape the
-    entire non-whitespace cluster with the first font's cmap and draw the second run
-    with those glyph IDs in the second font — producing `.notdef` boxes (`□`) for
-    parenthesized Hindi words and Greek symbols (`·`, `Έ`, `΄`, `ΗΈ`, `Ό`) for punctuation!
-
-    Because `NotoSansDevanagari` natively covers all ASCII digits `0-9` and all ASCII
-    punctuation `( ) , . : ; - / ! ? ' " % + = [ ] { } | ~`, any whitespace-delimited
-    token containing Devanagari is kept 100% in `primary` (`VakilDeva`/`VakilDevaBold`).
-    """
-    primary_cov = _pdf_font_coverage(primary)
-    fallback_cov = _pdf_font_coverage(fallback)
+def _pdf_inline_segment_markup(
+    text: str,
+    seg_primary: str,
+    seg_fallback: str,
+    symbols: str,
+    *,
+    base_primary: str,
+) -> str:
+    """Render a single text segment (either normal or bold) with HarfBuzz token-level font safety."""
+    primary_cov = _pdf_font_coverage(seg_primary)
+    fallback_cov = _pdf_font_coverage(seg_fallback)
     symbol_cov = _pdf_font_coverage(symbols)
 
     s = str(text or "")
@@ -393,7 +447,7 @@ def _pdf_inline_font_markup(text: str, primary: str, fallback: str, symbols: str
         if not buf:
             return
         escaped = _escape_xml("".join(buf))
-        if current_font == primary or current_font is None:
+        if current_font == base_primary or current_font is None:
             out.append(escaped)
         else:
             out.append(f'<font name="{current_font}">{escaped}</font>')
@@ -402,11 +456,11 @@ def _pdf_inline_font_markup(text: str, primary: str, fallback: str, symbols: str
     def choose_token_font(tok: str) -> str:
         has_deva = any(_is_devanagari(ord(c)) for c in tok)
         if has_deva:
-            return primary
+            return seg_primary
 
         has_ascii_alnum = any(c.isascii() and c.isalnum() for c in tok)
         if has_ascii_alnum:
-            return fallback
+            return seg_fallback
 
         needs_fallback = False
         needs_symbol = False
@@ -426,8 +480,8 @@ def _pdf_inline_font_markup(text: str, primary: str, fallback: str, symbols: str
         if needs_symbol and not needs_fallback:
             return symbols
         if needs_fallback or not all_in_primary:
-            return fallback
-        return primary
+            return seg_fallback
+        return seg_primary
 
     for tok in tokens:
         if tok.isspace():
@@ -446,8 +500,7 @@ def _pdf_inline_font_markup(text: str, primary: str, fallback: str, symbols: str
 
         chosen = choose_token_font(clean_tok)
         if current_font is not None and chosen != current_font:
-            # Keep boundary spaces in `primary` (outside `<font name="...">...</font>`)
-            if current_font == primary:
+            if current_font == base_primary:
                 flush()
                 current_font = chosen
             else:
@@ -457,7 +510,7 @@ def _pdf_inline_font_markup(text: str, primary: str, fallback: str, symbols: str
                 flush()
                 current_font = chosen
                 if trailing_ws:
-                    if chosen == primary:
+                    if chosen == base_primary:
                         buf.append(trailing_ws)
                     else:
                         out.append(_escape_xml(trailing_ws))
@@ -465,13 +518,46 @@ def _pdf_inline_font_markup(text: str, primary: str, fallback: str, symbols: str
             current_font = chosen
         buf.append(clean_tok)
 
-    if current_font is not None and current_font != primary and buf and buf[-1].isspace():
+    if current_font is not None and current_font != base_primary and buf and buf[-1].isspace():
         trailing_ws = buf.pop()
         flush()
         out.append(_escape_xml(trailing_ws))
     else:
         flush()
     return "".join(out)
+
+
+def _pdf_inline_font_markup(text: str, primary: str, fallback: str, symbols: str) -> str:
+    """Create HarfBuzz-safe PDF font runs without ever switching fonts inside a word token.
+    Also supports inline `**bold**` spans (`VakilDevaBold` / `VakilLatinBold`) and strips alignment tags."""
+    s, _ = parse_line_alignment(str(text or ""))
+    if not s:
+        return ""
+
+    if "**" not in s:
+        return _pdf_inline_segment_markup(s, primary, fallback, symbols, base_primary=primary)
+
+    registered = pdfmetrics.getRegisteredFontNames()
+    deva_bold = "VakilDevaBold" if "VakilDevaBold" in registered else primary
+    latin_bold = "VakilLatinBold" if "VakilLatinBold" in registered else fallback
+
+    parts = re.split(r"(\*\*[^*]+\*\*)", s)
+    rendered_parts: list[str] = []
+    for part in parts:
+        if not part:
+            continue
+        if part.startswith("**") and part.endswith("**") and len(part) > 4:
+            inner = part[2:-2]
+            rendered_parts.append(
+                _pdf_inline_segment_markup(inner, deva_bold, latin_bold, symbols, base_primary=primary)
+            )
+        else:
+            clean_part = part.replace("**", "")
+            if clean_part:
+                rendered_parts.append(
+                    _pdf_inline_segment_markup(clean_part, primary, fallback, symbols, base_primary=primary)
+                )
+    return "".join(rendered_parts)
 
 
 def _set_run_font(run, name: str, size: float, bold: bool = False):
@@ -604,6 +690,21 @@ def _setup_docx(document: Document, paper: str, start_page: int = 1):
     _add_docx_page_number_footer(document, start_page=start_page)
 
 
+_DOCX_ALIGN_MAP = {
+    "left": WD_ALIGN_PARAGRAPH.LEFT,
+    "center": WD_ALIGN_PARAGRAPH.CENTER,
+    "right": WD_ALIGN_PARAGRAPH.RIGHT,
+    "justify": WD_ALIGN_PARAGRAPH.JUSTIFY,
+}
+
+_PDF_ALIGN_MAP = {
+    "left": TA_LEFT,
+    "center": TA_CENTER,
+    "right": TA_RIGHT,
+    "justify": TA_JUSTIFY,
+}
+
+
 def _add_docx_para(
     document: Document,
     text: str,
@@ -616,6 +717,12 @@ def _add_docx_para(
     left_indent=0,
     after=12,
 ):
+    clean_text, align_override = parse_line_alignment(str(text))
+    if align_override and align_override in _DOCX_ALIGN_MAP:
+        align = _DOCX_ALIGN_MAP[align_override]
+        if align_override in {"left", "center", "right"}:
+            first_indent = False
+
     p = document.add_paragraph()
     p.alignment = align
     pf = p.paragraph_format
@@ -626,38 +733,51 @@ def _add_docx_para(
     if left_indent:
         pf.left_indent = Inches(left_indent)
 
-    text = str(text)
     primary, latin, symbol, coverages = _docx_font_plan()
 
-    runs = []
-    current_font = None
-    buf = []
-    for ch in text:
-        cp = ord(ch)
-        cat = unicodedata.category(ch)
-        if cat in {"Cf", "Mn", "Mc", "Me"}:
-            font_name = current_font or primary
-        elif ch.isspace() and current_font is not None:
-            font_name = current_font
-        elif cp in coverages["primary"]:
-            font_name = primary
-        elif cp in coverages["latin"]:
-            font_name = latin
-        elif cp in coverages["symbol"]:
-            font_name = symbol
-        else:
+    # Split clean_text into normal and **bold** segments
+    segments = re.split(r"(\*\*[^*]+\*\*)", clean_text)
+    for seg in segments:
+        if not seg:
             continue
-        if font_name != current_font and buf:
+        if seg.startswith("**") and seg.endswith("**") and len(seg) > 4:
+            seg_str = seg[2:-2]
+            seg_bold = True
+        else:
+            seg_str = seg.replace("**", "")
+            seg_bold = bold
+        if not seg_str:
+            continue
+
+        runs = []
+        current_font = None
+        buf = []
+        for ch in seg_str:
+            cp = ord(ch)
+            cat = unicodedata.category(ch)
+            if cat in {"Cf", "Mn", "Mc", "Me"}:
+                font_name = current_font or primary
+            elif ch.isspace() and current_font is not None:
+                font_name = current_font
+            elif cp in coverages["primary"]:
+                font_name = primary
+            elif cp in coverages["latin"]:
+                font_name = latin
+            elif cp in coverages["symbol"]:
+                font_name = symbol
+            else:
+                continue
+            if font_name != current_font and buf:
+                runs.append((current_font, "".join(buf)))
+                buf = []
+            current_font = font_name
+            buf.append(ch)
+        if buf:
             runs.append((current_font, "".join(buf)))
-            buf = []
-        current_font = font_name
-        buf.append(ch)
-    if buf:
-        runs.append((current_font, "".join(buf)))
-    for font_name, chunk in runs:
-        run = p.add_run(chunk)
-        _set_run_font(run, font_name, size, bold=bold)
-        run.underline = underline
+        for font_name, chunk in runs:
+            run = p.add_run(chunk)
+            _set_run_font(run, font_name, size, bold=seg_bold)
+            run.underline = underline
     return p
 
 
@@ -729,7 +849,7 @@ def _title_text(draft: dict[str, Any]) -> str:
 
 
 def _prayer_lead_in(draft: dict[str, Any]) -> str:
-    title = _title_text(draft)
+    title = strip_formatting_markers(_title_text(draft))
     if any(k in title for k in ("प्रतिवाद", "जवाब", "लिखित कथन", "Written Statement")):
         return "अतः प्रतिवादी माननीय न्यायालय से प्रार्थना करता है कि:-"
     if any(k in title for k in ("प्रार्थनापत्र", "प्रार्थना पत्र", "आवेदन", "Application")):
@@ -740,20 +860,31 @@ def _prayer_lead_in(draft: dict[str, Any]) -> str:
 def _format_prayer_clause(item: str, idx: int) -> str:
     labels = ["(क)", "(ख)", "(ग)", "(घ)", "(ङ)", "(च)", "(छ)", "(ज)", "(झ)", "(ञ)"]
     label = labels[idx] if idx < len(labels) else f"({idx + 1})"
-    cleaned = re.sub(r"^\s*(?:\([क-ज्ञ0-9a-zA-Z]+\)|[क-ज्ञअ-ह][.)\-:])\s*", "", str(item).strip())
-    return f"{label} {cleaned or item}"
+    clean_body, align_override = parse_line_alignment(str(item).strip())
+    full_bold = (
+        clean_body.startswith("**")
+        and clean_body.endswith("**")
+        and len(clean_body) > 4
+        and "**" not in clean_body[2:-2]
+    )
+    inner = clean_body[2:-2].strip() if full_bold else clean_body
+    cleaned = re.sub(r"^\s*(?:\([क-ज्ञ0-9a-zA-Z]+\)|[क-ज्ञअ-ह][.)\-:])\s*", "", inner)
+    body_out = f"**{label} {cleaned or inner}**" if full_bold else f"{label} {cleaned or inner}"
+    if align_override:
+        return f"<<ALIGN:{align_override.upper()}>>{body_out}"
+    return body_out
 
 
 def _signature_lines(draft: dict[str, Any]) -> list[str]:
     lines = [str(x).strip() for x in draft.get("signature_block", []) or [] if str(x).strip()]
     if lines or _is_single_page_mode(draft):
         return lines
-    if "शपथ" in _title_text(draft):
+    if "शपथ" in strip_formatting_markers(_title_text(draft)):
         return ["हस्ताक्षर शपथग्रहीता / शपथकर्ता"]
     plaintiff = ""
     for party in draft.get("parties", []) or []:
         if "वादी" in str(party):
-            plaintiff = str(party).strip()
+            plaintiff = strip_formatting_markers(str(party), keep_bold=True)
             break
     if plaintiff:
         return [f"वादी\n{plaintiff}", "द्वारा अधिवक्ता"]
@@ -766,12 +897,13 @@ def _prepare_draft(draft: dict[str, Any]) -> dict[str, Any]:
 
 
 def _is_right_role_line(line: str) -> bool:
-    s = line.strip()
+    s = strip_formatting_markers(line)
     return bool(re.match(r"^(?:[.\-–—]+\s*)?(?:प्रतिवादीगण|प्रतिवादिनीगण|प्रतिवादिनी|प्रतिवादी|विपक्षीगण|विपक्षी|वादीगण|वादिनी|वादी|प्रार्थीगण|प्रार्थिनी|प्रार्थी)$", s))
 
 
 def _is_pleading_section_heading(text: str) -> bool:
-    s = re.sub(r"^\s*\d+\s*(?:\([^)]*\))?\s*[:.\-–—]+\s*", "", str(text or "").strip())
+    s = strip_formatting_markers(text)
+    s = re.sub(r"^\s*\d+\s*(?:\([^)]*\))?\s*[:.\-–—]+\s*", "", s)
     return bool(
         re.match(
             r"^(?:अतिरिक्त\s*कथन(?:\s*एवं\s*विशेष\s*वैधानिक\s*आपत्तियाँ|\s*एवं\s*विशेष\s*वैधानिक\s*आपत्तियां|\s*\(\s*उजरात\s*मजीद\s*\))?|"
@@ -825,9 +957,13 @@ def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "le
     opening = str(draft.get("opening_averment", "")).strip()
     if opening:
         _docx_page_break_if_needed(doc, draft, "opening_averment")
+        _, op_sec_align = parse_line_alignment(opening)
         for op_line in opening.splitlines():
             if op_line.strip():
-                _add_docx_para(doc, op_line.strip(), align=WD_ALIGN_PARAGRAPH.LEFT, size=14, first_indent=False, after=6)
+                line_to_render = op_line.strip()
+                if op_sec_align and not parse_line_alignment(line_to_render)[1]:
+                    line_to_render = f"<<ALIGN:{op_sec_align.upper()}>>{line_to_render}"
+                _add_docx_para(doc, line_to_render, align=WD_ALIGN_PARAGRAPH.LEFT, size=14, first_indent=False, after=6)
 
     top_cont = _page_top_continuation(draft)
     if top_cont:
@@ -837,7 +973,10 @@ def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "le
     para_num = _start_paragraph_number(draft) - 1
     for paragraph in _ordered_pleading_items(draft):
         if _is_pleading_section_heading(paragraph):
-            heading_txt = re.sub(r"^\s*\d+\s*(?:\([^)]*\))?\s*[:.\-–—]+\s*", "", paragraph).strip(" :-–—")
+            clean_h, h_align = parse_line_alignment(paragraph)
+            heading_txt = re.sub(r"^\s*\d+\s*(?:\([^)]*\))?\s*[:.\-–—]+\s*", "", clean_h).strip(" :-–—")
+            if h_align:
+                heading_txt = f"<<ALIGN:{h_align.upper()}>>{heading_txt}"
             _add_docx_para(doc, heading_txt, align=WD_ALIGN_PARAGRAPH.CENTER, size=15, bold=True, underline=True, first_indent=False, after=10)
         else:
             para_num += 1
@@ -861,12 +1000,16 @@ def render_docx(draft: dict[str, Any], output_path: str | Path, paper: str = "le
     if verification:
         _docx_page_break_if_needed(doc, draft, "verification")
         _add_docx_para(doc, "सत्यापन", align=WD_ALIGN_PARAGRAPH.CENTER, size=16, bold=True, underline=True, first_indent=False, after=8)
+        _, ver_sec_align = parse_line_alignment(verification)
         ver_lines = [ln.strip() for ln in verification.splitlines() if ln.strip()]
-        if len(ver_lines) > 1 and re.match(r"^[\s\-–—:*_]*सत्यापन[\s\-–—:*_]*$", ver_lines[0]):
+        if len(ver_lines) > 1 and re.match(r"^[\s\-–—:*_]*सत्यापन[\s\-–—:*_]*$", strip_formatting_markers(ver_lines[0])):
             ver_lines = ver_lines[1:]
         for line in ver_lines:
-            _add_docx_para(doc, line, align=WD_ALIGN_PARAGRAPH.JUSTIFY, size=14, first_indent=True, after=10)
-        if "शपथ" in _title_text(draft) and signatures:
+            line_to_render = line
+            if ver_sec_align and not parse_line_alignment(line_to_render)[1]:
+                line_to_render = f"<<ALIGN:{ver_sec_align.upper()}>>{line_to_render}"
+            _add_docx_para(doc, line_to_render, align=WD_ALIGN_PARAGRAPH.JUSTIFY, size=14, first_indent=True, after=10)
+        if "शपथ" in strip_formatting_markers(_title_text(draft)) and signatures:
             for line in signatures:
                 _add_docx_para(doc, line, align=WD_ALIGN_PARAGRAPH.RIGHT, size=14, first_indent=False, after=4)
 
@@ -880,6 +1023,19 @@ def _escape_xml(text: str) -> str:
         .replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
+    )
+
+
+def _pdf_style_with_align(base_style: ParagraphStyle, align_override: str | None, name_suffix: str) -> ParagraphStyle:
+    if not align_override or align_override not in _PDF_ALIGN_MAP:
+        return base_style
+    target_align = _PDF_ALIGN_MAP[align_override]
+    first_indent = 0 if align_override in {"left", "center", "right"} else base_style.firstLineIndent
+    return ParagraphStyle(
+        f"{base_style.name}_{name_suffix}_{align_override}",
+        parent=base_style,
+        alignment=target_align,
+        firstLineIndent=first_indent,
     )
 
 
@@ -901,65 +1057,86 @@ def _pdf_story(draft: dict[str, Any], font: str, bold_font: str, latin_font: str
     if _layout_break(draft, "page_break_before", "court_heading"):
         story.append(PageBreak())
     if court:
-        story.append(Paragraph(_pdf_inline_font_markup(court, bold_font, latin_bold, symbol_font), center16))
+        _, c_align = parse_line_alignment(court)
+        story.append(Paragraph(_pdf_inline_font_markup(court, bold_font, latin_bold, symbol_font), _pdf_style_with_align(center16, c_align, "court")))
     if case:
         if _layout_break(draft, "page_break_before", "case_heading"):
             story.append(PageBreak())
-        story.append(Paragraph(_pdf_inline_font_markup(case, bold_font, latin_bold, symbol_font), ParagraphStyle("Case", parent=center16, fontSize=14, leading=20, spaceAfter=10)))
+        _, cs_align = parse_line_alignment(case)
+        case_style = ParagraphStyle("Case", parent=center16, fontSize=14, leading=20, spaceAfter=10)
+        story.append(Paragraph(_pdf_inline_font_markup(case, bold_font, latin_bold, symbol_font), _pdf_style_with_align(case_style, cs_align, "case")))
 
     if _layout_break(draft, "page_break_before", "parties"):
         story.append(PageBreak())
     right_bold = ParagraphStyle("VakilRightBold", parent=right, fontName=bold_font)
     plaintiff, defendant, other = split_party_blocks(parties)
     if plaintiff and defendant:
-        for party in plaintiff:
+        for i, party in enumerate(plaintiff):
             is_role = _is_right_role_line(party)
-            story.append(Paragraph(_pdf_inline_font_markup(party, bold_font if is_role else font, latin_bold if is_role else latin_font, symbol_font), right_bold if is_role else left))
+            _, p_align = parse_line_alignment(party)
+            base_st = right_bold if is_role else left
+            story.append(Paragraph(_pdf_inline_font_markup(party, bold_font if is_role else font, latin_bold if is_role else latin_font, symbol_font), _pdf_style_with_align(base_st, p_align, f"pl{i}")))
         story.append(Paragraph(_pdf_inline_font_markup("बनाम", bold_font, latin_bold, symbol_font), center))
-        for party in defendant:
+        for i, party in enumerate(defendant):
             is_role = _is_right_role_line(party)
-            story.append(Paragraph(_pdf_inline_font_markup(party, bold_font if is_role else font, latin_bold if is_role else latin_font, symbol_font), right_bold if is_role else left))
-        for party in other:
+            _, p_align = parse_line_alignment(party)
+            base_st = right_bold if is_role else left
+            story.append(Paragraph(_pdf_inline_font_markup(party, bold_font if is_role else font, latin_bold if is_role else latin_font, symbol_font), _pdf_style_with_align(base_st, p_align, f"df{i}")))
+        for i, party in enumerate(other):
             is_role = _is_right_role_line(party)
-            story.append(Paragraph(_pdf_inline_font_markup(party, bold_font if is_role else font, latin_bold if is_role else latin_font, symbol_font), right_bold if is_role else left))
+            _, p_align = parse_line_alignment(party)
+            base_st = right_bold if is_role else left
+            story.append(Paragraph(_pdf_inline_font_markup(party, bold_font if is_role else font, latin_bold if is_role else latin_font, symbol_font), _pdf_style_with_align(base_st, p_align, f"ot{i}")))
     else:
-        for party in (plaintiff + defendant + other) or parties:
+        for i, party in enumerate((plaintiff + defendant + other) or parties):
             is_role = _is_right_role_line(party)
-            story.append(Paragraph(_pdf_inline_font_markup(party, bold_font if is_role else font, latin_bold if is_role else latin_font, symbol_font), right_bold if is_role else left))
+            _, p_align = parse_line_alignment(party)
+            base_st = right_bold if is_role else left
+            story.append(Paragraph(_pdf_inline_font_markup(party, bold_font if is_role else font, latin_bold if is_role else latin_font, symbol_font), _pdf_style_with_align(base_st, p_align, f"pt{i}")))
 
     title_str = _title_text(draft)
     if title_str:
         if _layout_break(draft, "page_break_before", "title"):
             story.append(PageBreak())
-        story.append(Paragraph(_pdf_inline_font_markup(title_str, bold_font, latin_bold, symbol_font), ParagraphStyle("Title", parent=center16, underline=True, spaceBefore=4, spaceAfter=10)))
+        _, t_align = parse_line_alignment(title_str)
+        t_style = ParagraphStyle("Title", parent=center16, underline=True, spaceBefore=4, spaceAfter=10)
+        story.append(Paragraph(_pdf_inline_font_markup(title_str, bold_font, latin_bold, symbol_font), _pdf_style_with_align(t_style, t_align, "title")))
 
     opening = str(draft.get("opening_averment", "")).strip()
     if opening:
         if _layout_break(draft, "page_break_before", "opening_averment"):
             story.append(PageBreak())
-        for op_line in opening.splitlines():
+        _, op_sec_align = parse_line_alignment(opening)
+        for i, op_line in enumerate(opening.splitlines()):
             if op_line.strip():
-                story.append(Paragraph(_pdf_inline_font_markup(op_line.strip(), font, latin_font, symbol_font), left))
+                _, ln_align = parse_line_alignment(op_line.strip())
+                eff_align = ln_align or op_sec_align
+                story.append(Paragraph(_pdf_inline_font_markup(op_line.strip(), font, latin_font, symbol_font), _pdf_style_with_align(left, eff_align, f"op{i}")))
 
     top_cont = _page_top_continuation(draft)
     if top_cont:
-        story.append(Paragraph(_pdf_inline_font_markup(top_cont, font, latin_font, symbol_font), noindent))
+        _, tc_align = parse_line_alignment(top_cont)
+        story.append(Paragraph(_pdf_inline_font_markup(top_cont, font, latin_font, symbol_font), _pdf_style_with_align(noindent, tc_align, "topc")))
 
     if _layout_break(draft, "page_break_before", "pleadings"):
         story.append(PageBreak())
     para_num = _start_paragraph_number(draft) - 1
-    for paragraph in _ordered_pleading_items(draft):
+    for i, paragraph in enumerate(_ordered_pleading_items(draft)):
         if _is_pleading_section_heading(paragraph):
-            heading_txt = re.sub(r"^\s*\d+\s*(?:\([^)]*\))?\s*[:.\-–—]+\s*", "", paragraph).strip(" :-–—")
+            clean_h, h_align = parse_line_alignment(paragraph)
+            heading_txt = re.sub(r"^\s*\d+\s*(?:\([^)]*\))?\s*[:.\-–—]+\s*", "", clean_h).strip(" :-–—")
+            sub_st = ParagraphStyle("PleadingSubHeading", parent=center16, fontSize=15, leading=21, underline=True, spaceBefore=6, spaceAfter=10)
             story.append(
                 Paragraph(
                     _pdf_inline_font_markup(heading_txt, bold_font, latin_bold, symbol_font),
-                    ParagraphStyle("PleadingSubHeading", parent=center16, fontSize=15, leading=21, underline=True, spaceBefore=6, spaceAfter=10),
+                    _pdf_style_with_align(sub_st, h_align, f"subh{i}"),
                 )
             )
         else:
             para_num += 1
-            story.append(Paragraph(_pdf_inline_font_markup(numbered(paragraph, para_num), font, latin_font, symbol_font), body))
+            num_para = numbered(paragraph, para_num)
+            _, p_align = parse_line_alignment(num_para)
+            story.append(Paragraph(_pdf_inline_font_markup(num_para, font, latin_font, symbol_font), _pdf_style_with_align(body, p_align, f"para{para_num}")))
 
     prayer = [str(x).strip() for x in draft.get("prayer", []) or [] if str(x).strip()]
     if prayer:
@@ -968,26 +1145,34 @@ def _pdf_story(draft: dict[str, Any], font: str, bold_font: str, latin_font: str
         story.append(Paragraph("प्रार्थना", ParagraphStyle("PrayerTitle", parent=center16, underline=True, spaceBefore=2, spaceAfter=8)))
         story.append(Paragraph(_pdf_inline_font_markup(_prayer_lead_in(draft), font, latin_font, symbol_font), noindent))
         for idx, item in enumerate(prayer):
-            story.append(Paragraph(_pdf_inline_font_markup(_format_prayer_clause(item, idx), font, latin_font, symbol_font), ParagraphStyle(f"Prayer{idx}", parent=body, firstLineIndent=0, spaceAfter=10)))
+            fmt_clause = _format_prayer_clause(item, idx)
+            _, pr_align = parse_line_alignment(fmt_clause)
+            pr_base = ParagraphStyle(f"Prayer{idx}", parent=body, firstLineIndent=0, spaceAfter=10)
+            story.append(Paragraph(_pdf_inline_font_markup(fmt_clause, font, latin_font, symbol_font), _pdf_style_with_align(pr_base, pr_align, f"pr{idx}")))
 
     if _layout_break(draft, "page_break_before", "signature_block"):
         story.append(PageBreak())
-    for line in _signature_lines(draft):
-        story.append(Paragraph(_pdf_inline_font_markup(line, font, latin_font, symbol_font), right))
+    for i, line in enumerate(_signature_lines(draft)):
+        _, s_align = parse_line_alignment(line)
+        story.append(Paragraph(_pdf_inline_font_markup(line, font, latin_font, symbol_font), _pdf_style_with_align(right, s_align, f"sig{i}")))
 
     verification = str(draft.get("verification", "") or "").strip()
     if verification:
         if _layout_break(draft, "page_break_before", "verification"):
             story.append(PageBreak())
         story.append(Paragraph("सत्यापन", ParagraphStyle("VerificationTitle", parent=center16, underline=True, spaceBefore=8, spaceAfter=8)))
+        _, ver_sec_align = parse_line_alignment(verification)
         ver_lines = [ln.strip() for ln in verification.splitlines() if ln.strip()]
-        if len(ver_lines) > 1 and re.match(r"^[\s\-–—:*_]*सत्यापन[\s\-–—:*_]*$", ver_lines[0]):
+        if len(ver_lines) > 1 and re.match(r"^[\s\-–—:*_]*सत्यापन[\s\-–—:*_]*$", strip_formatting_markers(ver_lines[0])):
             ver_lines = ver_lines[1:]
-        for line in ver_lines:
-            story.append(Paragraph(_pdf_inline_font_markup(line, font, latin_font, symbol_font), body))
-        if "शपथ" in _title_text(draft):
-            for line in _signature_lines(draft):
-                story.append(Paragraph(_pdf_inline_font_markup(line, font, latin_font, symbol_font), right))
+        for i, line in enumerate(ver_lines):
+            _, ln_align = parse_line_alignment(line)
+            eff_align = ln_align or ver_sec_align
+            story.append(Paragraph(_pdf_inline_font_markup(line, font, latin_font, symbol_font), _pdf_style_with_align(body, eff_align, f"ver{i}")))
+        if "शपथ" in strip_formatting_markers(_title_text(draft)):
+            for i, line in enumerate(_signature_lines(draft)):
+                _, s_align = parse_line_alignment(line)
+                story.append(Paragraph(_pdf_inline_font_markup(line, font, latin_font, symbol_font), _pdf_style_with_align(right, s_align, f"versig{i}")))
     return story
 
 
